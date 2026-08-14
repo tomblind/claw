@@ -370,7 +370,6 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		if (!e.routable) continue
 		const fromAnchor = anchors.get(`${e.id}:from`)
 		const toAnchor = anchors.get(`${e.id}:to`)
-		if (!fromAnchor && !toAnchor && e.mid == null && !e.chainPts) continue
 		if (e.chainPts?.length) {
 			ops.push({
 				chain: {
@@ -383,9 +382,13 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 			routed++
 			continue
 		}
-		// clear any waypoint chain a previous layout may have left on this arrow,
-		// then apply the plain-elbow route
-		if (!e.packRouted) ops.push({ chain: { id: e.id, points: [] } })
+		// EVERY non-chained routable edge gets an unchain first — an edge that
+		// was chained by a previous layout may be classified differently this
+		// run (packed, same-column, unrouted) and would otherwise keep a stale
+		// chain frozen at its old geometry. No-op for plain arrows, and it
+		// restores real bindings so a following route op works.
+		ops.push({ chain: { id: e.id, points: [] } })
+		if (!fromAnchor && !toAnchor && e.mid == null) continue
 		ops.push({
 			route: {
 				id: e.id,

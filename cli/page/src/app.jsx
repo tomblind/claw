@@ -336,11 +336,13 @@ function unchainArrow(editor, head) {
 		editor.deleteShapes(members.map((s) => s.id))
 	}
 	const freshHead = editor.getShape(head.id)
+	// meta must stay JSON-serializable: OMIT the chain keys (undefined is rejected)
+	const { claw: _c, from: _f, to: _t, ...cleanMeta } = freshHead.meta ?? {}
 	editor.updateShape({
 		id: head.id,
 		type: 'arrow',
 		props: { arrowheadEnd: 'arrow' },
-		meta: { ...freshHead.meta, claw: undefined, from: undefined, to: undefined },
+		meta: cleanMeta,
 	})
 	// restore real bindings so the plain arrow follows its screens again
 	for (const [terminal, toId] of [
@@ -668,7 +670,35 @@ async function applyOps(editor, ops) {
 						const bb = boundsOfShape(sid)
 						return { x: bb.x + (a?.x ?? 0.5) * bb.w, y: bb.y + (a?.y ?? 0.5) * bb.h }
 					}
-					const path = [pt(fromId, args.fromAnchor), ...pts, pt(toId, args.toAnchor)]
+					const rawPath = [pt(fromId, args.fromAnchor), ...pts, pt(toId, args.toAnchor)]
+					// Orthogonalize: anchor points rarely coincide exactly with ELK's
+					// route endpoints (child-bound endpoints, hub footprints), which
+					// would make bridge segments diagonal. Insert an elbow at every
+					// diagonal hop — side anchors exit/enter horizontally, top/bottom
+					// anchors vertically — then merge collinear runs.
+					const sideways = (a) => a == null || a.x === 0 || a.x === 1
+					const bent = []
+					for (let i = 0; i < rawPath.length; i++) {
+						const b = rawPath[i]
+						const a = bent[bent.length - 1]
+						if (a && Math.abs(a.x - b.x) > 1 && Math.abs(a.y - b.y) > 1) {
+							const horizontalFirst =
+								i === 1 ? sideways(args.fromAnchor) : i === rawPath.length - 1 ? !sideways(args.toAnchor) : true
+							bent.push(horizontalFirst ? { x: b.x, y: a.y } : { x: a.x, y: b.y })
+						}
+						bent.push(b)
+					}
+					const path = [bent[0]]
+					for (let i = 1; i < bent.length - 1; i++) {
+						const a = path[path.length - 1]
+						const b = bent[i]
+						const c = bent[i + 1]
+						const collinear =
+							(Math.abs(a.x - b.x) < 1 && Math.abs(b.x - c.x) < 1) ||
+							(Math.abs(a.y - b.y) < 1 && Math.abs(b.y - c.y) < 1)
+						if (!collinear) path.push(b)
+					}
+					path.push(bent[bent.length - 1])
 					// unbind: the chain is a free-standing group; recorded-transition
 					// semantics live in meta on the head (projection reads it there)
 					for (const b of [b0.start, b0.end]) {
