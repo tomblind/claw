@@ -821,6 +821,82 @@ async function applyOps(editor, ops) {
 					break
 				}
 
+				case 'center': {
+					const target = ref(args.id)
+					const on = ref(args.on)
+					const tb = pageBoundsOf(target)
+					const ob = pageBoundsOf(on)
+					const axis = args.axis ?? 'both'
+					const dx = axis !== 'y' ? ob.x + ob.w / 2 - (tb.x + tb.w / 2) : 0
+					const dy = axis !== 'x' ? ob.y + ob.h / 2 - (tb.y + tb.h / 2) : 0
+					editor.updateShape({ id: target.id, type: target.type, x: target.x + dx, y: target.y + dy })
+					touched.updated.push(target.id)
+					report.push(`center ${short(target.id)} on ${short(on.id)} (moved ${Math.round(dx)},${Math.round(dy)})`)
+					break
+				}
+
+				case 'align': {
+					const shapes = (args.ids ?? []).map(ref)
+					if (shapes.length < (args.to != null ? 1 : 2)) {
+						throw new Error('align needs 2+ ids, or 1+ ids with `to`')
+					}
+					const edge = args.edge ?? 'left'
+					const posOf = (b) => {
+						const table = {
+							left: b.x,
+							right: b.x + b.w,
+							top: b.y,
+							bottom: b.y + b.h,
+							centerX: b.x + b.w / 2,
+							centerY: b.y + b.h / 2,
+						}
+						if (!(edge in table)) throw new Error(`unknown edge "${edge}" (left|right|top|bottom|centerX|centerY)`)
+						return table[edge]
+					}
+					const anchor = posOf(pageBoundsOf(args.to != null ? ref(args.to) : shapes[0]))
+					const horizontal = edge === 'left' || edge === 'right' || edge === 'centerX'
+					for (const s of shapes) {
+						const d = anchor - posOf(pageBoundsOf(s))
+						if (Math.abs(d) < 0.5) continue
+						editor.updateShape({
+							id: s.id,
+							type: s.type,
+							x: s.x + (horizontal ? d : 0),
+							y: s.y + (horizontal ? 0 : d),
+						})
+						touched.updated.push(s.id)
+					}
+					report.push(`align ${shapes.length} shape(s) ${edge}${args.to != null ? ` to ${short(ref(args.to).id)}` : ''}`)
+					break
+				}
+
+				case 'distribute': {
+					const shapes = (args.ids ?? []).map(ref)
+					if (shapes.length < 2) throw new Error('distribute needs 2+ ids')
+					const axis = args.axis ?? 'y'
+					const gap = args.gap ?? 12
+					const sorted = shapes
+						.map((s) => ({ s, b: pageBoundsOf(s) }))
+						.sort((a, b) => (axis === 'y' ? a.b.y - b.b.y : a.b.x - b.b.x))
+					let cursor = axis === 'y' ? sorted[0].b.y + sorted[0].b.h : sorted[0].b.x + sorted[0].b.w
+					for (let i = 1; i < sorted.length; i++) {
+						const { s, b } = sorted[i]
+						const d = cursor + gap - (axis === 'y' ? b.y : b.x)
+						if (Math.abs(d) >= 0.5) {
+							editor.updateShape({
+								id: s.id,
+								type: s.type,
+								x: s.x + (axis === 'x' ? d : 0),
+								y: s.y + (axis === 'y' ? d : 0),
+							})
+							touched.updated.push(s.id)
+						}
+						cursor = axis === 'y' ? b.y + d + b.h : b.x + d + b.w
+					}
+					report.push(`distribute ${shapes.length} shape(s) along ${axis}, gap ${gap}`)
+					break
+				}
+
 				case 'delete': {
 					// Idempotent: a target that no longer resolves is a success, not an
 					// error. Deleting a group's children dissolves the group itself, so

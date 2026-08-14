@@ -20,6 +20,9 @@ const OPS = {
 		optional: ['font', 'size', 'color', 'fill', 'dash', 'align', 'verticalAlign', 'geo', 'opacity', 'labelColor', 'kind', 'bend'],
 	},
 	move: { required: ['id'], optional: ['to', 'by'] },
+	center: { required: ['id', 'on'], optional: ['axis'] },
+	align: { required: ['ids', 'edge'], optional: ['to'] },
+	distribute: { required: ['ids'], optional: ['axis', 'gap'] },
 	resize: { required: ['id'], optional: ['w', 'h'] },
 	connect: { required: ['from', 'to'], optional: ['label', 'color', 'kind'] },
 	route: { required: ['id'], optional: ['fromAnchor', 'toAnchor', 'mid', 'kind', 'labelAt'] },
@@ -160,6 +163,15 @@ label text, or the "name" given to an earlier op in the same batch.
       {"style": {"id": "...", "kind": "arc", "bend": 220}} so it bows around
       them. Connected arrows always render above screens (kept automatically).
   {"move": {"id": "...", "by": {"dx": 0, "dy": 40}}}          or "to": {"x":N,"y":N}
+  {"center": {"id": "<label>", "on": "<box>", "axis": "both|x|y"}}
+  {"align": {"ids": [...], "edge": "left|right|top|bottom|centerX|centerY", "to": "<ref>"}}
+  {"distribute": {"ids": [...], "axis": "x|y", "gap": 8}}
+      Alignment uses REAL rendered bounds (the editor's own glyph metrics) -
+      never hand-estimate text sizes or center by arithmetic. Fixed-size
+      labeled chip recipe: boxes with their own text enforce a minimum text
+      height (tldraw behavior, by design), so create the box WITHOUT text,
+      add a label, then center it on the box - pixel-perfect, stays put.
+      distribute stacks in current order from the first shape, real heights.
   {"resize": {"id": "...", "w": 240, "h": 64}}
   {"connect": {"from": "BonusRound", "to": "Title", "label": "done"}}   (bound both ends)
       Bind "from" to the TRIGGERING ELEMENT when you know it (the button/row
