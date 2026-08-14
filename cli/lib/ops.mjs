@@ -162,6 +162,12 @@ label text, or the "name" given to an earlier op in the same batch.
   {"move": {"id": "...", "by": {"dx": 0, "dy": 40}}}          or "to": {"x":N,"y":N}
   {"resize": {"id": "...", "w": 240, "h": 64}}
   {"connect": {"from": "BonusRound", "to": "Title", "label": "done"}}   (bound both ends)
+      Bind "from" to the TRIGGERING ELEMENT when you know it (the button/row
+      that causes the transition), not the whole screen - the arrow starts at
+      that control, and flows reports which control drives which route.
+      \`claw layout\` handles where/how the arrow exits; never place anchors
+      by hand. Screen-to-screen is fine when the trigger is diffuse (timers,
+      auto-advance, whole-card taps).
       Arrows are created SOLID (not sketchy draw-style) for crisp diagrams;
       use the style op if a hand-drawn look is wanted.
       Frame-to-frame connects default to ELBOW arrows (orthogonal routing -

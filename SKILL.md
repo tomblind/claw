@@ -156,6 +156,7 @@ Rules:
 
 - **Render after writing** and look at the result — placement is spatial and the report can't confirm it looks right.
 - `add_screen` creates real named frames — canvases you author are *more* structured than hand-drawn ones (no inference needed on them).
+- **`connect` from the triggering control, not the screen**, whenever you know which button/row causes a transition — that's semantic information only you have at authoring time, and `flows` carries it through to whoever syncs the code. Layout decides all arrow geometry; endpoints are your only routing decision.
 - **Look before you write** if the user may have edited recently — `outline` (or a diff against the accepted copy, if the project keeps one) shows what changed; warn rather than write over fresh edits.
 - In sync-workflow projects, refresh the accepted copy after acting (see *Syncing a canvas to code*).
 
