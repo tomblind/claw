@@ -1,0 +1,14 @@
+{
+  "name": "claw",
+  "private": true,
+  "type": "module",
+  "description": "Claw (Claude + draw) - human+AI co-op canvas tool built on tldraw",
+  "scripts": {
+    "setup": "cd cli && npm install && npm link",
+    "build": "npm run build:page && npm run build:app",
+    "build:page": "node cli/page/build.mjs",
+    "build:app": "cd app && npx --yes @neutralinojs/neu update && npx --yes @neutralinojs/neu build --release",
+    "deploy": "node scripts/deploy.mjs",
+    "e2e": "cd cli && node sync-e2e.mjs"
+  }
+}

@@ -18,8 +18,9 @@ a browser, or a phone — all views synced in real time.
 ## Setup (per machine)
 
 ```
-cd cli && npm install && npm link     # deps + `claw` on PATH
-cd ../app && npx @neutralinojs/neu update && npx @neutralinojs/neu build --release   # desktop app
+npm run setup      # cli deps + `claw` on PATH
+npm run build      # editor page bundle + desktop app binaries
+npm run deploy     # install to the live skill location
 ```
 
 Node.js >= 18 required. The app launches automatically on the first `claw`
@@ -29,16 +30,17 @@ command; closing its window stops everything. `claw --help` for commands.
 
 This repo is the source of truth. The live skill that Claude Code discovers
 (and that the `claw` command runs) is an installed COPY at
-`~\.claude\skills\claw`. After making changes here:
+`~/.claude/skills/claw`. After making changes here:
 
 ```
-.\deploy.ps1        # incremental mirror to the live skill location
+npm run deploy         # incremental mirror to the live skill location
 ```
 
-Rebuild first when applicable (`node cli/page/build.mjs` for editor/executor
-changes; `neu build --release` in `app/` for shell changes), then deploy. If
-the deployed core version changed, quit and relaunch the Claw app window.
-Never edit the deployed copy directly — it gets overwritten on every deploy.
+Rebuild first when applicable (`npm run build:page` for editor/executor
+changes; `npm run build:app` for shell changes), then deploy. If the deployed
+core version changed, quit and relaunch the Claw app window. `npm run e2e`
+runs the end-to-end suite. Never edit the deployed copy directly — it gets
+overwritten on every deploy.
 
 ## Architecture in one paragraph
 
