@@ -1,0 +1,13 @@
+# dependencies
+node_modules/
+
+# built app binaries (rebuild: npx @neutralinojs/neu build --release in app/)
+app/dist/
+app/.tmp/
+
+# runtime state
+cli/.claw-daemon.json
+cli/.tldr-browser.json
+*.log
+
+# note: cli/page/dist IS committed - the skill ships the prebuilt editor page

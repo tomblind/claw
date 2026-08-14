@@ -1,0 +1,1276 @@
+/**
+ * Headless host page: the real tldraw editor wrapped in a small `window.host`
+ * API that the CLI drives via page.evaluate(). Nothing here reimplements
+ * tldraw — parsing, migration, rendering, and serialization are all the
+ * editor's own code paths.
+ */
+import React from 'react'
+import { createRoot } from 'react-dom/client'
+import * as TL from 'tldraw'
+import { useSync } from '@tldraw/sync'
+import 'tldraw/tldraw.css'
+
+const { Tldraw } = TL
+
+/**
+ * Three modes, one bundle:
+ *  - standalone: the host page (file://, no params) - load/serialize a
+ *    document per request via window.host. Used by the test harness.
+ *  - executor: standalone + a WebSocket RPC client. The app's hidden frame
+ *    loads /executor-page?executor=1 and services the core's document calls
+ *    (load/project/render/applyOps/serialize) — the system's only "headless"
+ *    editor, running visibly inside the app process.
+ *  - sync: a live multiplayer peer. Entered when the URL is /f/<roomId>
+ *    (humans, served by the core) or has ?room=<id> (the test harness).
+ *    The room owns persistence in this mode.
+ */
+const EXECUTOR = new URLSearchParams(location.search).get('executor') != null
+
+function syncParams() {
+	if (EXECUTOR) return null
+	const params = new URLSearchParams(location.search)
+	let room = params.get('room')
+	if (!room && location.pathname.startsWith('/f/')) {
+		room = location.pathname.slice(3).split('/')[0]
+	}
+	if (!room) return null
+	const wsBase = location.protocol.startsWith('http')
+		? `ws://${location.host}`
+		: `ws://127.0.0.1:${params.get('host')}`
+	return {
+		uri: `${wsBase}/connect/${room}`,
+		name: params.get('name') ?? 'Designer',
+		color: params.get('color') ?? '#4465e9',
+	}
+}
+
+// assets pasted/dropped by users are inlined as data URLs (single-machine
+// tool; keeps the server asset-storage-free)
+const inlineAssets = {
+	upload: async (_asset, file) => {
+		const src = await new Promise((resolve, reject) => {
+			const reader = new FileReader()
+			reader.onload = () => resolve(reader.result)
+			reader.onerror = () => reject(reader.error)
+			reader.readAsDataURL(file)
+		})
+		return { src }
+	},
+	resolve: (asset) => asset.props.src,
+}
+
+function reportError(stage, err) {
+	window.hostError = `${stage}: ${err?.message ?? err}`
+}
+
+/** PNG export via whichever API this tldraw version ships. */
+async function toPngBlob(editor, ids, opts) {
+	if (typeof editor.toImage === 'function') {
+		const result = await editor.toImage(ids, { format: 'png', ...opts })
+		return result?.blob ?? result
+	}
+	if (typeof TL.exportToBlob === 'function') {
+		return await TL.exportToBlob({ editor, ids, format: 'png', opts })
+	}
+	throw new Error('no PNG export API found on this tldraw version')
+}
+
+function blobToBase64(blob) {
+	return new Promise((resolve, reject) => {
+		const reader = new FileReader()
+		reader.onload = () => resolve(String(reader.result).split(',', 2)[1])
+		reader.onerror = () => reject(reader.error)
+		reader.readAsDataURL(blob)
+	})
+}
+
+/** Find a shape by full id, short id (prefix), or frame-name / label text. */
+function resolveShape(editor, query) {
+	const q = String(query)
+	const shapes = editor.getCurrentPageShapes()
+	const byId = shapes.find((s) => s.id === q || s.id === `shape:${q}`)
+	if (byId) return byId
+	const lower = q.toLowerCase()
+	const byName = shapes.filter((s) => (s.props?.name ?? '').toLowerCase() === lower)
+	if (byName.length === 1) return byName[0]
+	const byPrefix = shapes.filter((s) => s.id.slice(6).startsWith(q))
+	if (byPrefix.length === 1) return byPrefix[0]
+	throw new Error(`no unique shape matching "${q}"`)
+}
+
+function setupHost(editor) {
+	const inSyncRoom = syncParams() != null
+	window.host = {
+		/** Parse + migrate a .tldr file with tldraw's own loader, then load it. */
+		async load(json) {
+			if (inSyncRoom) {
+				throw new Error('load() is standalone-only: a sync room owns its document')
+			}
+			const parsed = TL.parseTldrawJsonFile({ schema: editor.store.schema, json })
+			if (!parsed.ok) {
+				throw new Error(`tldraw could not parse the file: ${JSON.stringify(parsed.error)}`)
+			}
+			TL.loadSnapshot(editor.store, TL.getSnapshot(parsed.value))
+			const shapes = editor.getCurrentPageShapes()
+			return { pages: editor.getPages().length, shapes: shapes.length }
+		},
+
+		/**
+		 * Render to PNG (base64). No `frame` renders the whole page. With `frame`,
+		 * exports the target plus every shape whose page bounds intersect it —
+		 * covering both real frames and screens drawn as plain rectangles.
+		 */
+		async render({ frame = null, scale = null, maxWidth = 2000, padding = 32 } = {}) {
+			let ids
+			if (frame) {
+				const target = resolveShape(editor, frame)
+				const tb = editor.getShapePageBounds(target.id)
+				// Content: anything overlapping the target. Arrows are stricter — a
+				// cross-canvas connector "intersects" the screen it starts at, and one
+				// such arrow expands the export bounds to the whole canvas. Include an
+				// arrow only if it lies (almost) entirely within the screen region.
+				const inflated = { x: tb.x - 64, y: tb.y - 64, w: tb.w + 128, h: tb.h + 128 }
+				ids = editor
+					.getCurrentPageShapes()
+					.filter((s) => {
+						const b = editor.getShapePageBounds(s.id)
+						if (!boundsIntersect(tb, b)) return false
+						if (s.type !== 'arrow') return true
+						return boundsContains(inflated, b)
+					})
+					.map((s) => s.id)
+				if (!ids.includes(target.id)) ids.push(target.id)
+			} else {
+				ids = editor.getCurrentPageShapes().map((s) => s.id)
+			}
+			if (!ids.length) throw new Error('nothing to render — document has no shapes')
+
+			// Explicit --scale wins; otherwise fit within maxWidth so a big canvas
+			// doesn't produce a needlessly huge PNG (context cost is area-based).
+			// tldraw exports at 2x pixel ratio, hence the divisor.
+			const EXPORT_PIXEL_RATIO = 2
+			let effectiveScale = scale
+			if (!effectiveScale) {
+				let minX = Infinity
+				let maxX = -Infinity
+				for (const id of ids) {
+					const b = editor.getShapePageBounds(id)
+					if (!b) continue
+					minX = Math.min(minX, b.x)
+					maxX = Math.max(maxX, b.x + b.w)
+				}
+				const width = Number.isFinite(minX) ? maxX - minX + padding * 2 : maxWidth
+				effectiveScale = Math.min(1, maxWidth / (Math.max(width, 1) * EXPORT_PIXEL_RATIO))
+			}
+
+			const blob = await toPngBlob(editor, ids, {
+				background: true,
+				padding,
+				scale: effectiveScale,
+			})
+			return await blobToBase64(blob)
+		},
+
+		/** Serialize the current document back to .tldr text (tldraw's own writer). */
+		async serialize() {
+			return await TL.serializeTldrawJson(editor)
+		},
+
+		/**
+		 * One structured projection of the whole document, computed from real
+		 * editor state: page bounds via getShapePageBounds, arrow bindings via
+		 * the binding records tldraw itself migrated, plus the two inferences
+		 * the editor can't make (rectangles-as-screens, unsnapped arrows).
+		 */
+		async project() {
+			return projectDocument(editor)
+		},
+
+		/**
+		 * Apply a batch of ops through real editor APIs. Everything an op
+		 * doesn't mention is untouched by construction — there is no
+		 * regeneration step that could destroy user styling.
+		 */
+		async applyOps(ops) {
+			return applyOps(editor, ops)
+		},
+	}
+	window.hostReady = true
+}
+
+// ---------------------------------------------------------------------------
+// ops executor
+// ---------------------------------------------------------------------------
+
+const rich = (text) =>
+	typeof TL.toRichText === 'function'
+		? TL.toRichText(String(text))
+		: {
+				type: 'doc',
+				content: String(text)
+					.split('\n')
+					.map((line) => ({
+						type: 'paragraph',
+						content: line ? [{ type: 'text', text: line }] : [],
+					})),
+			}
+
+const KIND_DEFAULTS = {
+	card: { type: 'geo', geo: 'rectangle', color: 'blue', fill: 'semi', w: null, h: 120 },
+	button: { type: 'geo', geo: 'rectangle', color: 'green', fill: 'semi', w: 200, h: 56 },
+	box: { type: 'geo', geo: 'rectangle', color: 'black', fill: 'none', w: 160, h: 100 },
+	// w/h here are for placement math; text and note shapes size themselves
+	// (notes are fixed 200x200, text auto-sizes), so these are not set as props.
+	label: { type: 'text', w: 160, h: 32 },
+	note: { type: 'note', w: 200, h: 200 },
+	image: { type: 'image', w: null, h: null }, // sized from the asset itself
+}
+
+/**
+ * Resolve an image op's pixels: inline `svg` markup or a `dataUrl` (the CLI
+ * inlines `src` file paths before ops arrive). Returns {dataUrl, w, h} with
+ * intrinsic size — SVG from viewBox/width/height, raster by decoding it.
+ */
+async function resolveImage(args) {
+	let dataUrl = args.dataUrl ?? null
+	let w = args.size?.w
+	let h = args.size?.h
+	if (args.svg != null) {
+		const svg = String(args.svg)
+		dataUrl = `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(svg)))}`
+		if (w == null || h == null) {
+			const vb = svg.match(/viewBox\s*=\s*["']\s*[\d.-]+[\s,]+[\d.-]+[\s,]+([\d.]+)[\s,]+([\d.]+)/)
+			const wm = svg.match(/\bwidth\s*=\s*["']([\d.]+)/)
+			const hm = svg.match(/\bheight\s*=\s*["']([\d.]+)/)
+			const iw = wm ? Number(wm[1]) : vb ? Number(vb[1]) : null
+			const ih = hm ? Number(hm[1]) : vb ? Number(vb[2]) : null
+			if (iw && ih) {
+				// keep aspect if only one dimension was given
+				w ??= h != null ? (h * iw) / ih : iw
+				h ??= (w * ih) / iw
+			}
+		}
+	}
+	if (!dataUrl) {
+		throw new Error('image needs `svg` (inline markup) or `src` (file path, inlined by the CLI)')
+	}
+	if (w == null || h == null) {
+		const probe = await new Promise((resolvePx, rejectPx) => {
+			const img = new Image()
+			img.onload = () => resolvePx({ iw: img.naturalWidth, ih: img.naturalHeight })
+			img.onerror = () => rejectPx(new Error('image failed to decode - bad data or unsupported format'))
+			img.src = dataUrl
+		})
+		const iw = probe.iw || 320
+		const ih = probe.ih || 240
+		w ??= h != null ? (h * iw) / ih : iw
+		h ??= (w * ih) / iw
+	}
+	return { dataUrl, w: Math.round(w), h: Math.round(h) }
+}
+
+// ---------------------------------------------------------------------------
+// waypoint chains: a route with >2 bends can't be one tldraw arrow (two
+// anchors + one adjustable middle segment is the ceiling), so layout renders
+// it as the original arrow plus invisible 8px waypoint dots and bound
+// segment arrows — plain tldraw shapes, so any tldraw can still open the
+// file. The projection stitches a chain back into ONE logical transition.
+// ---------------------------------------------------------------------------
+
+const bindingsOf = (editor, arrow) => {
+	const out = { start: null, end: null }
+	for (const b of editor.getBindingsFromShape(arrow, 'arrow')) {
+		out[b.props?.terminal === 'start' ? 'start' : 'end'] = b
+	}
+	return out
+}
+const isWaypointShape = (editor, id) => editor.getShape(id)?.meta?.claw === 'waypoint'
+
+function walkChain(editor, head) {
+	const waypoints = []
+	const segments = []
+	let cur = head
+	for (let guard = 0; guard < 64; guard++) {
+		const endB = bindingsOf(editor, cur).end
+		const toId = endB?.toId
+		if (!toId || !isWaypointShape(editor, toId)) {
+			return { waypoints, segments, tail: cur, finalBinding: endB }
+		}
+		waypoints.push(toId)
+		const next = editor
+			.getCurrentPageShapes()
+			.find((s) => s.type === 'arrow' && s.meta?.claw === 'chainseg' && bindingsOf(editor, s).start?.toId === toId)
+		if (!next) return { waypoints, segments, tail: cur, finalBinding: null }
+		segments.push(next)
+		cur = next
+	}
+	return { waypoints, segments, tail: cur, finalBinding: null }
+}
+
+/** Collapse a chain back into its head arrow, rebound to the true target. */
+function unchainArrow(editor, head) {
+	// legacy form (waypoint dots + bound segments)
+	const { waypoints, segments, tail, finalBinding } = walkChain(editor, head)
+	if (waypoints.length) {
+		const finalTarget =
+			finalBinding?.toId && !isWaypointShape(editor, finalBinding.toId) ? finalBinding.toId : null
+		const finalProps = finalBinding ? { ...finalBinding.props, terminal: 'end' } : null
+		editor.deleteShapes([...segments.map((s) => s.id), ...waypoints])
+		if (finalTarget) {
+			editor.createBinding({ type: 'arrow', fromId: head.id, toId: finalTarget, props: finalProps })
+		}
+		editor.updateShape({ id: head.id, type: 'arrow', props: { arrowheadEnd: 'arrow' } })
+		return
+	}
+	// group form: head carries meta {claw:'chainhead', from, to}; siblings are
+	// unbound segment arrows; the parent group is the selection unit
+	if (head.meta?.claw !== 'chainhead') return
+	const groupId = String(head.parentId).startsWith('shape:') ? head.parentId : null
+	const from = head.meta.from
+	const to = head.meta.to
+	if (groupId) {
+		const members = editor
+			.getCurrentPageShapes()
+			.filter((s) => s.parentId === groupId && s.id !== head.id)
+		if (typeof editor.ungroupShapes === 'function') editor.ungroupShapes([groupId])
+		editor.deleteShapes(members.map((s) => s.id))
+	}
+	const freshHead = editor.getShape(head.id)
+	editor.updateShape({
+		id: head.id,
+		type: 'arrow',
+		props: { arrowheadEnd: 'arrow' },
+		meta: { ...freshHead.meta, claw: undefined, from: undefined, to: undefined },
+	})
+	// restore real bindings so the plain arrow follows its screens again
+	for (const [terminal, toId] of [
+		['start', from],
+		['end', to],
+	]) {
+		if (!toId || !editor.getShape(toId)) continue
+		const existing = bindingsOf(editor, editor.getShape(head.id))[terminal]
+		if (existing) continue
+		editor.createBinding({
+			type: 'arrow',
+			fromId: head.id,
+			toId,
+			props: { terminal, normalizedAnchor: { x: 0.5, y: 0.5 }, isExact: false, isPrecise: false },
+		})
+	}
+}
+
+async function applyOps(editor, ops) {
+	const report = []
+	const aliases = new Map() // name given in add_screen -> shape id
+	const stackY = new Map() // screenId -> next y offset for at:"top" stacking
+	// full record ids the batch touched, by category (informational)
+	const touched = { created: [], updated: [], deleted: [] }
+
+	/** Resolve an op reference: batch alias, id, short id, frame name, label text. */
+	const ref = (q) => {
+		const s = String(q)
+		if (aliases.has(s)) return editor.getShape(aliases.get(s))
+		try {
+			return resolveShape(editor, s)
+		} catch {
+			// last resort: unique match on shape text
+			const lower = s.toLowerCase()
+			const byText = editor
+				.getCurrentPageShapes()
+				.filter((sh) => (plainText(editor, sh) ?? '').toLowerCase() === lower)
+			if (byText.length === 1) return byText[0]
+			throw new Error(`cannot resolve "${s}" to a unique shape (id, frame name, or label)`)
+		}
+	}
+	const pageBoundsOf = (shape) => editor.getShapePageBounds(shape.id)
+
+	for (let i = 0; i < ops.length; i++) {
+		const op = ops[i]
+		const kind = Object.keys(op)[0]
+		const args = op[kind]
+		try {
+			switch (kind) {
+				case 'add_screen': {
+					const id = TL.createShapeId()
+					let x = args.at?.x
+					let y = args.at?.y
+					let w = args.size?.w
+					let h = args.size?.h
+					if (args.near != null) {
+						const near = ref(args.near)
+						const nb = pageBoundsOf(near)
+						x ??= nb.x + nb.w + 120
+						y ??= nb.y
+						w ??= Math.round(nb.w)
+						h ??= Math.round(nb.h)
+					}
+					w ??= 320
+					h ??= 568
+					if (x == null || y == null) {
+						// auto-place: continue the existing screen grid (wrap to a new
+						// row after 5), so batch-authored canvases lay out sanely with
+						// no placement arithmetic in the ops file
+						const frames = editor
+							.getCurrentPageShapes()
+							.filter((s) => s.type === 'frame' && s.id !== id)
+							.map((s) => editor.getShapePageBounds(s.id))
+							.filter(Boolean)
+						if (!frames.length) {
+							x ??= 0
+							y ??= 0
+						} else {
+							const rowY = Math.max(...frames.map((b) => b.y))
+							const row = frames.filter((b) => Math.abs(b.y - rowY) < 2)
+							if (row.length >= 5) {
+								x ??= Math.min(...frames.map((b) => b.x))
+								y ??= rowY + Math.max(...row.map((b) => b.h)) + 160
+							} else {
+								x ??= Math.max(...row.map((b) => b.x + b.w)) + 120
+								y ??= rowY
+							}
+						}
+					}
+					editor.createShape({
+						id,
+						type: 'frame',
+						x,
+						y,
+						props: { w, h, name: String(args.name ?? 'Screen') },
+					})
+					aliases.set(String(args.name), id)
+					touched.created.push(id)
+					report.push(`add_screen ${args.name} -> ${short(id)} (frame ${w}x${h} @${round(x)},${round(y)})`)
+					break
+				}
+
+				case 'add': {
+					const spec = KIND_DEFAULTS[args.kind ?? 'box']
+					if (!spec) throw new Error(`unknown kind "${args.kind}" (card|button|label|note|box|image)`)
+					const screen = args.screen != null ? ref(args.screen) : null
+					const sb = screen ? pageBoundsOf(screen) : null
+
+					// images carry their own intrinsic size; resolve before placement math
+					const image = args.kind === 'image' ? await resolveImage(args) : null
+					let w = image ? image.w : (args.size?.w ?? (spec.w === null && sb ? Math.round(sb.w - 40) : spec.w))
+					let h = image ? image.h : (args.size?.h ?? spec.h)
+
+					// page-space placement
+					let px
+					let py
+					const at = args.at ?? 'top'
+					if (typeof at === 'object') {
+						px = (sb ? sb.x : 0) + at.x
+						py = (sb ? sb.y : 0) + at.y
+					} else if (sb) {
+						const ew = w ?? 160
+						const eh = h ?? 40
+						px = sb.x + (sb.w - ew) / 2
+						if (at === 'center') py = sb.y + (sb.h - eh) / 2
+						else if (at === 'bottom') py = sb.y + sb.h - eh - 16
+						else {
+							const yOff = stackY.get(screen.id) ?? 16
+							py = sb.y + yOff
+							stackY.set(screen.id, yOff + eh + 12)
+						}
+					} else {
+						throw new Error('add without `screen` needs `at: {x, y}` (page coordinates)')
+					}
+
+					const id = TL.createShapeId()
+					const base = { id, x: px, y: py }
+					// parent into real frames so tldraw owns the containment
+					if (screen && screen.type === 'frame') {
+						base.parentId = screen.id
+						base.x = px - pageBoundsOf(screen).x
+						base.y = py - pageBoundsOf(screen).y
+					}
+					const styleProps = {
+						...(args.color ? { color: args.color } : {}),
+						...(args.font ? { font: args.font } : {}),
+						...(args.textSize ? { size: args.textSize } : {}),
+					}
+					if (image) {
+						const assetId = TL.AssetRecordType.createId()
+						editor.createAssets([
+							{
+								id: assetId,
+								typeName: 'asset',
+								type: 'image',
+								props: {
+									src: image.dataUrl,
+									w: image.w,
+									h: image.h,
+									name: String(args.name ?? 'image'),
+									isAnimated: false,
+									mimeType: image.dataUrl.slice(5, image.dataUrl.indexOf(';')),
+									fileSize: image.dataUrl.length,
+								},
+								meta: {},
+							},
+						])
+						editor.createShape({ ...base, type: 'image', props: { assetId, w, h } })
+					} else if (spec.type === 'geo') {
+						editor.createShape({
+							...base,
+							type: 'geo',
+							props: {
+								geo: spec.geo,
+								w: w ?? 160,
+								h: h ?? 100,
+								dash: 'solid',
+								color: args.color ?? spec.color,
+								fill: spec.fill,
+								...(args.font ? { font: args.font } : {}),
+								...(args.textSize ? { size: args.textSize } : {}),
+								...(args.text != null ? { richText: rich(args.text) } : {}),
+							},
+						})
+					} else if (spec.type === 'text') {
+						editor.createShape({
+							...base,
+							type: 'text',
+							props: { richText: rich(args.text ?? ''), ...styleProps },
+						})
+					} else {
+						editor.createShape({
+							...base,
+							type: 'note',
+							props: { richText: rich(args.text ?? ''), ...styleProps },
+						})
+					}
+					if (args.name) aliases.set(String(args.name), id)
+					touched.created.push(id)
+					report.push(
+						`add ${args.kind ?? 'box'}${args.text ? ` ${JSON.stringify(String(args.text).slice(0, 30))}` : ''} -> ${short(id)}${screen ? ` in ${short(screen.id)}` : ''}`
+					)
+					break
+				}
+
+				case 'set_text': {
+					const target = ref(args.id)
+					editor.updateShape({
+						id: target.id,
+						type: target.type,
+						props: { richText: rich(args.text) },
+					})
+					touched.updated.push(target.id)
+					report.push(`set_text ${short(target.id)} -> ${JSON.stringify(String(args.text).slice(0, 40))}`)
+					break
+				}
+
+				case 'move': {
+					const target = ref(args.id)
+					let nx = target.x
+					let ny = target.y
+					if (args.by) {
+						nx += args.by.dx ?? 0
+						ny += args.by.dy ?? 0
+					} else if (args.to) {
+						// `to` is page-space; convert to parent-space when framed
+						const pb = pageBoundsOf(target)
+						nx = target.x + (args.to.x - pb.x)
+						ny = target.y + (args.to.y - pb.y)
+					} else throw new Error('move needs `to: {x,y}` or `by: {dx,dy}`')
+					editor.updateShape({ id: target.id, type: target.type, x: nx, y: ny })
+					touched.updated.push(target.id)
+					report.push(`move ${short(target.id)} -> @${round(nx)},${round(ny)}`)
+					break
+				}
+
+				case 'resize': {
+					const target = ref(args.id)
+					if (!('w' in (target.props ?? {}))) {
+						throw new Error(`resize: ${target.type} shapes have no w/h props`)
+					}
+					editor.updateShape({
+						id: target.id,
+						type: target.type,
+						props: {
+							...(args.w != null ? { w: args.w } : {}),
+							...(args.h != null ? { h: args.h } : {}),
+						},
+					})
+					touched.updated.push(target.id)
+					report.push(`resize ${short(target.id)} -> ${args.w ?? target.props.w}x${args.h ?? target.props.h}`)
+					break
+				}
+
+				case 'connect': {
+					const from = ref(args.from)
+					const to = ref(args.to)
+					const fb = pageBoundsOf(from)
+					const tb = pageBoundsOf(to)
+					const fc = { x: fb.x + fb.w / 2, y: fb.y + fb.h / 2 }
+					const tc = { x: tb.x + tb.w / 2, y: tb.y + tb.h / 2 }
+					// Frame-to-frame connects (screen transitions) default to elbow
+					// arrows: tldraw routes them orthogonally around shapes, which
+					// stays legible where straight center-to-center lines turn into
+					// spaghetti. `kind` overrides (arc | elbow).
+					const elbow =
+						args.kind != null
+							? args.kind === 'elbow'
+							: from.type === 'frame' && to.type === 'frame'
+					const id = TL.createShapeId()
+					editor.createShape({
+						id,
+						type: 'arrow',
+						x: fc.x,
+						y: fc.y,
+						props: {
+							start: { x: 0, y: 0 },
+							end: { x: tc.x - fc.x, y: tc.y - fc.y },
+							color: args.color ?? 'green',
+							dash: 'solid',
+							...(elbow ? { kind: 'elbow' } : {}),
+							...(args.label != null ? { richText: rich(args.label) } : {}),
+						},
+					})
+					for (const [terminal, targetId] of [
+						['start', from.id],
+						['end', to.id],
+					]) {
+						editor.createBinding({
+							type: 'arrow',
+							fromId: id,
+							toId: targetId,
+							props: {
+								terminal,
+								normalizedAnchor: { x: 0.5, y: 0.5 },
+								isExact: false,
+								isPrecise: false,
+								...(elbow ? { snap: 'edge' } : {}),
+							},
+						})
+					}
+					touched.created.push(id)
+					report.push(
+						`connect ${short(from.id)} -> ${short(to.id)}${args.label ? ` ${JSON.stringify(args.label)}` : ''} (${elbow ? 'elbow ' : ''}arrow ${short(id)}, bound both ends)`
+					)
+					break
+				}
+
+				case 'chain': {
+					const target = ref(args.id)
+					if (target.type !== 'arrow') throw new Error('chain only applies to arrows')
+					unchainArrow(editor, target)
+					const pts = args.points ?? []
+					if (!pts.length) {
+						touched.updated.push(target.id)
+						report.push(`chain ${short(target.id)} -> unchained (plain arrow)`)
+						break
+					}
+					const b0 = bindingsOf(editor, editor.getShape(target.id))
+					if (!b0.start || !b0.end) throw new Error('chain requires an arrow bound at both ends')
+					const fromId = b0.start.toId
+					const toId = b0.end.toId
+					const boundsOfShape = (sid) => editor.getShapePageBounds(sid)
+					const pt = (sid, a) => {
+						const bb = boundsOfShape(sid)
+						return { x: bb.x + (a?.x ?? 0.5) * bb.w, y: bb.y + (a?.y ?? 0.5) * bb.h }
+					}
+					const path = [pt(fromId, args.fromAnchor), ...pts, pt(toId, args.toAnchor)]
+					// unbind: the chain is a free-standing group; recorded-transition
+					// semantics live in meta on the head (projection reads it there)
+					for (const b of [b0.start, b0.end]) {
+						if (typeof editor.deleteBinding === 'function') editor.deleteBinding(b.id)
+						else editor.deleteBindings([b])
+					}
+					const headShape = editor.getShape(target.id)
+					const chainDash = target.props.dash === 'draw' ? 'solid' : target.props.dash
+					editor.updateShape({
+						id: target.id,
+						type: 'arrow',
+						x: path[0].x,
+						y: path[0].y,
+						meta: { ...headShape.meta, claw: 'chainhead', from: fromId, to: toId },
+						props: {
+							start: { x: 0, y: 0 },
+							end: { x: path[1].x - path[0].x, y: path[1].y - path[0].y },
+							arrowheadEnd: 'none',
+							kind: 'arc',
+							bend: 0,
+							dash: chainDash,
+						},
+					})
+					const segIds = []
+					for (let s = 1; s < path.length - 1; s++) {
+						const segId = TL.createShapeId()
+						editor.createShape({
+							id: segId,
+							type: 'arrow',
+							x: path[s].x,
+							y: path[s].y,
+							meta: { claw: 'chainseg' },
+							props: {
+								start: { x: 0, y: 0 },
+								end: { x: path[s + 1].x - path[s].x, y: path[s + 1].y - path[s].y },
+								color: target.props.color,
+								size: target.props.size,
+								dash: chainDash,
+								kind: 'arc',
+								bend: 0,
+								arrowheadStart: 'none',
+								arrowheadEnd: s === path.length - 2 ? 'arrow' : 'none',
+							},
+						})
+						segIds.push(segId)
+						touched.created.push(segId)
+					}
+					// one group = one selectable, movable unit that edits like an
+					// arrow with extra bends (double-click to adjust a segment)
+					const groupId = TL.createShapeId()
+					editor.groupShapes([target.id, ...segIds], { groupId })
+					editor.updateShape({ id: groupId, type: 'group', meta: { claw: 'chain' } })
+					touched.updated.push(target.id)
+					report.push(`chain ${short(target.id)} -> group of ${segIds.length + 1} segment(s)`)
+					break
+				}
+
+				case 'route': {
+					const target = ref(args.id)
+					if (target.type !== 'arrow') throw new Error('route only applies to arrows')
+					const bindings = { start: null, end: null }
+					for (const b of editor.getBindingsFromShape(target, 'arrow')) {
+						bindings[b.props?.terminal === 'start' ? 'start' : 'end'] = b
+					}
+					for (const [which, anchor] of [
+						['start', args.fromAnchor],
+						['end', args.toAnchor],
+					]) {
+						if (anchor == null) continue
+						const b = bindings[which]
+						if (!b) throw new Error(`route: arrow has no bound ${which} terminal`)
+						editor.updateBinding({
+							id: b.id,
+							type: 'arrow',
+							props: {
+								...b.props,
+								normalizedAnchor: { x: anchor.x, y: anchor.y },
+								snap: 'edge-point',
+								isPrecise: true,
+							},
+						})
+					}
+					const patch = {}
+					if (args.kind != null) patch.kind = args.kind
+					if (args.mid != null) patch.elbowMidPoint = Math.max(0.05, Math.min(0.95, args.mid))
+					if (args.labelAt != null) patch.labelPosition = Math.max(0.05, Math.min(0.95, args.labelAt))
+					// routed arrows are diagram edges: sketchy "draw" dash becomes
+					// solid (explicit dashed/dotted styles are respected)
+					if (target.props.dash === 'draw') patch.dash = 'solid'
+					if (Object.keys(patch).length) {
+						editor.updateShape({ id: target.id, type: 'arrow', props: patch })
+					}
+					touched.updated.push(target.id)
+					report.push(
+						`route ${short(target.id)}${args.mid != null ? ` mid=${args.mid}` : ''}${args.fromAnchor ? ` from@${args.fromAnchor.x},${args.fromAnchor.y}` : ''}${args.toAnchor ? ` to@${args.toAnchor.x},${args.toAnchor.y}` : ''}`
+					)
+					break
+				}
+
+				case 'style': {
+					const target = ref(args.id)
+					// shape-level opacity is not a prop
+					if (args.opacity != null) {
+						editor.updateShape({ id: target.id, type: target.type, opacity: args.opacity })
+					}
+					const patch = {}
+					const skipped = []
+					for (const key of ['font', 'size', 'color', 'fill', 'dash', 'align', 'verticalAlign', 'geo', 'labelColor', 'kind', 'bend']) {
+						if (args[key] == null) continue
+						if (key in (target.props ?? {})) patch[key] = args[key]
+						else skipped.push(key)
+					}
+					if (Object.keys(patch).length) {
+						editor.updateShape({ id: target.id, type: target.type, props: patch })
+					}
+					touched.updated.push(target.id)
+					report.push(
+						`style ${short(target.id)} -> ${JSON.stringify(patch)}${args.opacity != null ? ` opacity=${args.opacity}` : ''}${skipped.length ? `  (not applicable to ${target.type}: ${skipped.join(', ')})` : ''}`
+					)
+					break
+				}
+
+				case 'delete': {
+					// Idempotent: a target that no longer resolves is a success, not an
+					// error. Deleting a group's children dissolves the group itself, so
+					// batches that then delete the group by id would otherwise fail —
+					// and an errored batch rolls back EVERYTHING (all-or-nothing).
+					let target
+					try {
+						target = ref(args.id)
+					} catch {
+						report.push(`delete ${args.id}: already gone (skipped)`)
+						break
+					}
+					// deleting a chained arrow takes its whole chain with it
+					if (target.type === 'arrow') {
+						const { waypoints, segments } = walkChain(editor, target)
+						if (waypoints.length) editor.deleteShapes([...segments.map((s) => s.id), ...waypoints])
+						if (target.meta?.claw === 'chainhead' && String(target.parentId).startsWith('shape:')) {
+							editor.deleteShape(target.parentId) // the group, children included
+							touched.deleted.push(target.id)
+							report.push(`delete ${short(target.id)} (chained arrow, group removed)`)
+							break
+						}
+					}
+					editor.deleteShape(target.id)
+					touched.deleted.push(target.id)
+					report.push(`delete ${short(target.id)} (${target.type})`)
+					break
+				}
+
+				case 'rename': {
+					const target = ref(args.id)
+					if (target.type !== 'frame') {
+						throw new Error('rename only applies to frames; for other shapes use set_text')
+					}
+					editor.updateShape({ id: target.id, type: 'frame', props: { name: String(args.name) } })
+					touched.updated.push(target.id)
+					report.push(`rename ${short(target.id)} -> ${JSON.stringify(args.name)}`)
+					break
+				}
+
+				default:
+					throw new Error(`unknown op "${kind}"`)
+			}
+		} catch (err) {
+			throw new Error(`op ${i + 1} (${kind}): ${err.message}`)
+		}
+	}
+	// Invariant: connected (bound) arrows render above every screen — a
+	// transition vanishing behind a frame is never wanted. bringToFront can't
+	// do this: tldraw's ArrowBindingUtil clamps a bound arrow to sit BELOW the
+	// next non-arrow sibling above its bound shapes. But that clamp
+	// early-returns when no non-arrow sibling is above the arrow, so placing
+	// arrows above the topmost non-arrow page child is a stable fixed point.
+	if (typeof TL.getIndicesBetween === 'function') {
+		const pageId = editor.getCurrentPageId()
+		// page-wide, not just page children: binding creation can parent an
+		// arrow into a frame before our neutered hooks are in play
+		const bound = editor
+			.getCurrentPageShapes()
+			.filter((s) => s.type === 'arrow' && editor.getBindingsFromShape(s, 'arrow').length)
+		if (bound.length) {
+			const stray = bound.filter((a) => a.parentId !== pageId)
+			if (stray.length) editor.reparentShapes(stray.map((a) => a.id), pageId)
+			const kids = editor
+				.getSortedChildIdsForParent(pageId)
+				.map((sid) => editor.getShape(sid))
+				.filter(Boolean)
+			const arrowIds = new Set(bound.map((a) => a.id))
+			const topNonArrow = kids.filter((s) => !arrowIds.has(s.id)).map((s) => s.index).sort().pop()
+			const fresh = kids.filter((s) => arrowIds.has(s.id))
+			if (topNonArrow && fresh.some((a) => a.index < topNonArrow)) {
+				const indices = TL.getIndicesBetween(topNonArrow, undefined, fresh.length)
+				editor.updateShapes(fresh.map((a, i) => ({ id: a.id, type: 'arrow', index: indices[i] })))
+			}
+		}
+	}
+	return { report, touched }
+}
+
+// ---------------------------------------------------------------------------
+// projection
+// ---------------------------------------------------------------------------
+
+const CONTAINER_TYPES = new Set(['frame', 'group', 'geo', 'image', 'video', 'embed', 'note'])
+const CONTAIN_THRESHOLD = 0.9
+const NEAR_THRESHOLD = 120
+const INSIDE_TOLERANCE = 2
+
+const short = (id) => String(id).replace(/^shape:/, '')
+const round = (n) => Math.round(n)
+
+function plainText(editor, shape) {
+	const p = shape.props ?? {}
+	if (typeof p.text === 'string' && p.text.length) return p.text
+	if (p.richText) {
+		if (typeof TL.renderPlaintextFromRichText === 'function') {
+			try {
+				const t = TL.renderPlaintextFromRichText(editor, p.richText)
+				if (t?.trim().length) return t
+			} catch {}
+		}
+		// fallback: walk the tiptap tree
+		const walk = (n) => {
+			if (!n) return ''
+			if (typeof n.text === 'string') return n.text
+			if (Array.isArray(n.content)) return n.content.map(walk).join('')
+			return ''
+		}
+		const blocks = Array.isArray(p.richText.content) ? p.richText.content : [p.richText]
+		const t = blocks.map(walk).join('\n').trim()
+		if (t.length) return t
+	}
+	return undefined
+}
+
+function projectDocument(editor) {
+	const pages = editor.getPages()
+	const currentPageId = editor.getCurrentPageId()
+	const out = { v: 1, pages: [], warnings: [] }
+
+	for (const page of pages) {
+		if (page.id !== editor.getCurrentPageId()) editor.setCurrentPage(page.id)
+		out.pages.push(projectPage(editor, page, out.warnings))
+	}
+	if (editor.getCurrentPageId() !== currentPageId) editor.setCurrentPage(currentPageId)
+	return out
+}
+
+function projectPage(editor, page, warnings) {
+	const allRaw =
+		typeof editor.getCurrentPageShapesSorted === 'function'
+			? editor.getCurrentPageShapesSorted()
+			: [...editor.getCurrentPageShapes()].sort((a, b) =>
+					String(a.index).localeCompare(String(b.index))
+				)
+	// waypoint dots, chain segments, and chain groups are rendering plumbing,
+	// not content: chains are stitched back into their head arrow below
+	const all = allRaw.filter(
+		(s) =>
+			s.meta?.claw !== 'waypoint' &&
+			s.meta?.claw !== 'chainseg' &&
+			!(s.type === 'group' && s.meta?.claw === 'chain')
+	)
+
+	const bounds = new Map()
+	for (const s of all) bounds.set(s.id, editor.getShapePageBounds(s.id))
+
+	// ---- effective containment: real parents, else geometry -----------------
+	const parentOf = new Map()
+	const inferredContainers = new Set()
+	const inferredMembership = new Set() // children whose containment is geometric, not real
+	const pageLevel = []
+	for (const s of all) {
+		if (String(s.parentId).startsWith('shape:')) parentOf.set(s.id, s.parentId)
+		else pageLevel.push(s)
+	}
+	const area = (b) => (b ? b.w * b.h : 0)
+	for (const inner of pageLevel) {
+		if (inner.type === 'arrow') continue
+		const ib = bounds.get(inner.id)
+		if (!ib || area(ib) <= 0) continue
+		let best = null
+		let bestArea = Infinity
+		for (const outer of pageLevel) {
+			if (outer.id === inner.id || !CONTAINER_TYPES.has(outer.type)) continue
+			const ob = bounds.get(outer.id)
+			if (!ob || area(ob) <= area(ib)) continue
+			const ix = Math.max(0, Math.min(ib.x + ib.w, ob.x + ob.w) - Math.max(ib.x, ob.x))
+			const iy = Math.max(0, Math.min(ib.y + ib.h, ob.y + ob.h) - Math.max(ib.y, ob.y))
+			if ((ix * iy) / area(ib) < CONTAIN_THRESHOLD) continue
+			if (area(ob) < bestArea) {
+				best = outer
+				bestArea = area(ob)
+			}
+		}
+		if (best) {
+			parentOf.set(inner.id, best.id)
+			inferredContainers.add(best.id)
+			inferredMembership.add(inner.id)
+		}
+	}
+	const rootOf = (id) => {
+		let cur = id
+		const seen = new Set()
+		while (!seen.has(cur)) {
+			seen.add(cur)
+			const p = parentOf.get(cur)
+			if (!p) break
+			cur = p
+		}
+		return cur
+	}
+
+	// ---- arrow terminals: recorded bindings, else geometric inference -------
+	const nonArrows = all.filter((s) => s.type !== 'arrow')
+	const resolveLoose = (point) => {
+		let inside = null
+		let insideArea = Infinity
+		let nearest = null
+		let nearestD = Infinity
+		for (const s of nonArrows) {
+			const b = bounds.get(s.id)
+			if (!b || b.w <= 0) continue
+			const dx = Math.max(b.x - point.x, 0, point.x - (b.x + b.w))
+			const dy = Math.max(b.y - point.y, 0, point.y - (b.y + b.h))
+			const d = Math.hypot(dx, dy)
+			if (d <= INSIDE_TOLERANCE) {
+				if (area(b) < insideArea) {
+					inside = s
+					insideArea = area(b)
+				}
+			} else if (d < nearestD) {
+				nearest = s
+				nearestD = d
+			}
+		}
+		if (inside) return { id: short(inside.id), how: 'inside', d: 0 }
+		if (nearest && nearestD <= NEAR_THRESHOLD) {
+			return { id: short(nearest.id), how: 'near', d: Math.round(nearestD) }
+		}
+		return null
+	}
+
+	const arrows = []
+	let looseArrows = 0
+	for (const s of all) {
+		if (s.type !== 'arrow') continue
+		const entry = { id: short(s.id), label: plainText(editor, s) ?? null, start: null, end: null }
+		const recorded = { start: null, end: null }
+		// a chain head carries its true endpoints in meta (the chain itself is
+		// unbound); that record is as authoritative as a binding — we wrote it
+		if (s.meta?.claw === 'chainhead') {
+			if (editor.getShape(s.meta.from)) recorded.start = s.meta.from
+			if (editor.getShape(s.meta.to)) recorded.end = s.meta.to
+		}
+		for (const binding of editor.getBindingsFromShape(s, 'arrow')) {
+			recorded[binding.props?.terminal === 'start' ? 'start' : 'end'] = binding.toId
+		}
+		// legacy waypoint chains: the true end is at the tail of the chain
+		if (recorded.end && isWaypointShape(editor, recorded.end)) {
+			const { finalBinding } = walkChain(editor, s)
+			recorded.end =
+				finalBinding?.toId && !isWaypointShape(editor, finalBinding.toId) ? finalBinding.toId : null
+		}
+		const transform = editor.getShapePageTransform(s.id)
+		for (const which of ['start', 'end']) {
+			if (recorded[which]) {
+				entry[which] = { id: short(recorded[which]), how: 'bound', d: 0 }
+			} else {
+				const local = s.props?.[which] ?? { x: 0, y: 0 }
+				const pt = transform ? transform.applyToPoint(local) : local
+				entry[which] = resolveLoose(pt)
+			}
+		}
+		if (entry.start?.how !== 'bound' || entry.end?.how !== 'bound') looseArrows++
+		if (entry.start && entry.end) {
+			entry.rootStart = short(rootOf(`shape:${entry.start.id}`))
+			entry.rootEnd = short(rootOf(`shape:${entry.end.id}`))
+			entry.sameRoot = entry.rootStart === entry.rootEnd
+		}
+		arrows.push(entry)
+	}
+	if (looseArrows) {
+		warnings.push(
+			`${looseArrows} of ${arrows.length} arrows have endpoint(s) not snapped to a shape — ` +
+				`inferred from geometry and labelled as inferred`
+		)
+	}
+
+	// ---- shapes --------------------------------------------------------------
+	const shapes = all
+		.filter((s) => s.type !== 'arrow')
+		.map((s) => {
+			const b = bounds.get(s.id)
+			const text = plainText(editor, s)
+			return {
+				id: short(s.id),
+				type: s.type,
+				geo: s.props?.geo ?? undefined,
+				name: s.props?.name ?? undefined,
+				text: text ?? undefined,
+				note: s.meta?.note ?? undefined,
+				x: b ? round(b.x) : null,
+				y: b ? round(b.y) : null,
+				w: b ? round(b.w) : null,
+				h: b ? round(b.h) : null,
+				parent: parentOf.has(s.id) ? short(parentOf.get(s.id)) : null,
+				parentInferred: inferredMembership.has(s.id) || undefined,
+				container: s.type === 'frame' || s.type === 'group' || inferredContainers.has(s.id),
+				containerInferred: inferredContainers.has(s.id) && s.type !== 'frame' && s.type !== 'group',
+			}
+		})
+
+	return { id: page.id, name: page.name ?? 'Page', shapes, arrows }
+}
+
+function boundsIntersect(a, b) {
+	if (!a || !b) return false
+	return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y
+}
+
+function boundsContains(outer, inner) {
+	if (!outer || !inner) return false
+	return (
+		inner.x >= outer.x &&
+		inner.y >= outer.y &&
+		inner.x + inner.w <= outer.x + outer.w &&
+		inner.y + inner.h <= outer.y + outer.h
+	)
+}
+
+/**
+ * Executor RPC: connect back to the core that served this page and service
+ * its document calls. One call at a time (the core serializes them); replies
+ * echo the call id with either `result` or `error`. Reconnects forever —
+ * the core may restart while the app window stays open.
+ */
+function startExecutor() {
+	const url = `ws://${location.host}/executor`
+	const connect = () => {
+		const ws = new WebSocket(url)
+		ws.onmessage = async (e) => {
+			let msg
+			try {
+				msg = JSON.parse(e.data)
+			} catch {
+				return
+			}
+			try {
+				const fn = window.host?.[msg.method]
+				if (typeof fn !== 'function') throw new Error(`unknown executor method "${msg.method}"`)
+				const result = await fn(...(msg.args ?? []))
+				ws.send(JSON.stringify({ id: msg.id, result }))
+			} catch (err) {
+				try {
+					ws.send(JSON.stringify({ id: msg.id, error: String(err?.message ?? err) }))
+				} catch {}
+			}
+		}
+		ws.onclose = () => setTimeout(connect, 1000)
+		ws.onerror = () => {} // onclose fires after; avoid unhandled error noise
+	}
+	connect()
+}
+
+/**
+ * tldraw's ArrowBindingUtil clamps every bound arrow's z-index to sit just
+ * above its two bound shapes and BELOW any other shape — so a transition
+ * crossing an unrelated screen always renders behind it. In the executor we
+ * own the document's z-order (the end-of-batch raise in applyOps), so neuter
+ * the clamp hooks here. Executor-only: user tabs keep stock behavior, and
+ * sync replicates our indexes as plain data.
+ */
+function neutralizeArrowZClamp(editor) {
+	try {
+		const util = editor.getBindingUtil('arrow')
+		for (const k of ['onAfterCreate', 'onAfterChange', 'onAfterChangeFromShape', 'onAfterChangeToShape']) {
+			util[k] = undefined
+		}
+	} catch (err) {
+		reportError('arrow-z-patch', err) // degrade: arrows may hide behind screens
+	}
+}
+
+function onMount(editor) {
+	try {
+		window.__editor = editor
+		setupHost(editor)
+		if (EXECUTOR) {
+			neutralizeArrowZClamp(editor)
+			startExecutor()
+		}
+		if (SYNC) persistSessionState(editor)
+	} catch (err) {
+		reportError('mount', err)
+	}
+}
+
+/**
+ * Per-document view preferences (grid, tool locks, camera…) are session-scope
+ * in tldraw — a sync store doesn't persist them, so they'd reset every time
+ * the tab reopens. Save them to localStorage keyed by room (debounced);
+ * restore happens in SyncApp BEFORE the editor mounts.
+ */
+function persistSessionState(editor) {
+	if (
+		typeof TL.createSessionStateSnapshotSignal !== 'function' ||
+		typeof TL.react !== 'function'
+	) {
+		return // tldraw version drift: degrade to non-persistent, don't break
+	}
+	const signal = TL.createSessionStateSnapshotSignal(editor.store)
+	let timer = null
+	TL.react('persist session state', () => {
+		const snapshot = signal.get()
+		if (!snapshot) return
+		clearTimeout(timer)
+		timer = setTimeout(() => {
+			try {
+				localStorage.setItem(sessionKey(), JSON.stringify(snapshot))
+			} catch {}
+		}, 500)
+	})
+}
+
+function StandaloneApp() {
+	return (
+		<div style={{ position: 'fixed', inset: 0 }}>
+			<Tldraw onMount={onMount} />
+		</div>
+	)
+}
+
+// useSync re-initializes when its inputs change identity, so everything it
+// receives must be render-stable: module-level constants, never literals
+// created inside the component (that way lies an infinite re-render loop).
+const SYNC = syncParams()
+const SYNC_USER_INFO = SYNC ? { id: userId(), name: SYNC.name, color: SYNC.color } : null
+
+function SyncApp() {
+	const store = useSync({
+		uri: SYNC.uri,
+		assets: inlineAssets,
+		userInfo: SYNC_USER_INFO,
+	})
+	// Session state (grid, camera, tool prefs) must be restored into the store
+	// BEFORE the editor mounts — the editor writes fresh instance state on
+	// mount, clobbering anything loaded afterwards. Hold rendering until done.
+	const [restored, setRestored] = React.useState(false)
+	React.useEffect(() => {
+		if (store.status === 'error') {
+			reportError('sync', store.error ?? 'sync connection error')
+			return
+		}
+		if (store.status !== 'synced-remote' || restored) return
+		try {
+			const saved = localStorage.getItem(sessionKey())
+			window.__restoreDebug = { status: store.status, savedFound: !!saved }
+			if (saved && typeof TL.loadSessionStateSnapshotIntoStore === 'function') {
+				// forceOverwrite: the sync store pre-creates an instance record,
+				// and without it the restore silently defers to those defaults
+				TL.loadSessionStateSnapshotIntoStore(store.store, JSON.parse(saved), {
+					forceOverwrite: true,
+				})
+				window.__restoreDebug.loaded = true
+			}
+		} catch (err) {
+			window.__restoreDebug = { error: String(err?.message ?? err) }
+		}
+		setRestored(true)
+	}, [store.status, restored])
+	// Nothing renders until restore has run: mounting the editor first would
+	// clobber the loaded session state with fresh defaults. (Errors fall
+	// through so the connection-failed UI can show.)
+	if (!restored && store.status !== 'error') return null
+	return (
+		<div style={{ position: 'fixed', inset: 0 }}>
+			<Tldraw store={store} onMount={onMount} />
+		</div>
+	)
+}
+
+function sessionKey() {
+	return `tldr-session-${SYNC.uri.split('/connect/')[1] ?? 'room'}`
+}
+
+function userId() {
+	try {
+		let id = localStorage.getItem('tldr-user-id')
+		if (!id) {
+			id = `user-${Math.random().toString(36).slice(2, 10)}`
+			localStorage.setItem('tldr-user-id', id)
+		}
+		return id
+	} catch {
+		return `user-${Math.random().toString(36).slice(2, 10)}`
+	}
+}
+
+window.addEventListener('error', (e) => reportError('window', e.error ?? e.message))
+window.addEventListener('unhandledrejection', (e) => reportError('promise', e.reason))
+
+createRoot(document.getElementById('root')).render(SYNC ? <SyncApp /> : <StandaloneApp />)

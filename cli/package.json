@@ -1,0 +1,27 @@
+{
+  "name": "claw-cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Claw (Claude + draw): query, render, and edit .tldr canvases for human+AI co-op design. Built on tldraw.",
+  "bin": {
+    "claw": "./claw.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@tldraw/sync-core": "~5.3.0",
+    "@tldraw/tlschema": "~5.3.0",
+    "elkjs": "^0.12.0",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@tldraw/sync": "~5.3.0",
+    "esbuild": "^0.28.1",
+    "playwright-core": "^1.62.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "tldraw": "^5.3.0"
+  }
+}
