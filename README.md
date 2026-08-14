@@ -25,6 +25,21 @@ cd ../app && npx @neutralinojs/neu update && npx @neutralinojs/neu build --relea
 Node.js >= 18 required. The app launches automatically on the first `claw`
 command; closing its window stops everything. `claw --help` for commands.
 
+## Development workflow
+
+This repo is the source of truth. The live skill that Claude Code discovers
+(and that the `claw` command runs) is an installed COPY at
+`~\.claude\skills\claw`. After making changes here:
+
+```
+.\deploy.ps1        # incremental mirror to the live skill location
+```
+
+Rebuild first when applicable (`node cli/page/build.mjs` for editor/executor
+changes; `neu build --release` in `app/` for shell changes), then deploy. If
+the deployed core version changed, quit and relaunch the Claw app window.
+Never edit the deployed copy directly — it gets overwritten on every deploy.
+
 ## Architecture in one paragraph
 
 The desktop app owns a Node "core" (child process) that serves an HTTP API
