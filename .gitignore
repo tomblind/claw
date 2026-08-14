@@ -5,8 +5,8 @@ node_modules/
 app/dist/
 app/.tmp/
 
-# runtime state - lockfile lives at ~/.claw-daemon.json
-.claw-daemon.json (now per-user, outside the repo)
+# runtime state (the lockfile itself lives at ~/.claw-daemon.json, outside the repo)
+.claw-daemon.json
 cli/.tldr-browser.json
 *.log
 
