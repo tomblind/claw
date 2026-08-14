@@ -57,7 +57,10 @@ async function findCliDir() {
 // ---------------------------------------------------------------------------
 async function readLock() {
 	try {
-		const raw = await Neutralino.filesystem.readFile(cliDir + '/.claw-daemon.json')
+		// per-user lockfile, matching the core (never per-install)
+		const home =
+			(await Neutralino.os.getEnv('USERPROFILE')) || (await Neutralino.os.getEnv('HOME'))
+		const raw = await Neutralino.filesystem.readFile(home + '/.claw-daemon.json')
 		return JSON.parse(raw)
 	} catch {
 		return null

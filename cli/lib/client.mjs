@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { TldrError } from './load.mjs'
@@ -17,7 +18,8 @@ import { VERSION } from './version.mjs'
  */
 
 const here = dirname(fileURLToPath(import.meta.url))
-const LOCKFILE = join(here, '..', '.claw-daemon.json')
+// per-user, matching the core (see daemon.mjs) — never per-install
+const LOCKFILE = join(homedir(), '.claw-daemon.json')
 const DAEMON = join(here, '..', 'server', 'daemon.mjs')
 const APP_DIST = join(here, '..', '..', 'app', 'dist', 'claw')
 

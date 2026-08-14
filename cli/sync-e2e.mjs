@@ -12,7 +12,7 @@ import { findBrowser } from './lib/browser.mjs'
 const here = dirname(fileURLToPath(import.meta.url))
 const FILE = join(process.env.TEMP ?? '/tmp', 'sync-e2e-test.tldr')
 const OPS = join(here, 'e2e-ops.json')
-const LOCKFILE = join(here, '.claw-daemon.json')
+const LOCKFILE = join(process.env.USERPROFILE ?? process.env.HOME ?? here, '.claw-daemon.json')
 
 const results = []
 const check = (name, ok, detail = '') => {

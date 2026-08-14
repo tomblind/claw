@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
-import { networkInterfaces } from 'node:os'
+import { homedir, networkInterfaces } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { VERSION } from '../lib/version.mjs'
@@ -18,7 +18,10 @@ import { RoomManager, pathToRoomId } from './rooms.mjs'
  */
 
 const here = dirname(fileURLToPath(import.meta.url))
-const LOCKFILE = join(here, '..', '.claw-daemon.json')
+// PER-USER, not per-install: a core started from any copy of claw (repo
+// checkout vs deployed skill) must see a core started from any other, or two
+// stacks run blind to each other with separate rooms fighting over the files
+const LOCKFILE = join(homedir(), '.claw-daemon.json')
 const LOGFILE = join(here, '..', 'daemon.log')
 const PAGE_HTML = join(here, '..', 'page', 'dist', 'index.html')
 const FOREGROUND = process.argv.includes('--foreground')
