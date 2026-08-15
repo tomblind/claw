@@ -249,6 +249,8 @@ const api = {
 		return {
 			png: await host.render(required(body, 'tldr'), {
 				frame: body.frame ?? null,
+				around: body.around ?? null,
+				...(body.pad != null ? { pad: body.pad } : {}),
 				scale: body.scale ?? null,
 			}),
 		}

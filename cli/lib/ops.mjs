@@ -12,7 +12,7 @@ const OPS = {
 	add_screen: { required: ['name'], optional: ['near', 'at', 'size'] },
 	add: {
 		required: [],
-		optional: ['screen', 'kind', 'text', 'at', 'size', 'color', 'name', 'font', 'textSize', 'svg', 'src', 'dataUrl'],
+		optional: ['screen', 'kind', 'text', 'at', 'size', 'color', 'name', 'font', 'textSize', 'labelColor', 'svg', 'src', 'dataUrl'],
 	},
 	set_text: { required: ['id', 'text'], optional: [] },
 	style: {
@@ -23,6 +23,8 @@ const OPS = {
 	center: { required: ['id', 'on'], optional: ['axis'] },
 	align: { required: ['ids', 'edge'], optional: ['to'] },
 	distribute: { required: ['ids'], optional: ['axis', 'gap'] },
+	row: { required: ['ids'], optional: ['gap'] },
+	clear: { required: ['id'], optional: [] },
 	resize: { required: ['id'], optional: ['w', 'h'] },
 	connect: { required: ['from', 'to'], optional: ['label', 'color', 'kind'] },
 	route: { required: ['id'], optional: ['fromAnchor', 'toAnchor', 'mid', 'kind', 'labelAt'] },
@@ -142,6 +144,11 @@ label text, or the "name" given to an earlier op in the same batch.
       button = 200x56, box = 160x100, note = fixed 200x200 yellow sticky (not
       resizable - use a box for small annotations), label = auto-sized text.
       Consecutive at:"top" adds stack downward automatically.
+      FIXED CHIP: text + an explicit size.h makes an exact-size box with a
+      SEPARATE overlay label centered by real glyph bounds (labelColor sets
+      its color; default black - dark labels read best on the pastel fills).
+      Without size.h, text lives on the geo and tldraw enforces a min height.
+      "name"s persist on the shape - reuse them in ANY later batch/session.
   {"add": {"screen": "Title", "kind": "image", "svg": "<svg ...>...</svg>", "at": "center"}}
       Real visuals: an image shape. Give EITHER "svg" (inline SVG markup -
       ideal for generated mockups/diagram art) or "src" (path to a
@@ -165,14 +172,19 @@ label text, or the "name" given to an earlier op in the same batch.
   {"move": {"id": "...", "by": {"dx": 0, "dy": 40}}}          or "to": {"x":N,"y":N}
   {"center": {"id": "<label>", "on": "<box>", "axis": "both|x|y"}}
   {"align": {"ids": [...], "edge": "left|right|top|bottom|centerX|centerY", "to": "<ref>"}}
-  {"distribute": {"ids": [...], "axis": "x|y", "gap": 8}}
-      Alignment uses REAL rendered bounds (the editor's own glyph metrics) -
-      never hand-estimate text sizes or center by arithmetic. Fixed-size
-      labeled chip recipe: boxes with their own text enforce a minimum text
-      height (tldraw behavior, by design), so create the box WITHOUT text,
-      add a label, then center it on the box - pixel-perfect, stays put.
-      distribute stacks in current order from the first shape, real heights.
+  {"distribute": {"ids": [...], "axis": "x|y", "gap": 8}}   (stacks; real heights)
+  {"row": {"ids": [...], "gap": 12}}
+      Horizontal row: shapes line up after the FIRST one, vertically centered
+      on it - the standard UI-row layout in one op.
+      Alignment ops use REAL rendered bounds (the editor's own glyph metrics)
+      - never hand-estimate text sizes or center by arithmetic.
+  {"clear": {"id": "<frame>"}}
+      Delete a frame's children (frame itself + bound arrows kept). THE op
+      for regenerating one screen's interior without losing layout/routing.
   {"resize": {"id": "...", "w": 240, "h": 64}}
+      On a TEXT shape, "w" sets a fixed width and turns on WRAPPING (long
+      copy flows to multiple lines; no more hand-inserted newlines); resize
+      with no "w" restores auto-size. w/h are clamped to >= 1 everywhere.
   {"connect": {"from": "BonusRound", "to": "Title", "label": "done"}}   (bound both ends)
       Bind "from" to the TRIGGERING ELEMENT when you know it (the button/row
       that causes the transition), not the whole screen - the arrow starts at

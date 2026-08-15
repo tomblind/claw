@@ -27,8 +27,8 @@ export async function projectPair(oldText, newText) {
 	return await call('/api/project-pair', { before: oldText, after: newText })
 }
 
-export async function renderFile(tldrText, { frame = null, scale = null } = {}) {
-	return (await call('/api/render', { tldr: tldrText, frame, scale })).png
+export async function renderFile(tldrText, { frame = null, around = null, pad = null, scale = null } = {}) {
+	return (await call('/api/render', { tldr: tldrText, frame, around, pad, scale })).png
 }
 
 export async function applyToFile(tldrText, ops, path = null) {

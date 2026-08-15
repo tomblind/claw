@@ -21,7 +21,7 @@ node ~/.claude/skills/claw/cli/claw.mjs <command> <file.tldr>
 |---|---|
 | `outline <file>` | **Start here.** Pages, nested frames, and counts of everything else. Cheapest way to see what exists. `--all` lists every shape, `--json` for machine form. |
 | `flows <file>` | The arrow graph alone — what connects to what. Essential for screen-flow docs. `--from <id>` to filter. |
-| `render <file>` | **Pixel-accurate PNG from the real tldraw editor.** `--frame <id\|name>` renders one screen. **Read the PNG** — layout is spatial and the text output can't convey it. |
+| `render <file>` | **Pixel-accurate PNG from the real tldraw editor.** `--frame <id\|name>` renders one screen; `--around <ref> --pad N` is a tight crop of one shape (the cheap self-check while building). **Read the PNG** — layout is spatial and the text output can't convey it. |
 | `diff <new> <old>` | What changed between two canvases (or `--against <git-rev>`). Pure comparison — see *Syncing a canvas to code* for how projects use it. |
 | `ops` | **The op reference.** Read it once before writing your first ops file — every op, kind, default size, and allowed value. |
 | `apply <file> <ops.json>` | Modify the canvas through the real editor — see *Writing to a canvas* below. |
@@ -129,6 +129,29 @@ Write through `apply` (modify) and `new` (create) — **never edit .tldr JSON di
 **Flow diagrams: connect the screens themselves — don't build a separate node map.** Frame-to-frame `connect` produces elbow arrows that route orthogonally and stay legible even in dense graphs. The recipe for a graph of any size: `add_screen` everything (omit positions — they auto-grid), `connect` the transitions, then run `claw layout` to arrange screens into flow columns. Merge parallel transitions between the same two screens into one arrow with a combined label ("save / cancel") instead of stacking arrows.
 
 Arrow hygiene in dense graphs: connected arrows always render above screens (kept automatically), but the elbow router only avoids its own two endpoints — a long transition can still cut *through* screens between them. When a render shows that, restyle that arrow to bow around: `{"style": {"id": "...", "kind": "arc", "bend": 220}}` (negative bend bows the other way). Don't hand-shuffle screens to dodge one arrow.
+
+### Building UI mockups (native shapes)
+
+For UI-flow diagrams, **faithful native-shape wireframes are the default**:
+complete, real component layouts (a *full* board, not three representative
+tiles), never descriptive-text cards, never SVG mockups when the user will
+edit them (SVG is uneditable in the canvas — use it only for art/logos).
+`font: sans` on everything. Rules that prevent whole rounds of rework:
+
+- **Never hand-compute text positions — use `center`/`align`/`row` on BOTH
+  axes.** A text shape's y is the top of its line-box, not the visible glyph;
+  any label that must line up with a sibling must be `center`ed on it.
+- **Fixed-size chips/tiles/buttons**: `add` with text + explicit `size.h`
+  builds the exact-size box + centered overlay label automatically.
+- **Long copy**: `resize` the label with a `w` — it wraps at that width. Don't
+  hand-insert newlines.
+- **Named fills render pastel** — use dark label text (`labelColor: black`,
+  the default), `fill: solid` for shaded tiles.
+- **Regenerating one screen**: `clear` the frame (children gone, frame +
+  arrows + layout survive), then re-add its interior. Never delete children
+  one by one.
+- **`outline --json` includes the arrows** (ids, labels, endpoints, roots) —
+  no text-scraping needed to script arrow ops.
 
 Write an ops file (JSON array, applied in order) and run it:
 

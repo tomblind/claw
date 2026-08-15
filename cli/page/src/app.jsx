@@ -93,6 +93,10 @@ function resolveShape(editor, query) {
 	const lower = q.toLowerCase()
 	const byName = shapes.filter((s) => (s.props?.name ?? '').toLowerCase() === lower)
 	if (byName.length === 1) return byName[0]
+	// names given to ops persist on the shape (meta.clawName) and resolve
+	// across batches and sessions
+	const byClawName = shapes.filter((s) => s.meta?.clawName === q)
+	if (byClawName.length === 1) return byClawName[0]
 	const byPrefix = shapes.filter((s) => s.id.slice(6).startsWith(q))
 	if (byPrefix.length === 1) return byPrefix[0]
 	throw new Error(`no unique shape matching "${q}"`)
@@ -120,7 +124,31 @@ function setupHost(editor) {
 		 * exports the target plus every shape whose page bounds intersect it —
 		 * covering both real frames and screens drawn as plain rectangles.
 		 */
-		async render({ frame = null, scale = null, maxWidth = 2000, padding = 32 } = {}) {
+		async render({ frame = null, around = null, pad = 48, scale = null, maxWidth = 2000, padding = 32 } = {}) {
+			// tight crop around one shape (chip/row/tile) — the cheap self-check
+			// render: no whitespace, no cross-canvas connectors
+			if (around) {
+				const target = resolveShape(editor, around)
+				const tb = editor.getShapePageBounds(target.id)
+				const box = { x: tb.x - pad, y: tb.y - pad, w: tb.w + pad * 2, h: tb.h + pad * 2 }
+				const ids = editor
+					.getCurrentPageShapes()
+					.filter((s) => {
+						const b = editor.getShapePageBounds(s.id)
+						if (!boundsIntersect(box, b)) return false
+						if (s.type !== 'arrow') return true
+						return boundsContains(box, b)
+					})
+					.map((s) => s.id)
+				if (!ids.includes(target.id)) ids.push(target.id)
+				const blob = await toPngBlob(editor, ids, {
+					background: true,
+					padding: 0,
+					scale: scale ?? 1,
+					...(typeof TL.Box === 'function' ? { bounds: new TL.Box(box.x, box.y, box.w, box.h) } : {}),
+				})
+				return await blobToBase64(blob)
+			}
 			let ids
 			if (frame) {
 				const target = resolveShape(editor, frame)
@@ -437,6 +465,7 @@ async function applyOps(editor, ops) {
 						type: 'frame',
 						x,
 						y,
+						meta: { clawName: String(args.name ?? 'Screen') },
 						props: { w, h, name: String(args.name ?? 'Screen') },
 					})
 					aliases.set(String(args.name), id)
@@ -455,6 +484,19 @@ async function applyOps(editor, ops) {
 					const image = args.kind === 'image' ? await resolveImage(args) : null
 					let w = image ? image.w : (args.size?.w ?? (spec.w === null && sb ? Math.round(sb.w - 40) : spec.w))
 					let h = image ? image.h : (args.size?.h ?? spec.h)
+					// zero/negative dimensions poison the whole batch — clamp and note
+					if (w != null && w < 1) {
+						report.push(`(op ${i + 1}: w=${w} clamped to 1)`)
+						w = 1
+					}
+					if (h != null && h < 1) {
+						report.push(`(op ${i + 1}: h=${h} clamped to 1)`)
+						h = 1
+					}
+					// FIXED CHIP: a geo with text AND an explicit height would auto-grow
+					// past its size (tldraw enforces a text min-height on every client),
+					// so build it as an unlabeled box + a centered overlay label instead
+					const fixedChip = spec.type === 'geo' && args.text != null && args.size?.h != null
 
 					// page-space placement
 					let px
@@ -479,7 +521,12 @@ async function applyOps(editor, ops) {
 					}
 
 					const id = TL.createShapeId()
-					const base = { id, x: px, y: py }
+					const base = {
+						id,
+						x: px,
+						y: py,
+						...(args.name ? { meta: { clawName: String(args.name) } } : {}),
+					}
 					// parent into real frames so tldraw owns the containment
 					if (screen && screen.type === 'frame') {
 						base.parentId = screen.id
@@ -524,9 +571,38 @@ async function applyOps(editor, ops) {
 								fill: spec.fill,
 								...(args.font ? { font: args.font } : {}),
 								...(args.textSize ? { size: args.textSize } : {}),
-								...(args.text != null ? { richText: rich(args.text) } : {}),
+								...(!fixedChip && args.text != null ? { richText: rich(args.text) } : {}),
 							},
 						})
+						if (fixedChip) {
+							// overlay label, PARENTED TO THE BOX (moving/rowing/deleting the
+							// box carries it) and centered by real glyph bounds
+							const labelId = TL.createShapeId()
+							editor.createShape({
+								id: labelId,
+								parentId: id,
+								x: 0,
+								y: 0,
+								type: 'text',
+								props: {
+									richText: rich(args.text),
+									font: args.font ?? 'sans',
+									size: args.textSize ?? 's',
+									color: args.labelColor ?? 'black',
+									textAlign: 'middle',
+								},
+							})
+							const bb = editor.getShapePageBounds(id)
+							const lb = editor.getShapePageBounds(labelId)
+							const lShape = editor.getShape(labelId)
+							editor.updateShape({
+								id: labelId,
+								type: 'text',
+								x: lShape.x + (bb.x + bb.w / 2 - (lb.x + lb.w / 2)),
+								y: lShape.y + (bb.y + bb.h / 2 - (lb.y + lb.h / 2)),
+							})
+							touched.created.push(labelId)
+						}
 					} else if (spec.type === 'text') {
 						editor.createShape({
 							...base,
@@ -584,16 +660,68 @@ async function applyOps(editor, ops) {
 					if (!('w' in (target.props ?? {}))) {
 						throw new Error(`resize: ${target.type} shapes have no w/h props`)
 					}
+					const rw = args.w != null ? Math.max(1, args.w) : null
+					const rh = args.h != null ? Math.max(1, args.h) : null
+					if (target.type === 'text') {
+						// a fixed width on a text shape turns on WRAPPING (autoSize off);
+						// height stays derived from the wrapped content
+						editor.updateShape({
+							id: target.id,
+							type: 'text',
+							props: { ...(rw != null ? { w: rw, autoSize: false } : { autoSize: true }) },
+						})
+						touched.updated.push(target.id)
+						report.push(
+							rw != null
+								? `resize ${short(target.id)} -> text wraps at ${rw}px`
+								: `resize ${short(target.id)} -> text auto-size restored`
+						)
+						break
+					}
 					editor.updateShape({
 						id: target.id,
 						type: target.type,
 						props: {
-							...(args.w != null ? { w: args.w } : {}),
-							...(args.h != null ? { h: args.h } : {}),
+							...(rw != null ? { w: rw } : {}),
+							...(rh != null ? { h: rh } : {}),
 						},
 					})
 					touched.updated.push(target.id)
-					report.push(`resize ${short(target.id)} -> ${args.w ?? target.props.w}x${args.h ?? target.props.h}`)
+					report.push(`resize ${short(target.id)} -> ${rw ?? target.props.w}x${rh ?? target.props.h}`)
+					break
+				}
+
+				case 'row': {
+					const shapes = (args.ids ?? []).map(ref)
+					if (shapes.length < 2) throw new Error('row needs 2+ ids')
+					const gap = args.gap ?? 12
+					// anchor = first shape; the rest line up after it, vertically centered
+					const first = pageBoundsOf(shapes[0])
+					let cursor = first.x + first.w
+					const midY = first.y + first.h / 2
+					for (let r = 1; r < shapes.length; r++) {
+						const s = shapes[r]
+						const b = pageBoundsOf(s)
+						const dx = cursor + gap - b.x
+						const dy = midY - (b.y + b.h / 2)
+						editor.updateShape({ id: s.id, type: s.type, x: s.x + dx, y: s.y + dy })
+						cursor = b.x + dx + b.w
+						touched.updated.push(s.id)
+					}
+					report.push(`row ${shapes.length} shape(s), gap ${gap}, centered on ${short(shapes[0].id)}`)
+					break
+				}
+
+				case 'clear': {
+					const target = ref(args.id)
+					if (target.type !== 'frame') throw new Error('clear only applies to frames')
+					const kids = editor
+						.getSortedChildIdsForParent(target.id)
+						.map((cid) => editor.getShape(cid))
+						.filter((s) => s && s.type !== 'arrow')
+					if (kids.length) editor.deleteShapes(kids.map((s) => s.id))
+					for (const k of kids) touched.deleted.push(k.id)
+					report.push(`clear ${short(target.id)} -> ${kids.length} children removed (frame + arrows kept)`)
 					break
 				}
 

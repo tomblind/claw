@@ -26,9 +26,10 @@ USAGE
       the file doesn't record are deduced from geometry and reported separately
       with the evidence. --no-infer shows only recorded bindings.
 
-  claw render <file.tldr> [--frame <id|name>] [-o out] [--scale N]
+  claw render <file.tldr> [--frame <ref>] [--around <ref> --pad N] [-o out] [--scale N]
       Pixel-accurate PNG rendered by tldraw itself. Auto-fits within 2000px
-      unless --scale is given. --frame renders one screen and its contents.
+      unless --scale is given. --frame renders one screen and its contents;
+      --around is a tight crop of any single shape (cheap self-check).
 
   claw diff <new.tldr> <old.tldr>
       What changed between two canvases: screens, text, shapes and flow
@@ -281,18 +282,21 @@ async function main() {
 
 		case 'render': {
 			const frame = flags.frame && flags.frame !== true ? String(flags.frame) : null
+			const around = flags.around && flags.around !== true ? String(flags.around) : null
+			const pad = flags.pad && flags.pad !== true ? Number(flags.pad) : null
 			const scale = flags.scale && flags.scale !== true ? Number(flags.scale) : null
 			if (scale !== null && (!Number.isFinite(scale) || scale <= 0)) {
 				throw new TldrError(`--scale must be a positive number, got "${flags.scale}"`, 1)
 			}
-			const pngBase64 = await renderFile(raw, { frame, scale })
-			const base =
-				flags.o && flags.o !== true
-					? String(flags.o).replace(/\.(svg|png)$/i, '')
-					: join(
-							dirname(file),
-							basename(file, extname(file)) + (frame ? `.${frame.slice(0, 12)}` : '')
-						)
+			const pngBase64 = await renderFile(raw, { frame, around, pad, scale })
+			const outFlag = [flags.o, flags.out, flags.output].find((v) => v && v !== true)
+			const base = outFlag
+				? String(outFlag).replace(/\.(svg|png)$/i, '')
+				: join(
+						dirname(file),
+						basename(file, extname(file)) +
+							(frame ? `.${frame.slice(0, 12)}` : around ? `.${around.slice(0, 12)}.crop` : '')
+					)
 			const pngPath = `${base}.png`
 			writeFileSync(pngPath, Buffer.from(pngBase64, 'base64'))
 			process.stdout.write(`${pngPath}\n`)
