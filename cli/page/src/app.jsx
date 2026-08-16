@@ -121,10 +121,11 @@ function reportError(stage, err) {
 }
 
 // ---------------------------------------------------------------------------
-// per-document theming: the document's meta.clawTheme remaps the 13 standard
-// color names and the 4 font slots (names stay standard, so the file opens in
-// any tldraw — vanilla apps just show default colors/fonts). Applied through
-// tldraw's own ThemeManager, so exports/renders pick it up too.
+// per-document theming: the document's meta.clawTheme defines extra palette
+// colors (the reserved custom-1..custom-8 slots only) and remaps the 4 font
+// slots. The 13 standard tldraw colors are deliberately untouchable — green
+// means green in every tldraw app. Applied through tldraw's own ThemeManager,
+// so exports/renders pick it up too.
 // ---------------------------------------------------------------------------
 let PRISTINE_THEME = null
 let lastAppliedTheme = '__unset__'
@@ -145,6 +146,7 @@ function applyClawTheme(editor, { force = false } = {}) {
 		lastAppliedTheme = key
 		const next = JSON.parse(JSON.stringify(PRISTINE_THEME))
 		for (const [name, val] of Object.entries(spec?.colors ?? {})) {
+			if (!CUSTOM_COLOR_SLOTS.includes(name)) continue // standard colors stay standard
 			for (const mode of ['light', 'dark']) {
 				let base = next.colors?.[mode]?.[name]
 				// custom slots have no default entry - synthesize one from a template
@@ -894,6 +896,14 @@ async function applyOps(editor, ops) {
 					if (args.reset) {
 						delete meta.clawTheme
 					} else {
+						const badColors = Object.keys(args.colors ?? {}).filter(
+							(n) => !CUSTOM_COLOR_SLOTS.includes(n)
+						)
+						if (badColors.length) {
+							throw new Error(
+								`theme colors accepts only custom-1..custom-8, not: ${badColors.join(', ')}. The 13 standard tldraw colors are not remappable - claw keeps them meaning the same thing everywhere.`
+							)
+						}
 						const prev = meta.clawTheme ?? {}
 						meta.clawTheme = {
 							...prev,
@@ -906,7 +916,7 @@ async function applyOps(editor, ops) {
 					report.push(
 						args.reset
 							? 'theme -> reset to tldraw defaults'
-							: `theme -> ${Object.keys(args.colors ?? {}).length} color(s), ${Object.keys(args.fonts ?? {}).length} font slot(s) remapped (stored in the document; claw clients render it, other tldraw apps show defaults)`
+							: `theme -> ${Object.keys(args.colors ?? {}).length} custom color(s), ${Object.keys(args.fonts ?? {}).length} font slot(s) set (stored in the document; shapes using custom-N make the file claw-only)`
 					)
 					break
 				}

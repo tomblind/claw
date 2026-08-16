@@ -216,26 +216,26 @@ label text, or the "name" given to an earlier op in the same batch.
       middle segment between the endpoints - give arrows sharing a corridor
       different mids so their bends don't stack. \`claw layout\` computes all
       of this automatically; hand-write route ops only for fine-tuning.
-  {"theme": {"colors": {"green": "#00c853", "blue": {"solid": "#1a73e8", "semi": "#d7e6fb"}},
+  {"theme": {"colors": {"custom-1": "#e91e63", "custom-2": {"solid": "#1a73e8", "semi": "#1a73e8"}},
              "fonts": {"sans": "Inter, system-ui, sans-serif",
                        "serif": {"family": "Lora", "url": "https://.../lora.woff2"}}}}
-      Per-document restyling of the 13 standard color names and 4 font slots.
-      A bare "#hex" derives the pale semi/pattern variants automatically (so
-      solid fills stop being pastel); an object sets exact variants, with
-      optional {"light": {...}, "dark": {...}} splits. Fonts: a CSS stack
-      (installed fonts) or {family, url} to load a webfont - tldraw loads it
-      and embeds it in renders. Stored IN the document: every claw surface
-      (app, browser, phone, renders) shows it; other tldraw apps (VS Code
-      extension) open the file fine but display default colors/fonts.
-      {"theme": {"reset": true}} returns to tldraw defaults.
-      CUSTOM COLORS: 8 extra slots ("custom-1".."custom-8") can be defined
-      the same way ({"theme": {"colors": {"custom-1": "#e91e63"}}}) and then
-      used anywhere a color is accepted. The human can also add them via the
-      "+ Add color" button in the editor's style panel. WARNING: a canvas
-      whose shapes USE custom-N opens only in claw - vanilla tldraw (e.g.
-      the VS Code extension) rejects unknown color values. The 13 standard
-      names stay fully portable; prefer remapping those unless the user
-      explicitly wants extra palette slots.
+      Adds palette colors and remaps the 4 font slots, per document. colors
+      accepts ONLY the 8 reserved slots "custom-1".."custom-8" - the 13
+      standard tldraw names are deliberately not remappable (green means
+      green in every tldraw app). A bare "#hex" derives the pale semi/pattern
+      fill variants automatically; an object sets exact variants (set "semi"
+      to the same hex for a truly saturated fill), with optional {"light":
+      {...}, "dark": {...}} splits. Once defined, custom-N works anywhere a
+      color is accepted; the human can also add slots via the "+ Add color"
+      button in the editor's style panel. Fonts: a CSS stack (installed
+      fonts) or {family, url} to load a webfont - tldraw loads it and embeds
+      it in renders. Stored IN the document; every claw surface (app,
+      browser, phone, renders) shows it. {"theme": {"reset": true}} clears it
+      (shapes still using custom-N keep validating but render placeholder
+      grey). WARNING: a canvas whose shapes USE custom-N opens only in claw -
+      vanilla tldraw (e.g. the VS Code extension) reports it as a corrupted
+      file. Prefer the 13 standard names; reach for custom slots only when
+      the palette genuinely needs more colors.
   {"delete": {"id": "..."}}
       Idempotent: an id that no longer resolves is skipped with a note, not
       an error (deleting a group's children dissolves the group, so its id
