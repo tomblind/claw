@@ -5,7 +5,7 @@ import { homedir, networkInterfaces } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { VERSION } from '../lib/version.mjs'
-import { RoomManager, pathToRoomId } from './rooms.mjs'
+import { canonicalPath, RoomManager, pathToRoomId } from './rooms.mjs'
 
 /**
  * The canvas core. Runs as an owned child of the desktop app — the app IS
@@ -63,6 +63,24 @@ const rooms = new RoomManager(log)
 const touch = () => {
 	lastActivity = Date.now()
 	requestsServed++
+}
+
+// recent canvases (per-user, survives restarts) - the dashboard's memory of
+// what to reopen after a room closes
+const RECENT = join(homedir(), '.claw-recent.json')
+function readRecent() {
+	try {
+		return JSON.parse(readFileSync(RECENT, 'utf8')).filter((e) => existsSync(e.path))
+	} catch {
+		return []
+	}
+}
+function touchRecent(path) {
+	try {
+		const p = canonicalPath(path)
+		const list = [{ path: p, at: Date.now() }, ...readRecent().filter((e) => e.path !== p)]
+		writeFileSync(RECENT, JSON.stringify(list.slice(0, 20)))
+	} catch {}
 }
 
 // ---------------------------------------------------------------------------
@@ -266,6 +284,7 @@ const api = {
 		// one write path — no stateless-write/room race. Ops execute against
 		// the room's current snapshot and load back server-side.
 		if (path) {
+			touchRecent(path)
 			const entry = rooms.getOrCreate(pathToRoomId(path))
 			const current = rooms.snapshotText(entry)
 			const { report, serialized } = await host.apply(current, ops)
@@ -284,13 +303,20 @@ const api = {
 	},
 
 	'POST /api/flush': async (body) => {
-		const flushed = rooms.flushPath(required(body, 'path'))
+		const path = required(body, 'path')
+		touchRecent(path)
+		const flushed = rooms.flushPath(path)
 		return { ok: true, hadRoom: flushed }
 	},
+
+	'GET /api/recent': async () => ({
+		recent: readRecent().map((e) => ({ ...e, live: rooms.has(e.path), id: pathToRoomId(e.path) })),
+	}),
 
 	'POST /api/open': async (body) => {
 		touch()
 		const path = required(body, 'path')
+		touchRecent(path)
 		const id = pathToRoomId(path)
 		const existed = rooms.has(path)
 		const entry = rooms.getOrCreate(id)
@@ -317,6 +343,7 @@ const api = {
 		}
 		if (!emptyTldr) throw new Error('executor not fully initialized yet - retry in a moment')
 		writeFileSync(path, emptyTldr, 'utf8')
+		touchRecent(path)
 		const id = pathToRoomId(path)
 		rooms.getOrCreate(id)
 		const port = server.address().port
@@ -347,6 +374,19 @@ function dashboard() {
 	const roomsHtml = roomRows
 		? `<h2 style="font-size:1.05rem">Live canvases</h2><table><tr><td><b>file</b></td><td><b>clients</b></td><td><b>state</b></td></tr>${roomRows}</table>`
 		: `<p style="color:#777">No live canvases. Open one from the app toolbar or: <code>claw open &lt;file.tldr&gt;</code></p>`
+	const recentRows = readRecent()
+		.filter((e) => !rooms.has(e.path))
+		.slice(0, 10)
+		.map((e) => {
+			const name = e.path.split(/[\\/]/).pop()
+			const ago = Math.round((Date.now() - e.at) / 60000)
+			const when = ago < 60 ? `${ago}m ago` : ago < 1440 ? `${Math.round(ago / 60)}h ago` : `${Math.round(ago / 1440)}d ago`
+			return `<tr><td><a href="/f/${pathToRoomId(e.path)}">${name}</a></td><td style="color:#999;font-size:.85rem">${e.path}</td><td style="color:#999">${when}</td></tr>`
+		})
+		.join('')
+	const recentHtml = recentRows
+		? `<h2 style="font-size:1.05rem">Recent</h2><table>${recentRows}</table>`
+		: ''
 	return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="manifest" href="/manifest.webmanifest">${CLAW_FAVICON}<title>Claw</title>
 <style>body{font-family:system-ui,sans-serif;max-width:640px;margin:3rem auto;padding:0 1rem;color:#1d1d1d}
 h1{font-size:1.3rem}table{border-collapse:collapse}td{padding:.2rem .8rem .2rem 0}
@@ -360,6 +400,7 @@ button{padding:.4rem 1rem;margin-right:.5rem;cursor:pointer}</style></head><body
 <tr><td>requests served</td><td>${requestsServed}</td></tr>
 </table>
 ${roomsHtml}
+${recentHtml}
 ${lanAddresses()
 	.map(
 		(ip) =>

@@ -63,6 +63,85 @@ function reportError(stage, err) {
 	window.hostError = `${stage}: ${err?.message ?? err}`
 }
 
+// ---------------------------------------------------------------------------
+// per-document theming: the document's meta.clawTheme remaps the 13 standard
+// color names and the 4 font slots (names stay standard, so the file opens in
+// any tldraw — vanilla apps just show default colors/fonts). Applied through
+// tldraw's own ThemeManager, so exports/renders pick it up too.
+// ---------------------------------------------------------------------------
+let PRISTINE_THEME = null
+let lastAppliedTheme = '__unset__'
+
+const mixHex = (hex, other, t) => {
+	const p = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16))
+	const [a, b] = [p(hex), p(other)]
+	return '#' + a.map((v, i) => Math.round(v + (b[i] - v) * t).toString(16).padStart(2, '0')).join('')
+}
+
+function applyClawTheme(editor, { force = false } = {}) {
+	try {
+		if (typeof editor.getTheme !== 'function' || typeof editor.updateThemes !== 'function') return
+		PRISTINE_THEME ??= JSON.parse(JSON.stringify(editor.getTheme('default')))
+		const spec = editor.getDocumentSettings?.()?.meta?.clawTheme ?? null
+		const key = JSON.stringify(spec)
+		if (!force && key === lastAppliedTheme) return
+		lastAppliedTheme = key
+		const next = JSON.parse(JSON.stringify(PRISTINE_THEME))
+		for (const [name, val] of Object.entries(spec?.colors ?? {})) {
+			for (const mode of ['light', 'dark']) {
+				const base = next.colors?.[mode]?.[name]
+				if (!base || typeof base !== 'object') continue
+				if (typeof val === 'string') {
+					const bg = mode === 'light' ? '#ffffff' : '#101011'
+					Object.assign(base, {
+						solid: val,
+						semi: mixHex(val, bg, 0.7),
+						pattern: mixHex(val, bg, 0.45),
+					})
+					if ('fill' in base) base.fill = val
+				} else {
+					Object.assign(base, val[mode] ?? val)
+				}
+			}
+		}
+		// fonts resolve through the --tl-font-* CSS vars at render time, so the
+		// remap must land there too (the theme def alone only drives loading)
+		const rootStyle = document.documentElement.style
+		for (const slot of ['draw', 'sans', 'serif', 'mono']) rootStyle.removeProperty(`--tl-font-${slot}`)
+		document.getElementById('claw-theme-fonts')?.remove()
+		let fontFaceCss = ''
+		for (const [slot, val] of Object.entries(spec?.fonts ?? {})) {
+			const base = next.fonts?.[slot]
+			if (!base) continue
+			if (typeof val === 'string') {
+				base.fontFamily = val
+				base.faces = []
+				rootStyle.setProperty(`--tl-font-${slot}`, val)
+			} else if (val?.family) {
+				base.fontFamily = `'${val.family}'`
+				rootStyle.setProperty(`--tl-font-${slot}`, `'${val.family}', sans-serif`)
+				if (val.url) {
+					base.faces = [
+						{ family: val.family, src: { url: val.url, format: val.format ?? 'woff2' }, weight: 'normal' },
+					]
+					fontFaceCss += `@font-face{font-family:'${val.family}';src:url('${val.url}');font-display:swap}\n`
+				} else {
+					base.faces = []
+				}
+			}
+		}
+		if (fontFaceCss) {
+			const el = document.createElement('style')
+			el.id = 'claw-theme-fonts'
+			el.textContent = fontFaceCss
+			document.head.appendChild(el)
+		}
+		editor.updateThemes({ ...editor.getThemes(), default: next })
+	} catch (err) {
+		reportError('theme', err)
+	}
+}
+
 /** PNG export via whichever API this tldraw version ships. */
 async function toPngBlob(editor, ids, opts) {
 	if (typeof editor.toImage === 'function') {
@@ -115,6 +194,7 @@ function setupHost(editor) {
 				throw new Error(`tldraw could not parse the file: ${JSON.stringify(parsed.error)}`)
 			}
 			TL.loadSnapshot(editor.store, TL.getSnapshot(parsed.value))
+				applyClawTheme(editor) // each document carries its own theme
 			const shapes = editor.getCurrentPageShapes()
 			return { pages: editor.getPages().length, shapes: shapes.length }
 		},
@@ -709,6 +789,29 @@ async function applyOps(editor, ops) {
 						touched.updated.push(s.id)
 					}
 					report.push(`row ${shapes.length} shape(s), gap ${gap}, centered on ${short(shapes[0].id)}`)
+					break
+				}
+
+				case 'theme': {
+					const settings = editor.getDocumentSettings()
+					const meta = { ...(settings.meta ?? {}) }
+					if (args.reset) {
+						delete meta.clawTheme
+					} else {
+						const prev = meta.clawTheme ?? {}
+						meta.clawTheme = {
+							...prev,
+							...(args.colors ? { colors: { ...(prev.colors ?? {}), ...args.colors } } : {}),
+							...(args.fonts ? { fonts: { ...(prev.fonts ?? {}), ...args.fonts } } : {}),
+						}
+					}
+					editor.updateDocumentSettings({ meta })
+					applyClawTheme(editor, { force: true })
+					report.push(
+						args.reset
+							? 'theme -> reset to tldraw defaults'
+							: `theme -> ${Object.keys(args.colors ?? {}).length} color(s), ${Object.keys(args.fonts ?? {}).length} font slot(s) remapped (stored in the document; claw clients render it, other tldraw apps show defaults)`
+					)
 					break
 				}
 
@@ -1393,6 +1496,15 @@ function onMount(editor) {
 	try {
 		window.__editor = editor
 		setupHost(editor)
+		applyClawTheme(editor)
+		// live retheme: a `theme` op lands in document meta and every connected
+		// tab restyles without reloading
+		if (typeof TL.react === 'function') {
+			TL.react('claw-theme', () => {
+				editor.getDocumentSettings() // tracked; retheme when meta changes
+				applyClawTheme(editor)
+			})
+		}
 		if (EXECUTOR) {
 			neutralizeArrowZClamp(editor)
 			startExecutor()

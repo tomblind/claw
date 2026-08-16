@@ -25,6 +25,7 @@ const OPS = {
 	distribute: { required: ['ids'], optional: ['axis', 'gap'] },
 	row: { required: ['ids'], optional: ['gap'] },
 	clear: { required: ['id'], optional: [] },
+	theme: { required: [], optional: ['colors', 'fonts', 'reset'] },
 	resize: { required: ['id'], optional: ['w', 'h'] },
 	connect: { required: ['from', 'to'], optional: ['label', 'color', 'kind'] },
 	route: { required: ['id'], optional: ['fromAnchor', 'toAnchor', 'mid', 'kind', 'labelAt'] },
@@ -215,6 +216,18 @@ label text, or the "name" given to an earlier op in the same batch.
       middle segment between the endpoints - give arrows sharing a corridor
       different mids so their bends don't stack. \`claw layout\` computes all
       of this automatically; hand-write route ops only for fine-tuning.
+  {"theme": {"colors": {"green": "#00c853", "blue": {"solid": "#1a73e8", "semi": "#d7e6fb"}},
+             "fonts": {"sans": "Inter, system-ui, sans-serif",
+                       "serif": {"family": "Lora", "url": "https://.../lora.woff2"}}}}
+      Per-document restyling of the 13 standard color names and 4 font slots.
+      A bare "#hex" derives the pale semi/pattern variants automatically (so
+      solid fills stop being pastel); an object sets exact variants, with
+      optional {"light": {...}, "dark": {...}} splits. Fonts: a CSS stack
+      (installed fonts) or {family, url} to load a webfont - tldraw loads it
+      and embeds it in renders. Stored IN the document: every claw surface
+      (app, browser, phone, renders) shows it; other tldraw apps (VS Code
+      extension) open the file fine but display default colors/fonts.
+      {"theme": {"reset": true}} returns to tldraw defaults.
   {"delete": {"id": "..."}}
       Idempotent: an id that no longer resolves is skipped with a note, not
       an error (deleting a group's children dissolves the group, so its id
