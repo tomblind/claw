@@ -230,8 +230,9 @@ label text, or the "name" given to an earlier op in the same batch.
       fill), with optional {"light": {...}, "dark": {...}} splits. Fonts: a
       CSS stack (installed fonts) or {family, url} to load a webfont -
       embedded in renders too. Once defined, custom-N works anywhere a
-      color/font is accepted; the human can also add colors via the "+ Add
-      color" button in the editor's style panel. Stored IN the document;
+      color/font is accepted; the human can also add both via the "+ Add
+      color" / "+ Add font" buttons in the editor's style panel. Stored IN
+      the document;
       every claw surface (app, browser, phone, renders) shows it.
       {"theme": {"reset": true}} clears it (shapes still using custom-N keep
       validating but render placeholder grey/default font). WARNING: a canvas
