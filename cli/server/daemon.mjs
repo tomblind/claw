@@ -309,6 +309,8 @@ const api = {
 		return { ok: true, hadRoom: flushed }
 	},
 
+	'GET /api/debug-executor': async () => await withExecutor((call) => call('debug', [])),
+
 	'GET /api/recent': async () => ({
 		recent: readRecent().map((e) => ({ ...e, live: rooms.has(e.path), id: pathToRoomId(e.path) })),
 	}),
@@ -463,7 +465,12 @@ const server = createServer(async (req, res) => {
 		}
 		// editor page: /f/<roomId> for humans, /executor-page for the app's frame
 		if (req.method === 'GET' && (url.pathname.startsWith('/f/') || url.pathname === '/executor-page')) {
-			res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+			// no-store: the port is fixed, so URLs are stable across restarts and
+			// webviews would otherwise serve a STALE cached bundle after deploys
+			res.writeHead(200, {
+				'content-type': 'text/html; charset=utf-8',
+				'cache-control': 'no-store',
+			})
 			res.end(readFileSync(PAGE_HTML, 'utf8'))
 			return
 		}

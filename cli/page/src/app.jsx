@@ -26,6 +26,63 @@ const { Tldraw } = TL
  */
 const EXECUTOR = new URLSearchParams(location.search).get('executor') != null
 
+// Reserved custom color slots (tldraw's own color-picker example pattern):
+// the names live in the style enum from startup — here AND in the sync
+// server — so documents using them always validate; the actual hex values
+// come from document meta (clawTheme.colors) and slots without a value stay
+// hidden in the picker. NOTE: canvases using these are claw-only (vanilla
+// tldraw rejects unknown enum values).
+export const CUSTOM_COLOR_SLOTS = Array.from({ length: 8 }, (_, i) => `custom-${i + 1}`)
+// Slot registration must go through the `themes` option (of <Tldraw> AND
+// useSync): store creation calls registerColorsFromThemes, which REMOVES any
+// enum value not declared by a theme definition — ad-hoc addValues gets
+// stripped. This extra definition is never activated; it exists purely to
+// declare the slots. Actual values come from document meta via applyClawTheme.
+// tldraw's registerColorsFromThemes STRIPS enum values not present in the
+// theme definitions it's given — and parseTldrawJsonFile (used by every
+// executor load) internally creates a store with default themes only, wiping
+// our slots from the shared enum. Re-assert after anything that parses.
+function ensureCustomSlots() {
+	for (const styleProp of [
+		TL.DefaultColorStyle,
+		TL.DefaultLabelColorStyle,
+		TL.geoShapeProps?.labelColor,
+		TL.arrowShapeProps?.labelColor,
+	]) {
+		try {
+			styleProp?.addValues?.(...CUSTOM_COLOR_SLOTS)
+			// make the slots UNREMOVABLE: internal store creations (e.g. inside
+			// parseTldrawJsonFile) re-run registerColorsFromThemes with default
+			// themes, which strips unknown values BEFORE validating incoming
+			// records - a after-the-fact re-add can't save that parse
+			if (styleProp.removeValues && !styleProp.__clawGuarded) {
+				const orig = styleProp.removeValues.bind(styleProp)
+				styleProp.removeValues = (...vals) =>
+					orig(...vals.filter((v) => !CUSTOM_COLOR_SLOTS.includes(v)))
+				styleProp.__clawGuarded = true
+			}
+		} catch {}
+	}
+}
+ensureCustomSlots()
+
+const CLAW_THEMES = (() => {
+	try {
+		// a COMPLETE definition (clone of the default) so nothing downstream
+		// trips on missing fields; only the extra color slots differ
+		const def = JSON.parse(JSON.stringify(TL.DEFAULT_THEME))
+		def.id = 'claw'
+		const placeholder = () => ({ solid: '#888888', semi: '#dddddd', pattern: '#bbbbbb', fill: '#888888' })
+		for (const mode of ['light', 'dark']) {
+			for (const s of CUSTOM_COLOR_SLOTS) def.colors[mode][s] = placeholder()
+		}
+		return { claw: def }
+	} catch (err) {
+		console.warn('claw theme registration unavailable', err)
+		return undefined
+	}
+})()
+
 function syncParams() {
 	if (EXECUTOR) return null
 	const params = new URLSearchParams(location.search)
@@ -89,7 +146,12 @@ function applyClawTheme(editor, { force = false } = {}) {
 		const next = JSON.parse(JSON.stringify(PRISTINE_THEME))
 		for (const [name, val] of Object.entries(spec?.colors ?? {})) {
 			for (const mode of ['light', 'dark']) {
-				const base = next.colors?.[mode]?.[name]
+				let base = next.colors?.[mode]?.[name]
+				// custom slots have no default entry - synthesize one from a template
+				if (!base && CUSTOM_COLOR_SLOTS.includes(name) && next.colors?.[mode]) {
+					base = JSON.parse(JSON.stringify(next.colors[mode].black ?? {}))
+					next.colors[mode][name] = base
+				}
 				if (!base || typeof base !== 'object') continue
 				if (typeof val === 'string') {
 					const bg = mode === 'light' ? '#ffffff' : '#101011'
@@ -194,6 +256,7 @@ function setupHost(editor) {
 				throw new Error(`tldraw could not parse the file: ${JSON.stringify(parsed.error)}`)
 			}
 			TL.loadSnapshot(editor.store, TL.getSnapshot(parsed.value))
+				ensureCustomSlots() // parseTldrawJsonFile strips them (see above)
 				applyClawTheme(editor) // each document carries its own theme
 			const shapes = editor.getCurrentPageShapes()
 			return { pages: editor.getPages().length, shapes: shapes.length }
@@ -301,6 +364,38 @@ function setupHost(editor) {
 		 */
 		async applyOps(ops) {
 			return applyOps(editor, ops)
+		},
+
+		/** diagnostics for the live executor (claw-internal) */
+		async debug() {
+			let createTest = 'ok'
+			const testId = TL.createShapeId()
+			try {
+				editor.createShape({ id: testId, type: 'geo', x: -9999, y: -9999, props: { w: 4, h: 4, color: 'custom-1' } })
+				editor.deleteShape(testId)
+			} catch (err) {
+				createTest = String(err?.message ?? err).slice(0, 120)
+			}
+			// replicate the exact ops path: serialize -> load -> applyOps
+			let opsPathTest = 'ok'
+			try {
+				const txt = await window.host.serialize()
+				await window.host.load(txt)
+				await applyOps(editor, [
+					{ add: { kind: 'box', at: { x: -9999, y: -9999 }, size: { w: 4, h: 4 }, color: 'custom-1', name: '__cc' } },
+					{ delete: { id: '__cc' } },
+				])
+			} catch (err) {
+				opsPathTest = String(err?.message ?? err).slice(0, 140)
+			}
+			return {
+				userAgent: navigator.userAgent.slice(0, 120),
+				themes: typeof editor.getThemes === 'function' ? Object.keys(editor.getThemes()) : null,
+				clawThemesDefined: !!CLAW_THEMES,
+				colorValues: TL.DefaultColorStyle?.values ? [...TL.DefaultColorStyle.values] : null,
+				createTest,
+				opsPathTest,
+			}
 		},
 	}
 	window.hostReady = true
@@ -470,6 +565,7 @@ function unchainArrow(editor, head) {
 }
 
 async function applyOps(editor, ops) {
+	ensureCustomSlots() // defensive: anything that parsed a file may have stripped them
 	const report = []
 	const aliases = new Map() // name given in add_screen -> shape id
 	const stackY = new Map() // screenId -> next y offset for at:"top" stacking
@@ -1542,10 +1638,65 @@ function persistSessionState(editor) {
 	})
 }
 
+/**
+ * "+ Add color" in the style panel: picks a hex with the native color dialog,
+ * writes it into the next free custom slot in document meta (so it syncs,
+ * persists, and undoes like any edit), pushes the theme, and applies the new
+ * color to the current selection.
+ */
+function CustomStylePanel(props) {
+	const editor = TL.useEditor()
+	const inputRef = React.useRef(null)
+	const relevant = typeof TL.useRelevantStyles === 'function' ? TL.useRelevantStyles() : undefined
+	const addColor = (hex) => {
+		try {
+			const settings = editor.getDocumentSettings()
+			const meta = { ...(settings.meta ?? {}) }
+			const colors = { ...(meta.clawTheme?.colors ?? {}) }
+			const free = CUSTOM_COLOR_SLOTS.find((s) => !(s in colors))
+			if (!free) {
+				window.alert(`All ${CUSTOM_COLOR_SLOTS.length} custom color slots are in use`)
+				return
+			}
+			colors[free] = hex
+			meta.clawTheme = { ...(meta.clawTheme ?? {}), colors }
+			editor.updateDocumentSettings({ meta })
+			applyClawTheme(editor, { force: true })
+			if (TL.DefaultColorStyle) {
+				editor.setStyleForSelectedShapes?.(TL.DefaultColorStyle, free)
+				editor.setStyleForNextShapes?.(TL.DefaultColorStyle, free)
+			}
+		} catch (err) {
+			reportError('add-color', err)
+		}
+	}
+	return (
+		<TL.DefaultStylePanel {...props}>
+			<TL.DefaultStylePanelContent styles={relevant} />
+			<div className="tlui-style-panel__section">
+				<TL.TldrawUiButton
+					type="menu"
+					data-testid="claw-add-color"
+					onClick={() => inputRef.current?.click()}
+				>
+					<TL.TldrawUiButtonLabel>＋ Add color</TL.TldrawUiButtonLabel>
+				</TL.TldrawUiButton>
+				<input
+					ref={inputRef}
+					type="color"
+					style={{ display: 'none' }}
+					onChange={(e) => addColor(e.target.value)}
+				/>
+			</div>
+		</TL.DefaultStylePanel>
+	)
+}
+const APP_COMPONENTS = { StylePanel: CustomStylePanel }
+
 function StandaloneApp() {
 	return (
 		<div style={{ position: 'fixed', inset: 0 }}>
-			<Tldraw onMount={onMount} />
+			<Tldraw onMount={onMount} components={APP_COMPONENTS} themes={CLAW_THEMES} />
 		</div>
 	)
 }
@@ -1561,6 +1712,7 @@ function SyncApp() {
 		uri: SYNC.uri,
 		assets: inlineAssets,
 		userInfo: SYNC_USER_INFO,
+		themes: CLAW_THEMES,
 	})
 	// Session state (grid, camera, tool prefs) must be restored into the store
 	// BEFORE the editor mounts — the editor writes fresh instance state on
@@ -1594,7 +1746,7 @@ function SyncApp() {
 	if (!restored && store.status !== 'error') return null
 	return (
 		<div style={{ position: 'fixed', inset: 0 }}>
-			<Tldraw store={store} onMount={onMount} />
+			<Tldraw store={store} onMount={onMount} components={APP_COMPONENTS} themes={CLAW_THEMES} />
 		</div>
 	)
 }

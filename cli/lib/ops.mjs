@@ -228,6 +228,14 @@ label text, or the "name" given to an earlier op in the same batch.
       (app, browser, phone, renders) shows it; other tldraw apps (VS Code
       extension) open the file fine but display default colors/fonts.
       {"theme": {"reset": true}} returns to tldraw defaults.
+      CUSTOM COLORS: 8 extra slots ("custom-1".."custom-8") can be defined
+      the same way ({"theme": {"colors": {"custom-1": "#e91e63"}}}) and then
+      used anywhere a color is accepted. The human can also add them via the
+      "+ Add color" button in the editor's style panel. WARNING: a canvas
+      whose shapes USE custom-N opens only in claw - vanilla tldraw (e.g.
+      the VS Code extension) rejects unknown color values. The 13 standard
+      names stay fully portable; prefer remapping those unless the user
+      explicitly wants extra palette slots.
   {"delete": {"id": "..."}}
       Idempotent: an id that no longer resolves is skipped with a note, not
       an error (deleting a group's children dissolves the group, so its id
