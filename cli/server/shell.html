@@ -1,0 +1,348 @@
+<!doctype html>
+<html>
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<link rel="manifest" href="/manifest.webmanifest">
+	__FAVICON__
+	<title>Claw – v__VERSION__</title>
+	<style>
+		* { margin: 0; padding: 0; box-sizing: border-box; }
+		html, body { height: 100%; }
+		body { display: flex; flex-direction: column; font-family: 'Segoe UI', system-ui, sans-serif; background: #16161c; }
+
+		#bar { display: flex; align-items: flex-end; gap: 3px; padding: 6px 8px 0 8px; background: #16161c; color: #cfd2dc; user-select: none; -webkit-user-select: none; flex-shrink: 0; }
+		.icon-btn { font: inherit; font-size: 15px; background: transparent; color: #e8eaf1; border: none; border-radius: 6px; padding: 5px 9px; margin-bottom: 4px; cursor: pointer; line-height: 1; }
+		.icon-btn:hover { background: #32324a; }
+		#tabs { display: flex; align-items: flex-end; gap: 3px; overflow-x: auto; flex: 1; scrollbar-width: none; }
+		.tab { font-size: 13px; color: #c9ccd8; background: #23232e; border: 1px solid #30303e; border-bottom: none; border-radius: 7px 7px 0 0; padding: 7px 16px 8px; cursor: pointer; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; flex-shrink: 0; }
+		.tab:hover { background: #2e2e3c; }
+		.tab.active { background: #fbfbfb; color: #1d1d1d; }
+		#dot { width: 9px; height: 9px; border-radius: 50%; background: #666; margin: 0 4px 12px 6px; flex-shrink: 0; }
+		#dot.up { background: #4cb05e; }
+
+		#main { position: relative; flex: 1; background: #fbfbfb; }
+		#frame { position: absolute; inset: 0; border: 0; width: 100%; height: 100%; }
+		#empty { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; gap: 10px; background: #fbfbfb; color: #777; font-size: 15px; text-align: center; }
+		#empty.show { display: flex; }
+		#empty .hint { font-size: 13px; color: #999; }
+
+		.modal-wrap { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,.35); z-index: 50; }
+		.modal-wrap.show { display: flex; }
+		.modal { background: #fff; color: #1d1d1d; border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,.35); width: 480px; max-width: calc(100vw - 40px); max-height: calc(100vh - 80px); display: flex; flex-direction: column; }
+		.modal header { display: flex; align-items: center; padding: 14px 16px 10px; font-size: 16px; font-weight: 600; }
+		.modal header .x { margin-left: auto; border: none; background: none; font-size: 16px; cursor: pointer; color: #555; padding: 2px 6px; }
+		.modal .body { padding: 0 16px 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+		.row-btn { display: flex; align-items: center; gap: 8px; font: inherit; font-size: 13.5px; text-align: left; background: #fff; border: 1px solid #ccc; border-radius: 6px; padding: 8px 10px; cursor: pointer; }
+		.row-btn:hover { background: #f2f3f7; }
+		.row-btn.selected { border-color: #4263eb; box-shadow: 0 0 0 1px #4263eb; }
+		.row-btn .sub { color: #999; font-size: 12px; margin-left: auto; white-space: nowrap; }
+		.field-row { display: flex; align-items: center; gap: 8px; padding-top: 6px; }
+		.field-row label { font-size: 13.5px; }
+		.field-row input { flex: 1; font: inherit; font-size: 13.5px; padding: 7px 9px; border: 1px solid #ccc; border-radius: 6px; }
+		.primary { font: inherit; font-size: 13.5px; background: #dbe4ff; border: 1px solid #4263eb; color: #2b3a9e; border-radius: 6px; padding: 7px 16px; cursor: pointer; }
+		.primary:hover { background: #c7d3fb; }
+		.err { color: #c92a2a; font-size: 12.5px; min-height: 16px; }
+		.section-label { font-size: 13px; font-weight: 600; padding-top: 4px; }
+		.muted { color: #999; font-size: 13px; padding: 6px 0; }
+
+		#toast { position: fixed; top: 46px; right: 12px; background: #2b2b36; color: #e8eaf1; font-size: 13px; font-family: 'Segoe UI', system-ui, sans-serif; padding: 8px 14px; border-radius: 7px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 60; }
+		#toast.show { opacity: 1; }
+	</style>
+</head>
+<body>
+	<div id="bar">
+		<button class="icon-btn" id="new-btn" title="New document">📄</button>
+		<button class="icon-btn" id="open-btn" title="Open document">📂</button>
+		<div id="tabs"></div>
+		<button class="icon-btn" id="globe" title="Copy shareable link" style="display:none">🌐</button>
+		<span id="dot" title="agent executor"></span>
+	</div>
+	<div id="main">
+		<!-- clipboard delegation: the canvas inside is cross-frame -->
+		<iframe id="frame" src="about:blank" allow="clipboard-read; clipboard-write"></iframe>
+		<div id="empty" class="show">
+			<div>Create or open a document to get started</div>
+			<div class="hint">📄 new &nbsp;·&nbsp; 📂 open</div>
+		</div>
+	</div>
+
+	<div class="modal-wrap" id="open-modal">
+		<div class="modal">
+			<header>Open Document… <button class="x" data-close>✕</button></header>
+			<div class="body" id="open-body"></div>
+		</div>
+	</div>
+
+	<div class="modal-wrap" id="new-modal">
+		<div class="modal">
+			<header>Create Document… <button class="x" data-close>✕</button></header>
+			<div class="body">
+				<div id="new-disk-wrap"></div>
+				<div class="section-label">Save to:</div>
+				<div id="new-locations" style="display:flex;flex-direction:column;gap:6px;max-height:200px;overflow-y:auto"></div>
+				<div class="field-row">
+					<label for="new-name">Name:</label>
+					<input id="new-name" value="My New Doc.tldr" spellcheck="false">
+					<button class="primary" id="new-save">Save</button>
+				</div>
+				<div class="err" id="new-err"></div>
+			</div>
+		</div>
+	</div>
+
+	<div id="toast"></div>
+
+	<script>
+	'use strict'
+	const $ = (id) => document.getElementById(id)
+	const qs = new URLSearchParams(location.search)
+	const IN_APP = qs.get('app') === '1'
+
+	let tabs = [] // [{id, path, file}] in arrival order; new rooms append quietly
+	let activeId = null
+	let shellState = { version: '', executor: 'none', rooms: [], recent: [], lan: [], locations: [] }
+	let newModalDir = null
+
+	// deep link: /f/<id> serves this shell with that doc active
+	const pathMatch = location.pathname.match(/^\/f\/([^/]+)/)
+	if (pathMatch) activeId = pathMatch[1]
+
+	const post = (url, body) =>
+		fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body ?? {}) })
+
+	function toast(msg) {
+		$('toast').textContent = msg
+		$('toast').classList.add('show')
+		setTimeout(() => $('toast').classList.remove('show'), 1600)
+	}
+
+	function setActive(id) {
+		activeId = id
+		history.replaceState(null, '', (id ? `/f/${id}` : '/') + (IN_APP ? '?app=1' : ''))
+		render()
+	}
+
+	function render() {
+		const bar = $('tabs')
+		bar.textContent = ''
+		for (const t of tabs) {
+			const el = document.createElement('button')
+			el.className = 'tab' + (t.id === activeId ? ' active' : '')
+			el.textContent = t.file
+			el.title = t.path
+			el.dataset.testid = 'shell-tab'
+			el.onclick = () => setActive(t.id)
+			bar.appendChild(el)
+		}
+		// swap-on-switch: one iframe, src follows the active tab
+		const want = activeId ? `/f/${activeId}?embed=1` : 'about:blank'
+		if ($('frame').dataset.src !== want) {
+			$('frame').dataset.src = want
+			$('frame').src = want
+		}
+		$('empty').classList.toggle('show', !activeId)
+		$('globe').style.display = IN_APP && activeId ? '' : 'none'
+	}
+
+	async function poll() {
+		try {
+			const r = await fetch('/api/shell-state')
+			if (!r.ok) throw new Error()
+			shellState = await r.json()
+			$('dot').className = shellState.executor === 'connected' ? 'up' : ''
+			$('dot').title = 'agent executor: ' + shellState.executor
+			// tabs mirror live rooms: append newcomers WITHOUT stealing focus
+			// (agent-opened docs surface quietly; user actions call setActive)
+			const live = new Map(shellState.rooms.map((room) => [room.id, room]))
+			tabs = tabs.filter((t) => live.has(t.id) || t.id === activeId)
+			const known = new Set(tabs.map((t) => t.id))
+			for (const room of shellState.rooms) {
+				if (!known.has(room.id)) tabs.push({ id: room.id, path: room.path, file: room.file })
+			}
+			// nothing was active (fresh window): showing the first doc steals
+			// focus from nobody. Never switch away from an active tab, though.
+			if (!activeId && tabs.length) setActive(tabs[0].id)
+			render()
+		} catch {
+			$('dot').className = ''
+		}
+	}
+
+	// displayed tabs count as activity - without this, background rooms would
+	// hit the core's idle eviction and tabs would silently vanish
+	function keepalive() {
+		if (tabs.length) post('/api/keepalive', { ids: tabs.map((t) => t.id) }).catch(() => {})
+	}
+
+	// ---- native dialog bridge (app only: the parent window owns Neutralino) --
+	let dialogReqId = 0
+	function nativeDialog(type) {
+		return new Promise((resolve) => {
+			const reqId = ++dialogReqId
+			const onMsg = (e) => {
+				if (e.data?.type === 'claw-dialog-result' && e.data.reqId === reqId) {
+					window.removeEventListener('message', onMsg)
+					resolve(e.data.path ?? null)
+				}
+			}
+			window.addEventListener('message', onMsg)
+			window.parent.postMessage({ type, reqId }, '*')
+			setTimeout(() => {
+				window.removeEventListener('message', onMsg)
+				resolve(null)
+			}, 120000)
+		})
+	}
+
+	// ---- open modal ----------------------------------------------------------
+	function showOpenModal() {
+		const body = $('open-body')
+		body.textContent = ''
+		if (IN_APP) {
+			const b = document.createElement('button')
+			b.className = 'row-btn'
+			b.dataset.testid = 'shell-open-disk'
+			b.textContent = '📂 Open on Disk…'
+			b.onclick = async () => {
+				const path = await nativeDialog('claw-open-dialog')
+				if (path) openPath(path)
+			}
+			body.appendChild(b)
+		}
+		const recents = shellState.recent.filter((e) => !e.live)
+		for (const e of recents) {
+			const b = document.createElement('button')
+			b.className = 'row-btn'
+			b.dataset.testid = 'shell-recent'
+			b.textContent = e.path.split(/[\\/]/).pop()
+			const sub = document.createElement('span')
+			sub.className = 'sub'
+			sub.textContent = e.path
+			b.appendChild(sub)
+			b.onclick = () => openPath(e.path)
+			body.appendChild(b)
+		}
+		if (!recents.length && !IN_APP) {
+			const d = document.createElement('div')
+			d.className = 'muted'
+			d.textContent = 'No recent documents. (Opening arbitrary disk paths needs the app.)'
+			body.appendChild(d)
+		}
+		$('open-modal').classList.add('show')
+	}
+
+	async function openPath(path) {
+		try {
+			const r = await post('/api/open', { path })
+			const b = await r.json()
+			if (!r.ok) throw new Error(b.error ?? 'could not open')
+			closeModals()
+			await poll()
+			setActive(b.id)
+		} catch (err) {
+			toast(String(err.message ?? err))
+		}
+	}
+
+	// ---- new modal -----------------------------------------------------------
+	function showNewModal() {
+		$('new-err').textContent = ''
+		const diskWrap = $('new-disk-wrap')
+		diskWrap.textContent = ''
+		if (IN_APP) {
+			const b = document.createElement('button')
+			b.className = 'row-btn'
+			b.style.width = '100%'
+			b.dataset.testid = 'shell-new-disk'
+			b.textContent = '📂 Save to Disk…'
+			b.onclick = async () => {
+				const path = await nativeDialog('claw-save-dialog')
+				if (path) createAt(path)
+			}
+			diskWrap.appendChild(b)
+		}
+		const locs = $('new-locations')
+		locs.textContent = ''
+		const locations = shellState.locations
+		newModalDir = locations[0] ?? null
+		locations.forEach((dir) => {
+			const b = document.createElement('button')
+			b.className = 'row-btn' + (dir === newModalDir ? ' selected' : '')
+			b.dataset.testid = 'shell-location'
+			b.textContent = dir
+			b.onclick = () => {
+				newModalDir = dir
+				for (const el of locs.children) el.classList.toggle('selected', el === b)
+			}
+			locs.appendChild(b)
+		})
+		$('new-modal').classList.add('show')
+		$('new-name').focus()
+		$('new-name').select()
+	}
+
+	async function createAt(fullPath) {
+		try {
+			const r = await post('/api/create', { path: fullPath })
+			const b = await r.json()
+			if (!r.ok) throw new Error(b.error ?? 'could not create')
+			closeModals()
+			await poll()
+			setActive(b.id)
+		} catch (err) {
+			$('new-err').textContent = String(err.message ?? err)
+		}
+	}
+
+	function submitNew() {
+		let name = $('new-name').value.trim()
+		if (!name) return
+		if (!/\.tldr$/i.test(name)) name += '.tldr'
+		if (!newModalDir) {
+			$('new-err').textContent = 'pick a folder'
+			return
+		}
+		const sep = newModalDir.includes('\\') ? '\\' : '/'
+		createAt(newModalDir.replace(/[\\/]+$/, '') + sep + name)
+	}
+
+	function closeModals() {
+		for (const el of document.querySelectorAll('.modal-wrap')) el.classList.remove('show')
+	}
+
+	// ---- wiring --------------------------------------------------------------
+	$('new-btn').onclick = () => showNewModal()
+	$('open-btn').onclick = () => showOpenModal()
+	$('new-save').onclick = submitNew
+	$('new-name').addEventListener('keydown', (e) => {
+		if (e.key === 'Enter') submitNew()
+		if (e.key === 'Escape') closeModals()
+	})
+	for (const el of document.querySelectorAll('[data-close]')) el.onclick = closeModals
+	for (const el of document.querySelectorAll('.modal-wrap')) {
+		el.addEventListener('mousedown', (e) => {
+			if (e.target === el) closeModals()
+		})
+	}
+	window.addEventListener('keydown', (e) => {
+		if (e.key === 'Escape') closeModals()
+	})
+	$('globe').onclick = async () => {
+		if (!activeId) return
+		const base = shellState.lan[0] ?? location.origin
+		try {
+			await navigator.clipboard.writeText(`${base}/f/${activeId}`)
+			toast('Link copied — open it in any browser on your network')
+		} catch {
+			toast('Could not access the clipboard')
+		}
+	}
+
+	render()
+	poll()
+	setInterval(poll, 2500)
+	setInterval(keepalive, 60000)
+	</script>
+</body>
+</html>

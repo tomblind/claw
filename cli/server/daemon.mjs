@@ -5,7 +5,7 @@ import { homedir, networkInterfaces } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { VERSION } from '../lib/version.mjs'
-import { canonicalPath, RoomManager, pathToRoomId } from './rooms.mjs'
+import { canonicalPath, RoomManager, pathToRoomId, roomIdToPath } from './rooms.mjs'
 
 /**
  * The canvas core. Runs as an owned child of the desktop app — the app IS
@@ -14,7 +14,7 @@ import { canonicalPath, RoomManager, pathToRoomId } from './rooms.mjs'
  * app's own webview, which registers here over a control WebSocket.
  *
  * Serves: agent HTTP API (CLI), sync rooms (app window / browsers / phone),
- * the editor page, and a status dashboard at /.
+ * the editor page, and the tabbed shell UI at / (and /f/<id> deep links).
  */
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -24,6 +24,7 @@ const here = dirname(fileURLToPath(import.meta.url))
 const LOCKFILE = join(homedir(), '.claw-daemon.json')
 const LOGFILE = join(here, '..', 'daemon.log')
 const PAGE_HTML = join(here, '..', 'page', 'dist', 'index.html')
+const SHELL_HTML = join(here, 'shell.html')
 const FOREGROUND = process.argv.includes('--foreground')
 const BODY_LIMIT = 128 * 1024 * 1024
 
@@ -65,7 +66,7 @@ const touch = () => {
 	requestsServed++
 }
 
-// recent canvases (per-user, survives restarts) - the dashboard's memory of
+// recent canvases (per-user, survives restarts) - the Open modal's memory of
 // what to reopen after a room closes
 const RECENT = join(homedir(), '.claw-recent.json')
 function readRecent() {
@@ -335,6 +336,33 @@ const api = {
 
 	'GET /api/rooms': async () => ({ rooms: rooms.list() }),
 
+	// everything the shell page needs, in one poll
+	'GET /api/shell-state': async () => ({
+		version: VERSION,
+		executor: executorConnected() ? 'connected' : 'none',
+		rooms: rooms.list(),
+		recent: readRecent().map((e) => ({ ...e, live: rooms.has(e.path), id: pathToRoomId(e.path) })),
+		lan: lanAddresses().map((ip) => `http://${ip}:${server.address()?.port}`),
+		locations: saveLocations(),
+	}),
+
+	// tabs displayed in a shell count as activity; without this, background
+	// rooms hit idle eviction and their tabs silently vanish
+	'POST /api/keepalive': async (body) => {
+		const ids = Array.isArray(body.ids) ? body.ids : []
+		let touched = 0
+		for (const id of ids) {
+			try {
+				const entry = rooms.getByPath(roomIdToPath(id))
+				if (entry) {
+					entry.lastActivity = Date.now()
+					touched++
+				}
+			} catch {}
+		}
+		return { ok: true, touched }
+	},
+
 	'POST /api/create': async (body) => {
 		touch()
 		const path = required(body, 'path')
@@ -364,55 +392,24 @@ const CLAW_ICON_SVG =
 	'</g></svg>'
 const CLAW_FAVICON = `<link rel="icon" href="data:image/svg+xml,${encodeURIComponent(CLAW_ICON_SVG)}">`
 
-function dashboard() {
-	const mins = (ms) => Math.round(ms / 60000)
-	const roomRows = rooms
-		.list()
-		.map(
-			(r) =>
-				`<tr><td><a href="/f/${r.id}">${r.file}</a></td><td>${r.clients} client${r.clients === 1 ? '' : 's'}</td><td>${r.dirty ? 'unsaved (2s)' : 'saved'}</td></tr>`
-		)
-		.join('')
-	const roomsHtml = roomRows
-		? `<h2 style="font-size:1.05rem">Live canvases</h2><table><tr><td><b>file</b></td><td><b>clients</b></td><td><b>state</b></td></tr>${roomRows}</table>`
-		: `<p style="color:#777">No live canvases. Open one from the app toolbar or: <code>claw open &lt;file.tldr&gt;</code></p>`
-	const recentRows = readRecent()
-		.filter((e) => !rooms.has(e.path))
-		.slice(0, 10)
-		.map((e) => {
-			const name = e.path.split(/[\\/]/).pop()
-			const ago = Math.round((Date.now() - e.at) / 60000)
-			const when = ago < 60 ? `${ago}m ago` : ago < 1440 ? `${Math.round(ago / 60)}h ago` : `${Math.round(ago / 1440)}d ago`
-			return `<tr><td><a href="/f/${pathToRoomId(e.path)}">${name}</a></td><td style="color:#999;font-size:.85rem">${e.path}</td><td style="color:#999">${when}</td></tr>`
-		})
-		.join('')
-	const recentHtml = recentRows
-		? `<h2 style="font-size:1.05rem">Recent</h2><table>${recentRows}</table>`
-		: ''
-	return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="manifest" href="/manifest.webmanifest">${CLAW_FAVICON}<title>Claw</title>
-<style>body{font-family:system-ui,sans-serif;max-width:640px;margin:3rem auto;padding:0 1rem;color:#1d1d1d}
-h1{font-size:1.3rem}table{border-collapse:collapse}td{padding:.2rem .8rem .2rem 0}
-button{padding:.4rem 1rem;margin-right:.5rem;cursor:pointer}</style></head><body>
-<h1>Claw</h1>
-<table>
-<tr><td>version</td><td>${VERSION}</td></tr>
-<tr><td>pid</td><td>${process.pid}</td></tr>
-<tr><td>uptime</td><td>${mins(Date.now() - startedAt)} min</td></tr>
-<tr><td>executor</td><td>${executorConnected() ? 'connected (app)' : 'none - agent commands unavailable'}</td></tr>
-<tr><td>requests served</td><td>${requestsServed}</td></tr>
-</table>
-${roomsHtml}
-${recentHtml}
-${lanAddresses()
-	.map(
-		(ip) =>
-			`<p style="color:#555">On your phone (same network): <code>http://${ip}:${server.address()?.port}</code></p>`
-	)
-	.join('')}
-<p><form style="display:inline" method="post" action="/shutdown"><button>Stop</button></form></p>
-<p style="color:#777">This core runs as part of the Claw app. Rooms save to their .tldr
-files debounced (2s) and on every lifecycle edge.</p>
-</body></html>`
+/** Save locations for the New modal: live-doc folders, recent folders, defaults. */
+function saveLocations() {
+	const dirs = []
+	const push = (d) => {
+		if (d && existsSync(d) && !dirs.includes(d)) dirs.push(d)
+	}
+	for (const r of rooms.list()) push(dirname(r.path))
+	for (const e of readRecent().slice(0, 10)) push(dirname(e.path))
+	push(join(homedir(), 'Documents'))
+	push(homedir())
+	return dirs.slice(0, 8)
+}
+
+/** The shell page: tab bar + modals + embedded canvas, same in app and browser. */
+function shellPage() {
+	return readFileSync(SHELL_HTML, 'utf8')
+		.replaceAll('__VERSION__', VERSION)
+		.replace('__FAVICON__', CLAW_FAVICON)
 }
 
 // ---------------------------------------------------------------------------
@@ -458,12 +455,19 @@ const server = createServer(async (req, res) => {
 	}
 
 	try {
-		if (key === 'GET /') {
-			res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-			res.end(dashboard())
+		// the shell (tab bar + modals + embedded canvas) serves at / AND at
+		// /f/<id> deep links (CLI "watch live" URLs, phone bookmarks) — the
+		// shell reads the id from the path and makes that doc the active tab.
+		// The bare editor page only serves inside the shell's own iframe
+		// (?embed=1) and for the app's hidden executor frame.
+		if (key === 'GET /' || (req.method === 'GET' && url.pathname.startsWith('/f/') && url.searchParams.get('embed') == null)) {
+			res.writeHead(200, {
+				'content-type': 'text/html; charset=utf-8',
+				'cache-control': 'no-store',
+			})
+			res.end(shellPage())
 			return
 		}
-		// editor page: /f/<roomId> for humans, /executor-page for the app's frame
 		if (req.method === 'GET' && (url.pathname.startsWith('/f/') || url.pathname === '/executor-page')) {
 			// no-store: the port is fixed, so URLs are stable across restarts and
 			// webviews would otherwise serve a STALE cached bundle after deploys
@@ -593,7 +597,7 @@ async function main() {
 		})
 	})
 
-	// All interfaces, so phones/tablets on the LAN reach the dashboard and
+	// All interfaces, so phones/tablets on the LAN reach the shell and
 	// live canvases directly (trusted-network tool by design).
 	const started = () => {
 		const port = server.address().port

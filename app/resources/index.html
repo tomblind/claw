@@ -7,25 +7,9 @@
 		* { margin: 0; padding: 0; box-sizing: border-box; }
 		html, body { height: 100%; font-family: 'Inter', -apple-system, 'Segoe UI', Roboto, sans-serif; }
 		body { display: flex; flex-direction: column; background: #16161c; }
-		#bar {
-			display: flex; align-items: center; gap: 8px;
-			padding: 6px 10px; background: #16161c; color: #cfd2dc;
-			user-select: none; -webkit-user-select: none;
-		}
-		#bar button {
-			font: inherit; font-size: 13px; color: #e8eaf1;
-			background: #262633; border: 1px solid #3a3a4c; border-radius: 6px;
-			padding: 4px 12px; cursor: pointer;
-		}
-		#bar button:hover { background: #32324a; }
-		#file { font-size: 13px; color: #9a9db0; margin-left: 6px; overflow: hidden;
-			text-overflow: ellipsis; white-space: nowrap; flex: 1; }
-		#dot { width: 8px; height: 8px; border-radius: 50%; background: #666; }
-		#dot.up { background: #4cb05e; }
-		#dot.down { background: #e03131; }
 		#frame { flex: 1; border: 0; width: 100%; background: #fbfbfb; }
 		#overlay {
-			position: fixed; inset: 40px 0 0 0; display: none;
+			position: fixed; inset: 0; display: none;
 			align-items: center; justify-content: center; flex-direction: column; gap: 14px;
 			background: #fbfbfb; color: #444; font-size: 15px; text-align: center;
 		}
@@ -34,14 +18,9 @@
 	</style>
 </head>
 <body>
-	<div id="bar">
-		<button id="open">Open…</button>
-		<button id="new">New canvas</button>
-		<button id="dash">Dashboard</button>
-		<span id="file"></span>
-		<span id="dot" title="daemon status"></span>
-	</div>
-	<!-- allow: the canvas is cross-origin (core port vs shell port); without
+	<!-- the served shell page (tab bar + modals + canvas) — the same UI a
+	     browser gets, plus native dialogs bridged from this window.
+	     allow: the canvas is cross-origin (core port vs app origin); without
 	     explicit delegation the browser denies clipboard access inside it -->
 	<iframe id="frame" src="about:blank" allow="clipboard-read; clipboard-write"></iframe>
 	<!-- hidden executor: the real tldraw editor the core drives for agent

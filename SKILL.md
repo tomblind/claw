@@ -86,7 +86,7 @@ Endpoints name the shape actually hit, qualified `in <screen>` when they differ,
 
 ## Live canvas (rooms)
 
-Every write (`apply`, `new`) automatically opens a **live room** on the file and goes through it — the room is watchable from the app's dashboard, and `apply`/`new` print a `watch live:` URL. If the user asks to see what you're doing, give them that URL or tell them the file is on the dashboard — it always is.
+Every write (`apply`, `new`) automatically opens a **live room** on the file and goes through it — every live room appears as a tab in the app's tab bar, and `apply`/`new` print a `watch live:` URL. If the user asks to see what you're doing, give them that URL or tell them the file already has a tab in their Claw window — it always does.
 
 `claw open <file>` opens the same live room explicitly without writing anything — a full tldraw editor in the user's browser. While a room is live:
 

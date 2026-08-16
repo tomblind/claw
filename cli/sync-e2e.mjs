@@ -96,7 +96,9 @@ try {
 	const page = await browser.newPage()
 	const errors = []
 	page.on('pageerror', (e) => errors.push(e.message))
-	await page.goto(url)
+	// ?embed=1: the bare editor page (what the shell's iframe loads) - the
+	// plain /f/ URL now serves the tabbed shell around it
+	await page.goto(`${url}?embed=1`)
 	await page.waitForFunction('window.hostReady === true || window.hostError', { timeout: 30_000 })
 	const hostError = await page.evaluate('window.hostError ?? null')
 	check('user tab connects to room', !hostError, hostError ?? 'ok')

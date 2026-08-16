@@ -125,74 +125,54 @@ async function ensureDaemon() {
 const base = () => `http://127.0.0.1:${daemon.port}`
 
 // ---------------------------------------------------------------------------
-// navigation
+// native dialog bridge: the served shell (inside #frame) posts a request,
+// this window shows the OS dialog Neutralino owns, and posts the path back
 // ---------------------------------------------------------------------------
-function toRoomId(path) {
-	const bytes = new TextEncoder().encode(path)
-	let bin = ''
-	for (const b of bytes) bin += String.fromCharCode(b)
-	return btoa(bin).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '')
-}
-
-function showFile(path) {
-	$('frame').src = `${base()}/f/${toRoomId(path)}`
-	$('file').textContent = path
-	Neutralino.window.setTitle(`${path.split(/[\\/]/).pop()} — Claw`)
-}
-
-function showDashboard() {
-	$('frame').src = `${base()}/`
-	$('file').textContent = ''
-	Neutralino.window.setTitle('Claw')
-}
-
-// ---------------------------------------------------------------------------
-// actions
-// ---------------------------------------------------------------------------
-$('open').addEventListener('click', async () => {
-	const picked = await Neutralino.os.showOpenDialog('Open canvas', {
-		filters: [
-			{ name: 'tldraw canvas', extensions: ['tldr'] },
-			{ name: 'All files', extensions: ['*'] },
-		],
-	})
-	if (picked?.length) showFile(picked[0])
-})
-
-$('new').addEventListener('click', async () => {
-	let path = await Neutralino.os.showSaveDialog('New canvas', {
-		filters: [{ name: 'tldraw canvas', extensions: ['tldr'] }],
-	})
-	if (!path) return
-	if (!/\.tldr$/i.test(path)) path += '.tldr'
-	const r = await fetch(`${base()}/api/create`, {
-		method: 'POST',
-		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify({ path }),
-	})
-	const body = await r.json().catch(() => ({}))
-	if (!r.ok) {
-		overlay(body.error ?? 'could not create canvas', true)
-		return
+const TLDR_FILTERS = [
+	{ name: 'tldraw canvas', extensions: ['tldr'] },
+	{ name: 'All files', extensions: ['*'] },
+]
+window.addEventListener('message', async (e) => {
+	const msg = e.data
+	if (!msg || !msg.reqId) return
+	try {
+		if (msg.type === 'claw-open-dialog') {
+			const picked = await Neutralino.os.showOpenDialog('Open canvas', { filters: TLDR_FILTERS })
+			e.source.postMessage(
+				{ type: 'claw-dialog-result', reqId: msg.reqId, path: picked?.[0] ?? null },
+				'*'
+			)
+		} else if (msg.type === 'claw-save-dialog') {
+			let path = await Neutralino.os.showSaveDialog('New canvas', {
+				filters: [{ name: 'tldraw canvas', extensions: ['tldr'] }],
+			})
+			if (path && !/\.tldr$/i.test(path)) path += '.tldr'
+			e.source.postMessage(
+				{ type: 'claw-dialog-result', reqId: msg.reqId, path: path || null },
+				'*'
+			)
+		}
+	} catch (err) {
+		Neutralino.debug.log(`shell dialog bridge: ${err.message}`, 'ERROR')
+		try {
+			e.source.postMessage({ type: 'claw-dialog-result', reqId: msg.reqId, path: null }, '*')
+		} catch {}
 	}
-	showFile(path)
 })
-
-$('dash').addEventListener('click', showDashboard)
 
 $('retry').addEventListener('click', () => {
 	overlayHide()
 	boot()
 })
 
-// status dot + died-core recovery
+// died-core recovery
 setInterval(async () => {
 	if (!daemon) return
 	const ok = await health(daemon.port)
-	$('dot').className = ok ? 'up' : 'down'
 	if (!ok) {
 		daemon = null
 		$('executor').src = 'about:blank'
+		$('frame').src = 'about:blank'
 		overlay('The canvas core stopped.', true)
 	}
 }, 10000)
@@ -215,12 +195,14 @@ async function boot() {
 	try {
 		cliDir = cliDir ?? (await findCliDir())
 		daemon = await ensureDaemon()
-		$('dot').className = 'up'
 		// the hidden editor that services agent commands; registers with the
 		// core over ws as soon as it mounts
 		$('executor').src = `${base()}/executor-page?executor=1`
 		overlayHide()
-		showDashboard()
+		// the served shell: tab bar + modals + canvas, same UI as a browser
+		$('frame').src = `${base()}/?app=1`
+		const info = await health(daemon.port)
+		Neutralino.window.setTitle(`Claw – v${info?.version ?? '?'}`)
 	} catch (err) {
 		overlay(String(err.message ?? err), true)
 	}
