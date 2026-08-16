@@ -201,9 +201,11 @@ function applyClawTheme(editor, { force = false } = {}) {
 			}
 			next.fonts[slot] = base
 			// the builtin font row renders custom slots with the generic draw
-			// glyph (mask icon) - swap in a real "Aa" in the slot's own face
+			// glyph (mask icon) - swap in a real "Aa" in the slot's own face.
+			// !important: the mask is an inline style (TldrawUiIcon), and left
+			// active it clips the ::after text into garbage
 			fontFaceCss +=
-				`[data-testid="style.font.${slot}"] .tlui-icon{-webkit-mask:none;mask:none;background:none;display:flex;align-items:center;justify-content:center}` +
+				`[data-testid="style.font.${slot}"] .tlui-icon{-webkit-mask:none !important;mask:none !important;background:none !important;display:flex;align-items:center;justify-content:center}` +
 				`[data-testid="style.font.${slot}"] .tlui-icon::after{content:'Aa';font-family:${base.fontFamily};font-size:15px;line-height:1}\n`
 		}
 		if (fontFaceCss) {
@@ -1747,7 +1749,7 @@ function useClawTheme(editor) {
 }
 
 const dialogRowStyle = { display: 'flex', alignItems: 'center', gap: 8, padding: '3px 0' }
-const dialogHintStyle = { color: 'var(--color-text-3)', fontSize: 11, padding: '4px 0' }
+const dialogHintStyle = { color: 'var(--tl-color-text-3)', fontSize: 11, padding: '4px 0' }
 
 function ColorCustomizeDialog() {
 	const editor = TL.useEditor()
@@ -1827,21 +1829,51 @@ function ColorCustomizeDialog() {
 						<div key={slot} style={dialogRowStyle}>
 							{isEditing ? (
 								<>
-									<input
-										type="color"
-										data-testid="claw-color-input"
-										defaultValue={editing.hex}
-										// open the OS picker immediately (still within the
-										// click gesture that started the session)
-										ref={(el) => {
-											if (el && !el.__clawOpened) {
-												el.__clawOpened = true
-												el.click()
-											}
-										}}
-										onChange={(e) => onLive(e.target.value)}
-										style={{ width: 32, height: 24, padding: 0, border: 'none', background: 'none', cursor: 'pointer', flexShrink: 0 }}
-									/>
+									{/* same swatch look as the idle row; the native input is an
+									    invisible overlay so the OS picker anchors right here
+									    instead of the window corner (and the box keeps its shape) */}
+									<span style={{ position: 'relative', width: 22, height: 22, flexShrink: 0 }}>
+										<span
+											style={{
+												position: 'absolute',
+												inset: 0,
+												borderRadius: 4,
+												background: editing.hex,
+												border: '1px solid var(--tl-color-muted-1)',
+											}}
+										/>
+										<input
+											type="color"
+											data-testid="claw-color-input"
+											defaultValue={editing.hex}
+											// open the OS picker after layout (double rAF) so it
+											// anchors to this element's real position - clicking
+											// at commit time anchors to 0,0 (top-left)
+											ref={(el) => {
+												if (el && !el.__clawOpened) {
+													el.__clawOpened = true
+													requestAnimationFrame(() =>
+														requestAnimationFrame(() => {
+															try {
+																el.click()
+															} catch {}
+														})
+													)
+												}
+											}}
+											onChange={(e) => onLive(e.target.value)}
+											style={{
+												position: 'absolute',
+												inset: 0,
+												width: '100%',
+												height: '100%',
+												opacity: 0,
+												padding: 0,
+												border: 'none',
+												cursor: 'pointer',
+											}}
+										/>
+									</span>
 									<span style={{ flex: 1, fontFamily: 'monospace', fontSize: 12 }}>{editing.hex}</span>
 									<TL.TldrawUiButton type="primary" data-testid="claw-color-ok" onClick={() => endEdit(true)}>
 										<TL.TldrawUiButtonLabel>OK</TL.TldrawUiButtonLabel>
@@ -1861,7 +1893,7 @@ function ColorCustomizeDialog() {
 											height: 22,
 											borderRadius: 4,
 											background: colorHexOf(colors[slot]),
-											border: '1px solid var(--color-muted-1)',
+											border: '1px solid var(--tl-color-muted-1)',
 											flexShrink: 0,
 											cursor: 'pointer',
 											padding: 0,
@@ -2037,7 +2069,7 @@ function FontCustomizeDialog() {
 						<span style={{ flex: 1, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
 							{fontLabelOf(fonts[slot])}
 							{typeof fonts[slot] === 'object' && fonts[slot]?.url ? (
-								<span style={{ color: 'var(--color-text-3)' }}> · webfont</span>
+								<span style={{ color: 'var(--tl-color-text-3)' }}> · webfont</span>
 							) : null}
 						</span>
 						<TL.TldrawUiButton
@@ -2083,8 +2115,12 @@ function FontCustomizeDialog() {
 									placeholder="Font name or CSS stack"
 									autoFocus
 									value={form.family}
-									onChange={(e) => setForm({ ...form, family: e.target.value, error: null })}
-									onFocus={() => setListOpen(true)}
+									// open the list on typing, not on focus - focus-open made the
+									// dropdown blanket the edit form the instant it appeared
+									onChange={(e) => {
+										setForm({ ...form, family: e.target.value, error: null })
+										setListOpen(true)
+									}}
 									onKeyDown={(e) => {
 										if (e.key === 'Escape' && listOpen) {
 											e.stopPropagation()
@@ -2093,7 +2129,7 @@ function FontCustomizeDialog() {
 										}
 										inputKeys(e)
 									}}
-									style={{ flex: 1, border: '1px solid var(--color-muted-1)', borderRadius: 6, padding: '4px 8px' }}
+									style={{ flex: 1, border: '1px solid var(--tl-color-muted-1)', borderRadius: 6, padding: '4px 8px' }}
 								/>
 								<TL.TldrawUiButton
 									type="normal"
@@ -2116,8 +2152,8 @@ function FontCustomizeDialog() {
 										marginTop: 2,
 										maxHeight: 220,
 										overflowY: 'auto',
-										background: 'var(--color-panel)',
-										border: '1px solid var(--color-muted-1)',
+										background: 'var(--tl-color-panel)',
+										border: '1px solid var(--tl-color-muted-1)',
 										borderRadius: 6,
 										boxShadow: '0 4px 16px rgba(0,0,0,.25)',
 									}}
@@ -2137,8 +2173,8 @@ function FontCustomizeDialog() {
 												textAlign: 'left',
 												padding: '4px 8px',
 												border: 'none',
-												background: form.family === name ? 'var(--color-muted-2)' : 'transparent',
-												color: 'var(--color-text-1)',
+												background: form.family === name ? 'var(--tl-color-muted-2)' : 'transparent',
+												color: 'var(--tl-color-text-1)',
 												fontFamily: `"${name}"`,
 												fontSize: 14,
 												cursor: 'pointer',
@@ -2157,9 +2193,9 @@ function FontCustomizeDialog() {
 							value={form.url}
 							onChange={(e) => setForm({ ...form, url: e.target.value, error: null })}
 							onKeyDown={inputKeys}
-							style={{ border: '1px solid var(--color-muted-1)', borderRadius: 6, padding: '4px 8px' }}
+							style={{ border: '1px solid var(--tl-color-muted-1)', borderRadius: 6, padding: '4px 8px' }}
 						/>
-						<div style={{ fontSize: 11, color: form.error ? 'var(--color-warn)' : 'var(--color-text-3)', minHeight: 14 }}>
+						<div style={{ fontSize: 11, color: form.error ? 'var(--tl-color-warning)' : 'var(--tl-color-text-3)', minHeight: 14 }}>
 							{form.error ??
 								(form.busy
 									? 'Loading webfont…'
