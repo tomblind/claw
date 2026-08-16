@@ -1664,171 +1664,403 @@ function persistSessionState(editor) {
 }
 
 /**
- * Style panel extensions, all writing document meta (so they sync, persist,
- * and undo like any edit) and pushing the theme:
- *  - "+ Add color": native color dialog -> next free custom color slot.
- *  - "+ Add font": inline form (family/CSS stack + optional webfont URL) ->
- *    next free custom font slot. Defined font slots render as an "Aa" row,
- *    each previewed in its own face - the default font row is a fixed
- *    4-button UI and can't show them.
- * Everything applies to the current selection and to the next shapes drawn.
+ * Claw style panel: tldraw's own pickers recomposed (mirroring the structure
+ * of DefaultStylePanelContent) so claw's palette controls sit exactly where
+ * they belong - custom colors right under the color grid, custom fonts right
+ * under the font row. The builtin pickers are theme-driven and grow apply-
+ * buttons for defined custom slots on their own; the chip rows here only
+ * MANAGE slots (add / edit / remove). Everything writes document meta (so it
+ * syncs, persists, and undoes like any edit) and pushes the theme.
  */
 const fontFamilyOf = (val) =>
 	typeof val === 'string' ? val : val?.family ? `'${val.family}'` : 'sans-serif'
+const fontLabelOf = (val) => (typeof val === 'string' ? val : (val?.family ?? ''))
+const colorHexOf = (val) => {
+	if (typeof val === 'string') return val
+	const solid = val?.light?.solid ?? val?.solid
+	return typeof solid === 'string' ? solid : '#888888'
+}
 
-function CustomStylePanel(props) {
-	const editor = TL.useEditor()
+/** One meta write for add/edit/remove of a custom slot (value null = remove). */
+function clawThemePatch(editor, kind, slot, value) {
+	const settings = editor.getDocumentSettings()
+	const meta = { ...(settings.meta ?? {}) }
+	const group = { ...(meta.clawTheme?.[kind] ?? {}) }
+	if (value == null) delete group[slot]
+	else group[slot] = value
+	meta.clawTheme = { ...(meta.clawTheme ?? {}), [kind]: group }
+	editor.updateDocumentSettings({ meta })
+	applyClawTheme(editor, { force: true })
+}
+
+// datalist candidates for the font form, filtered by what this device renders
+const FONT_CANDIDATES = [
+	'Arial', 'Arial Black', 'Bahnschrift', 'Calibri', 'Cambria', 'Candara',
+	'Comic Sans MS', 'Consolas', 'Constantia', 'Corbel', 'Courier New',
+	'Franklin Gothic Medium', 'Gabriola', 'Garamond', 'Georgia', 'Impact',
+	'Lucida Console', 'Palatino Linotype', 'Segoe Print', 'Segoe Script',
+	'Segoe UI', 'Sitka Text', 'Tahoma', 'Times New Roman', 'Trebuchet MS',
+	'Verdana', 'serif', 'sans-serif', 'monospace', 'cursive',
+]
+const GENERIC_FAMILIES = new Set([
+	'serif', 'sans-serif', 'monospace', 'cursive', 'fantasy', 'system-ui',
+	'ui-serif', 'ui-sans-serif', 'ui-monospace',
+])
+let fontMeasureCtx = null
+const familyAvailable = (name) => {
+	const n = String(name).trim().replace(/^['"]|['"]$/g, '')
+	if (!n) return false
+	if (GENERIC_FAMILIES.has(n.toLowerCase())) return true
+	// document.fonts.check() lies (true for any unknown family), so measure:
+	// a real family changes text metrics vs at least one generic baseline
+	try {
+		fontMeasureCtx ??= document.createElement('canvas').getContext('2d')
+		const sample = 'mmmmmmmmmmlliWQ@0123'
+		const width = (font) => {
+			fontMeasureCtx.font = `16px ${font}`
+			return fontMeasureCtx.measureText(sample).width
+		}
+		return (
+			width(`"${n}", monospace`) !== width('monospace') ||
+			width(`"${n}", serif`) !== width('serif')
+		)
+	} catch {
+		return false
+	}
+}
+const stackAvailable = (stack) => String(stack).split(',').some(familyAvailable)
+
+const chipWrapStyle = { position: 'relative', display: 'inline-flex' }
+const chipRemoveStyle = {
+	position: 'absolute',
+	top: -5,
+	right: -5,
+	width: 12,
+	height: 12,
+	borderRadius: '50%',
+	border: 'none',
+	background: 'var(--color-text-3)',
+	color: 'var(--color-panel)',
+	fontSize: 9,
+	lineHeight: '12px',
+	textAlign: 'center',
+	padding: 0,
+	cursor: 'pointer',
+}
+
+function ClawColorControls({ editor, clawTheme }) {
 	const inputRef = React.useRef(null)
-	const relevant = typeof TL.useRelevantStyles === 'function' ? TL.useRelevantStyles() : undefined
-	// reactive: the font row updates when a theme op or another tab adds a slot
-	const useVal = typeof TL.useValue === 'function' ? TL.useValue : (_name, fn) => fn()
-	const themeFonts = useVal(
-		'claw theme fonts',
-		() => editor.getDocumentSettings?.()?.meta?.clawTheme?.fonts ?? {},
-		[editor]
-	)
-	const [fontForm, setFontForm] = React.useState(null)
-	const currentFont = relevant?.get?.(TL.DefaultFontStyle)
-	const definedFontSlots = CUSTOM_FONT_SLOTS.filter((s) => s in themeFonts)
+	// the slot being edited is fixed at picker-open time: the native color
+	// dialog fires an input event per interaction, and each must land on the
+	// SAME slot (allocating per event once filled every slot in one drag)
+	const editRef = React.useRef({ slot: null, isNew: false, timer: null })
+	const colors = clawTheme?.colors ?? {}
+	const defined = CUSTOM_COLOR_SLOTS.filter((s) => s in colors)
 
-	const applyFont = (slot) => {
+	const openPicker = (slot, isNew) => {
+		const input = inputRef.current
+		if (!input) return
+		editRef.current = { slot, isNew, timer: null }
 		try {
-			if (!TL.DefaultFontStyle) return
-			editor.setStyleForSelectedShapes?.(TL.DefaultFontStyle, slot)
-			editor.setStyleForNextShapes?.(TL.DefaultFontStyle, slot)
-		} catch (err) {
-			reportError('font-slot', err)
-		}
+			input.value = isNew ? '#4f6df5' : colorHexOf(colors[slot])
+		} catch {}
+		input.click()
 	}
-	const addFont = () => {
-		const family = fontForm?.family.trim()
-		if (!family) return
-		try {
-			const settings = editor.getDocumentSettings()
-			const meta = { ...(settings.meta ?? {}) }
-			const fonts = { ...(meta.clawTheme?.fonts ?? {}) }
-			const free = CUSTOM_FONT_SLOTS.find((s) => !(s in fonts))
-			if (!free) {
-				window.alert(`All ${CUSTOM_FONT_SLOTS.length} custom font slots are in use`)
-				return
+	const onPick = (hex) => {
+		const edit = editRef.current
+		if (!edit.slot) return
+		clearTimeout(edit.timer)
+		// debounced live preview: dragging in the picker rethemes the canvas
+		edit.timer = setTimeout(() => {
+			try {
+				clawThemePatch(editor, 'colors', edit.slot, hex)
+				if (edit.isNew && TL.DefaultColorStyle) {
+					editor.setStyleForSelectedShapes?.(TL.DefaultColorStyle, edit.slot)
+					editor.setStyleForNextShapes?.(TL.DefaultColorStyle, edit.slot)
+					edit.isNew = false
+				}
+			} catch (err) {
+				reportError('add-color', err)
 			}
-			const url = fontForm.url.trim()
-			// bare family with a URL = webfont; otherwise treat input as a CSS stack
-			fonts[free] = url ? { family, url } : family
-			meta.clawTheme = { ...(meta.clawTheme ?? {}), fonts }
-			editor.updateDocumentSettings({ meta })
-			applyClawTheme(editor, { force: true })
-			applyFont(free)
-			setFontForm(null)
-		} catch (err) {
-			reportError('add-font', err)
-		}
-	}
-	const addColor = (hex) => {
-		try {
-			const settings = editor.getDocumentSettings()
-			const meta = { ...(settings.meta ?? {}) }
-			const colors = { ...(meta.clawTheme?.colors ?? {}) }
-			const free = CUSTOM_COLOR_SLOTS.find((s) => !(s in colors))
-			if (!free) {
-				window.alert(`All ${CUSTOM_COLOR_SLOTS.length} custom color slots are in use`)
-				return
-			}
-			colors[free] = hex
-			meta.clawTheme = { ...(meta.clawTheme ?? {}), colors }
-			editor.updateDocumentSettings({ meta })
-			applyClawTheme(editor, { force: true })
-			if (TL.DefaultColorStyle) {
-				editor.setStyleForSelectedShapes?.(TL.DefaultColorStyle, free)
-				editor.setStyleForNextShapes?.(TL.DefaultColorStyle, free)
-			}
-		} catch (err) {
-			reportError('add-color', err)
-		}
+		}, 100)
 	}
 	return (
-		<TL.DefaultStylePanel {...props}>
-			<TL.DefaultStylePanelContent styles={relevant} />
-			<div className="tlui-style-panel__section">
-				<TL.TldrawUiButton
-					type="menu"
-					data-testid="claw-add-color"
-					onClick={() => inputRef.current?.click()}
-				>
-					<TL.TldrawUiButtonLabel>＋ Add color</TL.TldrawUiButtonLabel>
-				</TL.TldrawUiButton>
-				<input
-					ref={inputRef}
-					type="color"
-					style={{ display: 'none' }}
-					onChange={(e) => addColor(e.target.value)}
-				/>
-				{definedFontSlots.length > 0 && (
-					<div style={{ display: 'flex', flexWrap: 'wrap', gap: 2, padding: '0 4px' }}>
-						{definedFontSlots.map((slot) => (
-							<TL.TldrawUiButton
-								key={slot}
-								type="icon"
-								title={`${slot}: ${typeof themeFonts[slot] === 'string' ? themeFonts[slot] : themeFonts[slot]?.family}`}
-								data-testid={`claw-font-${slot}`}
-								onClick={() => applyFont(slot)}
+		<div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 5, padding: '0 8px' }}>
+			{defined.map((slot) => (
+				<span key={slot} style={chipWrapStyle}>
+					<button
+						title={`Edit ${slot} (${colorHexOf(colors[slot])})`}
+						data-testid={`claw-color-edit-${slot}`}
+						onClick={() => openPicker(slot, false)}
+						style={{
+							width: 18,
+							height: 18,
+							borderRadius: 4,
+							border: '1px solid var(--color-muted-1)',
+							background: colorHexOf(colors[slot]),
+							cursor: 'pointer',
+							padding: 0,
+						}}
+					/>
+					<button
+						title={`Remove ${slot}`}
+						data-testid={`claw-color-remove-${slot}`}
+						onClick={() => {
+							try {
+								clawThemePatch(editor, 'colors', slot, null)
+							} catch (err) {
+								reportError('remove-color', err)
+							}
+						}}
+						style={chipRemoveStyle}
+					>
+						×
+					</button>
+				</span>
+			))}
+			<TL.TldrawUiButton
+				type="menu"
+				data-testid="claw-add-color"
+				onClick={() => {
+					const free = CUSTOM_COLOR_SLOTS.find((s) => !(s in colors))
+					if (!free) {
+						window.alert(`All ${CUSTOM_COLOR_SLOTS.length} custom color slots are in use`)
+						return
+					}
+					openPicker(free, true)
+				}}
+			>
+				<TL.TldrawUiButtonLabel>＋ Add color</TL.TldrawUiButtonLabel>
+			</TL.TldrawUiButton>
+			<input
+				ref={inputRef}
+				type="color"
+				data-testid="claw-color-input"
+				style={{ display: 'none' }}
+				onChange={(e) => onPick(e.target.value)}
+			/>
+		</div>
+	)
+}
+
+function ClawFontControls({ editor, clawTheme }) {
+	const fonts = clawTheme?.fonts ?? {}
+	const defined = CUSTOM_FONT_SLOTS.filter((s) => s in fonts)
+	// form: {slot: 'custom-N' (editing) | null (adding), family, url, error, busy}
+	const [form, setForm] = React.useState(null)
+	const formOpen = !!form
+	const available = React.useMemo(
+		() => (formOpen ? FONT_CANDIDATES.filter(familyAvailable) : []),
+		[formOpen]
+	)
+	const familyOk = form?.family.trim() ? stackAvailable(form.family) : null
+
+	const submit = async () => {
+		if (!form || form.busy) return
+		const family = form.family.trim().replace(/^['"]|['"]$/g, '')
+		if (!family) return
+		const url = form.url.trim()
+		const slot = form.slot ?? CUSTOM_FONT_SLOTS.find((s) => !(s in fonts))
+		if (!slot) {
+			window.alert(`All ${CUSTOM_FONT_SLOTS.length} custom font slots are in use`)
+			return
+		}
+		try {
+			if (url) {
+				// prove the webfont actually loads before committing it
+				setForm({ ...form, busy: true, error: null })
+				const face = new FontFace(family, `url("${url}")`)
+				await Promise.race([
+					face.load(),
+					new Promise((_, rej) => setTimeout(() => rej(new Error('timed out')), 8000)),
+				])
+				document.fonts.add(face)
+			} else if (!stackAvailable(family)) {
+				setForm({ ...form, error: 'Not found on this device - pick from the list or add a webfont URL' })
+				return
+			}
+			clawThemePatch(editor, 'fonts', slot, url ? { family, url } : family)
+			if (form.slot == null && TL.DefaultFontStyle) {
+				editor.setStyleForSelectedShapes?.(TL.DefaultFontStyle, slot)
+				editor.setStyleForNextShapes?.(TL.DefaultFontStyle, slot)
+			}
+			setForm(null)
+		} catch (err) {
+			setForm({ ...form, busy: false, error: `Could not load webfont: ${err?.message ?? err}` })
+		}
+	}
+	const inputKeys = (e) => {
+		e.stopPropagation()
+		if (e.key === 'Enter') submit()
+		if (e.key === 'Escape') setForm(null)
+	}
+	return (
+		<>
+			{(defined.length > 0 || form) && (
+				<div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 5, padding: '0 8px' }}>
+					{defined.map((slot) => (
+						<span key={slot} style={chipWrapStyle}>
+							<button
+								title={`Edit ${slot} (${fontLabelOf(fonts[slot])})`}
+								data-testid={`claw-font-edit-${slot}`}
+								onClick={() =>
+									setForm({
+										slot,
+										family: fontLabelOf(fonts[slot]),
+										url: typeof fonts[slot] === 'object' ? (fonts[slot].url ?? '') : '',
+										error: null,
+										busy: false,
+									})
+								}
 								style={{
-									fontFamily: fontFamilyOf(themeFonts[slot]),
-									fontSize: 15,
-									backgroundColor:
-										currentFont?.type === 'shared' && currentFont.value === slot
-											? 'var(--color-muted-2)'
-											: undefined,
+									height: 20,
+									borderRadius: 4,
+									border: '1px solid var(--color-muted-1)',
+									background: 'transparent',
+									color: 'var(--color-text-1)',
+									fontFamily: fontFamilyOf(fonts[slot]),
+									fontSize: 13,
+									padding: '0 5px',
+									cursor: 'pointer',
 								}}
 							>
 								Aa
-							</TL.TldrawUiButton>
+							</button>
+							<button
+								title={`Remove ${slot}`}
+								data-testid={`claw-font-remove-${slot}`}
+								onClick={() => {
+									try {
+										clawThemePatch(editor, 'fonts', slot, null)
+									} catch (err) {
+										reportError('remove-font', err)
+									}
+								}}
+								style={chipRemoveStyle}
+							>
+								×
+							</button>
+						</span>
+					))}
+				</div>
+			)}
+			{form ? (
+				<div style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: '4px 8px 8px' }}>
+					<input
+						className="tlui-input"
+						list="claw-font-options"
+						placeholder="Font name or CSS stack"
+						autoFocus
+						value={form.family}
+						onChange={(e) => setForm({ ...form, family: e.target.value, error: null })}
+						onKeyDown={inputKeys}
+					/>
+					<datalist id="claw-font-options">
+						{available.map((f) => (
+							<option key={f} value={f} />
 						))}
+					</datalist>
+					<input
+						className="tlui-input"
+						placeholder="Webfont URL (optional)"
+						value={form.url}
+						onChange={(e) => setForm({ ...form, url: e.target.value, error: null })}
+						onKeyDown={inputKeys}
+					/>
+					<div style={{ fontSize: 11, color: form.error ? 'var(--color-warn)' : 'var(--color-text-3)', minHeight: 14, padding: '0 2px' }}>
+						{form.error ??
+							(form.busy
+								? 'Loading webfont…'
+								: form.url.trim()
+									? 'Webfont: renders on every device'
+									: familyOk == null
+										? 'Pick a font, or type any installed one'
+										: familyOk
+											? '✓ available on this device (webfont URL renders everywhere)'
+											: '⚠ not found on this device')}
 					</div>
-				)}
-				{fontForm ? (
-					<div style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: '4px 8px 8px' }}>
-						<input
-							className="tlui-input"
-							placeholder="Font family or CSS stack"
-							autoFocus
-							value={fontForm.family}
-							onChange={(e) => setFontForm({ ...fontForm, family: e.target.value })}
-							onKeyDown={(e) => {
-								e.stopPropagation()
-								if (e.key === 'Enter') addFont()
-								if (e.key === 'Escape') setFontForm(null)
-							}}
-						/>
-						<input
-							className="tlui-input"
-							placeholder="Webfont URL (optional)"
-							value={fontForm.url}
-							onChange={(e) => setFontForm({ ...fontForm, url: e.target.value })}
-							onKeyDown={(e) => {
-								e.stopPropagation()
-								if (e.key === 'Enter') addFont()
-								if (e.key === 'Escape') setFontForm(null)
-							}}
-						/>
-						<div style={{ display: 'flex', gap: 4 }}>
-							<TL.TldrawUiButton type="normal" data-testid="claw-add-font-confirm" onClick={addFont}>
-								<TL.TldrawUiButtonLabel>Add</TL.TldrawUiButtonLabel>
-							</TL.TldrawUiButton>
-							<TL.TldrawUiButton type="normal" onClick={() => setFontForm(null)}>
-								<TL.TldrawUiButtonLabel>Cancel</TL.TldrawUiButtonLabel>
-							</TL.TldrawUiButton>
-						</div>
+					<div style={{ display: 'flex', gap: 4 }}>
+						<TL.TldrawUiButton
+							type="normal"
+							data-testid="claw-add-font-confirm"
+							disabled={form.busy}
+							onClick={submit}
+						>
+							<TL.TldrawUiButtonLabel>{form.slot ? 'Save' : 'Add'}</TL.TldrawUiButtonLabel>
+						</TL.TldrawUiButton>
+						<TL.TldrawUiButton type="normal" onClick={() => setForm(null)}>
+							<TL.TldrawUiButtonLabel>Cancel</TL.TldrawUiButtonLabel>
+						</TL.TldrawUiButton>
 					</div>
-				) : (
-					<TL.TldrawUiButton
-						type="menu"
-						data-testid="claw-add-font"
-						onClick={() => setFontForm({ family: '', url: '' })}
-					>
-						<TL.TldrawUiButtonLabel>＋ Add font</TL.TldrawUiButtonLabel>
-					</TL.TldrawUiButton>
-				)}
+				</div>
+			) : (
+				<TL.TldrawUiButton
+					type="menu"
+					data-testid="claw-add-font"
+					onClick={() => setForm({ slot: null, family: '', url: '', error: null, busy: false })}
+				>
+					<TL.TldrawUiButtonLabel>＋ Add font</TL.TldrawUiButtonLabel>
+				</TL.TldrawUiButton>
+			)}
+		</>
+	)
+}
+
+const PANEL_PARTS = [
+	'StylePanelColorPicker', 'StylePanelOpacityPicker', 'StylePanelFillPicker',
+	'StylePanelDashPicker', 'StylePanelSizePicker', 'StylePanelFontPicker',
+	'StylePanelTextAlignPicker', 'StylePanelLabelAlignPicker',
+	'StylePanelGeoShapePicker', 'StylePanelArrowKindPicker',
+	'StylePanelArrowheadPicker', 'StylePanelSplinePicker',
+]
+const HAS_PANEL_PARTS = PANEL_PARTS.every((n) => typeof TL[n] === 'function')
+
+function CustomStylePanel(props) {
+	const editor = TL.useEditor()
+	const relevant = typeof TL.useRelevantStyles === 'function' ? TL.useRelevantStyles() : undefined
+	const useVal = typeof TL.useValue === 'function' ? TL.useValue : (_name, fn) => fn()
+	const clawTheme = useVal(
+		'claw theme',
+		() => editor.getDocumentSettings?.()?.meta?.clawTheme ?? null,
+		[editor]
+	)
+	const colorRelevant = relevant?.get?.(TL.DefaultColorStyle) !== undefined
+	const fontRelevant = relevant?.get?.(TL.DefaultFontStyle) !== undefined
+	if (!HAS_PANEL_PARTS) {
+		// tldraw version drift: stock panel, controls appended at the bottom
+		return (
+			<TL.DefaultStylePanel {...props}>
+				<TL.DefaultStylePanelContent styles={relevant} />
+				<div className="tlui-style-panel__section">
+					{colorRelevant && <ClawColorControls editor={editor} clawTheme={clawTheme} />}
+					{fontRelevant && <ClawFontControls editor={editor} clawTheme={clawTheme} />}
+				</div>
+			</TL.DefaultStylePanel>
+		)
+	}
+	return (
+		<TL.DefaultStylePanel {...props}>
+			<div className="tlui-style-panel__section">
+				<TL.StylePanelColorPicker />
+				{colorRelevant && <ClawColorControls editor={editor} clawTheme={clawTheme} />}
+				<TL.StylePanelOpacityPicker />
+			</div>
+			<div className="tlui-style-panel__section">
+				<TL.StylePanelFillPicker />
+				<TL.StylePanelDashPicker />
+				<TL.StylePanelSizePicker />
+			</div>
+			<div className="tlui-style-panel__section">
+				<TL.StylePanelFontPicker />
+				{fontRelevant && <ClawFontControls editor={editor} clawTheme={clawTheme} />}
+				<TL.StylePanelTextAlignPicker />
+				<TL.StylePanelLabelAlignPicker />
+			</div>
+			<div className="tlui-style-panel__section">
+				<TL.StylePanelGeoShapePicker />
+				<TL.StylePanelArrowKindPicker />
+				<TL.StylePanelArrowheadPicker />
+				<TL.StylePanelSplinePicker />
 			</div>
 		</TL.DefaultStylePanel>
 	)
