@@ -158,7 +158,7 @@ label text, or the "name" given to an earlier op in the same batch.
       pixels. Assets embed in the document as data URLs.
   {"set_text": {"id": "TMKkAD33", "text": "YOU WIN!"}}
   {"style": {"id": "TMKkAD33", "font": "serif", "size": "l", "color": "violet"}}
-      font: draw | sans | serif | mono (+ theme-defined custom-1..custom-4)
+      font: draw | sans | serif | mono (+ theme-defined custom-1..custom-8)
       size: s | m | l | xl
       color/labelColor: black grey light-violet violet blue light-blue yellow
         orange green light-green light-red red white
@@ -221,9 +221,9 @@ label text, or the "name" given to an earlier op in the same batch.
              "fonts": {"custom-1": "Inter, system-ui, sans-serif",
                        "custom-2": {"family": "Lora", "url": "https://.../lora.woff2"}}}}
       Adds palette colors and fonts, per document. STRICTLY ADDITIVE: colors
-      accepts only the 8 reserved slots "custom-1".."custom-8" and fonts only
-      the 4 slots "custom-1".."custom-4" - the 13 standard color names and 4
-      standard fonts (draw sans serif mono) are deliberately not replaceable
+      accepts only the 24 reserved slots "custom-1".."custom-24" and fonts
+      only the 8 slots "custom-1".."custom-8" - the 13 standard color names
+      and 4 standard fonts (draw sans serif mono) are deliberately not replaceable
       (they mean the same thing in every tldraw app). Colors: a bare "#hex"
       derives the pale semi/pattern fill variants automatically; an object
       sets exact variants (set "semi" to the same hex for a truly saturated

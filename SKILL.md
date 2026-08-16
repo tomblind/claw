@@ -148,7 +148,7 @@ edit them (SVG is uneditable in the canvas — use it only for art/logos).
 - **Named fills render pastel** — use dark label text (`labelColor: black`,
   the default), `fill: solid` for shaded tiles.
 - **Brand colors/typography**: the `theme` op adds palette colors (reserved
-  slots `custom-1`..`custom-8`) and fonts (slots `custom-1`..`custom-4`) —
+  slots `custom-1`..`custom-24`) and fonts (slots `custom-1`..`custom-8`) —
   strictly additive; the 13 standard colors and 4 standard fonts are never
   replaced. Stored in the file; every claw surface and render honors it.
   Shapes that USE a custom slot make the file claw-only: other tldraw apps
