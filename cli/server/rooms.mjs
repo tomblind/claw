@@ -47,6 +47,7 @@ export const roomIdToPath = (id) => Buffer.from(id, 'base64url').toString('utf8'
 // the sync server parses .tldr files on room hydrate, and a shape using
 // custom-N must pass the enum check here just like in the editor pages
 const CUSTOM_COLOR_SLOTS = Array.from({ length: 8 }, (_, i) => `custom-${i + 1}`)
+const CUSTOM_FONT_SLOTS = Array.from({ length: 4 }, (_, i) => `custom-${i + 1}`)
 // DefaultLabelColorStyle isn't a root export; the same enum instance is
 // reachable through any shape-props object that uses it
 for (const styleProp of [
@@ -59,6 +60,9 @@ for (const styleProp of [
 		styleProp?.addValues?.(...CUSTOM_COLOR_SLOTS)
 	} catch {}
 }
+try {
+	tlschema.DefaultFontStyle?.addValues?.(...CUSTOM_FONT_SLOTS)
+} catch {}
 
 const schema = createTLSchema()
 

@@ -33,6 +33,11 @@ const EXECUTOR = new URLSearchParams(location.search).get('executor') != null
 // hidden in the picker. NOTE: canvases using these are claw-only (vanilla
 // tldraw rejects unknown enum values).
 export const CUSTOM_COLOR_SLOTS = Array.from({ length: 8 }, (_, i) => `custom-${i + 1}`)
+// Reserved custom font slots, same idea: the 4 standard fonts (draw sans
+// serif mono) are never replaced; new fonts get their own enum values. Both
+// render paths key straight into theme.fonts[value] (getFontFamily on screen,
+// getThemeFontFaces for export embedding), so a theme entry is all they need.
+export const CUSTOM_FONT_SLOTS = Array.from({ length: 4 }, (_, i) => `custom-${i + 1}`)
 // Slot registration must go through the `themes` option (of <Tldraw> AND
 // useSync): store creation calls registerColorsFromThemes, which REMOVES any
 // enum value not declared by a theme definition — ad-hoc addValues gets
@@ -42,6 +47,20 @@ export const CUSTOM_COLOR_SLOTS = Array.from({ length: 8 }, (_, i) => `custom-${
 // theme definitions it's given — and parseTldrawJsonFile (used by every
 // executor load) internally creates a store with default themes only, wiping
 // our slots from the shared enum. Re-assert after anything that parses.
+function guardSlots(styleProp, slots) {
+	try {
+		styleProp?.addValues?.(...slots)
+		// make the slots UNREMOVABLE: internal store creations (e.g. inside
+		// parseTldrawJsonFile) re-run registerColorsFromThemes with default
+		// themes, which strips unknown values BEFORE validating incoming
+		// records - a after-the-fact re-add can't save that parse
+		if (styleProp.removeValues && !styleProp.__clawGuarded) {
+			const orig = styleProp.removeValues.bind(styleProp)
+			styleProp.removeValues = (...vals) => orig(...vals.filter((v) => !slots.includes(v)))
+			styleProp.__clawGuarded = true
+		}
+	} catch {}
+}
 function ensureCustomSlots() {
 	for (const styleProp of [
 		TL.DefaultColorStyle,
@@ -49,20 +68,9 @@ function ensureCustomSlots() {
 		TL.geoShapeProps?.labelColor,
 		TL.arrowShapeProps?.labelColor,
 	]) {
-		try {
-			styleProp?.addValues?.(...CUSTOM_COLOR_SLOTS)
-			// make the slots UNREMOVABLE: internal store creations (e.g. inside
-			// parseTldrawJsonFile) re-run registerColorsFromThemes with default
-			// themes, which strips unknown values BEFORE validating incoming
-			// records - a after-the-fact re-add can't save that parse
-			if (styleProp.removeValues && !styleProp.__clawGuarded) {
-				const orig = styleProp.removeValues.bind(styleProp)
-				styleProp.removeValues = (...vals) =>
-					orig(...vals.filter((v) => !CUSTOM_COLOR_SLOTS.includes(v)))
-				styleProp.__clawGuarded = true
-			}
-		} catch {}
+		guardSlots(styleProp, CUSTOM_COLOR_SLOTS)
 	}
+	guardSlots(TL.DefaultFontStyle, CUSTOM_FONT_SLOTS)
 }
 ensureCustomSlots()
 
@@ -122,10 +130,10 @@ function reportError(stage, err) {
 
 // ---------------------------------------------------------------------------
 // per-document theming: the document's meta.clawTheme defines extra palette
-// colors (the reserved custom-1..custom-8 slots only) and remaps the 4 font
-// slots. The 13 standard tldraw colors are deliberately untouchable — green
-// means green in every tldraw app. Applied through tldraw's own ThemeManager,
-// so exports/renders pick it up too.
+// colors (custom-1..custom-8) and extra fonts (font slots custom-1..custom-4).
+// Strictly additive — the 13 standard colors and 4 standard fonts are
+// deliberately untouchable, so they mean the same thing in every tldraw app.
+// Applied through tldraw's own ThemeManager, so exports/renders pick it up too.
 // ---------------------------------------------------------------------------
 let PRISTINE_THEME = null
 let lastAppliedTheme = '__unset__'
@@ -168,31 +176,30 @@ function applyClawTheme(editor, { force = false } = {}) {
 				}
 			}
 		}
-		// fonts resolve through the --tl-font-* CSS vars at render time, so the
-		// remap must land there too (the theme def alone only drives loading)
-		const rootStyle = document.documentElement.style
-		for (const slot of ['draw', 'sans', 'serif', 'mono']) rootStyle.removeProperty(`--tl-font-${slot}`)
+		// custom font slots render straight from theme.fonts[slot] (both the
+		// canvas and export embedding read it) - the standard --tl-font-* CSS
+		// vars are never touched, so draw/sans/serif/mono stay stock
 		document.getElementById('claw-theme-fonts')?.remove()
 		let fontFaceCss = ''
 		for (const [slot, val] of Object.entries(spec?.fonts ?? {})) {
-			const base = next.fonts?.[slot]
-			if (!base) continue
+			if (!CUSTOM_FONT_SLOTS.includes(slot)) continue // standard fonts stay standard
+			const base = { fontFamily: 'sans-serif', faces: [] }
 			if (typeof val === 'string') {
 				base.fontFamily = val
-				base.faces = []
-				rootStyle.setProperty(`--tl-font-${slot}`, val)
 			} else if (val?.family) {
 				base.fontFamily = `'${val.family}'`
-				rootStyle.setProperty(`--tl-font-${slot}`, `'${val.family}', sans-serif`)
 				if (val.url) {
 					base.faces = [
 						{ family: val.family, src: { url: val.url, format: val.format ?? 'woff2' }, weight: 'normal' },
 					]
+					// belt and suspenders for the live canvas: the browser needs the
+					// face loaded even if the FontManager misses a theme-only slot
 					fontFaceCss += `@font-face{font-family:'${val.family}';src:url('${val.url}');font-display:swap}\n`
-				} else {
-					base.faces = []
 				}
+			} else {
+				continue
 			}
+			next.fonts[slot] = base
 		}
 		if (fontFaceCss) {
 			const el = document.createElement('style')
@@ -902,6 +909,14 @@ async function applyOps(editor, ops) {
 						if (badColors.length) {
 							throw new Error(
 								`theme colors accepts only custom-1..custom-8, not: ${badColors.join(', ')}. The 13 standard tldraw colors are not remappable - claw keeps them meaning the same thing everywhere.`
+							)
+						}
+						const badFonts = Object.keys(args.fonts ?? {}).filter(
+							(n) => !CUSTOM_FONT_SLOTS.includes(n)
+						)
+						if (badFonts.length) {
+							throw new Error(
+								`theme fonts accepts only custom-1..custom-4, not: ${badFonts.join(', ')}. The 4 standard fonts (draw sans serif mono) are not replaceable - add a new slot instead.`
 							)
 						}
 						const prev = meta.clawTheme ?? {}

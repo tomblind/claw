@@ -148,11 +148,12 @@ edit them (SVG is uneditable in the canvas — use it only for art/logos).
 - **Named fills render pastel** — use dark label text (`labelColor: black`,
   the default), `fill: solid` for shaded tiles.
 - **Brand colors/typography**: the `theme` op adds palette colors (reserved
-  slots `custom-1`..`custom-8` only — the 13 standard names are never
-  remapped) and restyles the 4 font slots (stored in the file; every claw
-  surface and render honors it). Shapes that USE a custom slot make the file
-  claw-only: other tldraw apps report it as corrupted. For truly saturated
-  custom fills set the color's `semi` variant to the same hex.
+  slots `custom-1`..`custom-8`) and fonts (slots `custom-1`..`custom-4`) —
+  strictly additive; the 13 standard colors and 4 standard fonts are never
+  replaced. Stored in the file; every claw surface and render honors it.
+  Shapes that USE a custom slot make the file claw-only: other tldraw apps
+  report it as corrupted. For truly saturated custom fills set the color's
+  `semi` variant to the same hex.
 - **Regenerating one screen**: `clear` the frame (children gone, frame +
   arrows + layout survive), then re-add its interior. Never delete children
   one by one.
