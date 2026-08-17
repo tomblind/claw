@@ -136,27 +136,40 @@ Arrow hygiene in dense graphs: connected arrows always render above screens (kep
 
 For UI-flow diagrams, **faithful native-shape wireframes are the default**:
 complete, real component layouts (a *full* board, not three representative
-tiles), never descriptive-text cards, never SVG mockups when the user will
-edit them (SVG is uneditable in the canvas — use it only for art/logos).
-`font: sans` on everything. Rules that prevent whole rounds of rework:
+tiles), never descriptive-text cards. Rules that prevent whole rounds of
+rework:
 
+- **Native shapes over SVG, always.** An embedded SVG is a frozen picture —
+  neither the user nor a later agent can edit, restyle, or retext it in the
+  canvas. Reserve `kind: image` + `svg` strictly for static art that will
+  never change (a logo, an illustration); everything that is layout, text,
+  or component structure must be built from native shapes.
+- **Never put text INTO a small box** — a geo label makes the shape grow to
+  fit the text, silently breaking your sizing. This is the #1 recurring
+  mistake. The right pattern is built in: `add` with `text` + explicit
+  `size.h` creates the exact-size box plus a separate centered overlay
+  label. To change a chip's text later, `set_text` the box ref — it
+  redirects to the overlay label and re-centers automatically.
 - **Never hand-compute text positions — use `center`/`align`/`row` on BOTH
   axes.** A text shape's y is the top of its line-box, not the visible glyph;
   any label that must line up with a sibling must be `center`ed on it.
-- **Fixed-size chips/tiles/buttons**: `add` with text + explicit `size.h`
-  builds the exact-size box + centered overlay label automatically.
+- **Crisp, not cartoony.** Ops default to `dash: solid` edges and
+  `font: sans` — keep them. tldraw's hand-sketched `draw` dash and `draw`
+  font are for whiteboard doodles; only reach for them if the user asks for
+  a sketchy aesthetic.
 - **Long copy**: `resize` the label with a `w` — it wraps at that width. Don't
   hand-insert newlines.
 - **Named fills render pastel** — use dark label text (`labelColor: black`,
   the default), `fill: solid` for shaded tiles.
-- **Brand colors/typography**: the `theme` op adds palette colors (reserved
-  slots `custom-1`..`custom-24`) and fonts (slots `custom-1`..`custom-8`) —
-  strictly additive; the 13 standard colors and 4 standard fonts are never
-  replaced. Stored in the file; every claw surface and render honors it.
-  Files stay portable: on disk, custom-slot shapes store the nearest
-  standard color/font (other tldraw apps show that approximation), with the
-  claw value in shape meta. For truly saturated custom fills set the
-  color's `semi` variant to the same hex.
+- **Define brand colors and fonts instead of approximating.** When the
+  design calls for specific colors or typography, add them with the `theme`
+  op (colors in slots `custom-1`..`custom-24`, fonts in `custom-1`..
+  `custom-8`, Google Fonts CSS URLs accepted) rather than settling for the
+  nearest of the 13 standard colors. Strictly additive — standard names are
+  never remapped — and files stay portable: on disk, custom-slot shapes
+  carry a nearest-standard fallback in props with the claw value in shape
+  meta, so other tldraw apps still open them. For truly saturated custom
+  fills set the color's `semi` variant to the same hex.
 - **Regenerating one screen**: `clear` the frame (children gone, frame +
   arrows + layout survive), then re-add its interior. Never delete children
   one by one.

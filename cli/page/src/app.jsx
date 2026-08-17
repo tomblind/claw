@@ -1019,7 +1019,9 @@ async function applyOps(editor, ops) {
 					}
 					const styleProps = {
 						...(args.color ? { color: args.color } : {}),
-						...(args.font ? { font: args.font } : {}),
+						// sans by default: tldraw's 'draw' font reads hand-sketched,
+						// wrong for UI mockups (pass font explicitly to override)
+						font: args.font ?? 'sans',
 						...(args.textSize ? { size: args.textSize } : {}),
 					}
 					if (image) {
@@ -1053,7 +1055,7 @@ async function applyOps(editor, ops) {
 								dash: 'solid',
 								color: args.color ?? spec.color,
 								fill: spec.fill,
-								...(args.font ? { font: args.font } : {}),
+								font: args.font ?? 'sans',
 								...(args.textSize ? { size: args.textSize } : {}),
 								...(!fixedChip && args.text != null ? { richText: rich(args.text) } : {}),
 							},
@@ -1109,14 +1111,41 @@ async function applyOps(editor, ops) {
 				}
 
 				case 'set_text': {
-					const target = ref(args.id)
+					let target = ref(args.id)
+					let chipBox = null
+					// a fixed chip is a box + separate overlay label. Retexting the
+					// BOX would add a second label inside it and grow the box -
+					// redirect to the overlay label instead (and re-center it after)
+					if (target.type === 'geo' && !shapePlaintext(editor, target)) {
+						const overlay = editor
+							.getSortedChildIdsForParent(target.id)
+							.map((cid) => editor.getShape(cid))
+							.find((c) => c?.type === 'text')
+						if (overlay) {
+							chipBox = target
+							target = overlay
+						}
+					}
 					editor.updateShape({
 						id: target.id,
 						type: target.type,
 						props: { richText: rich(args.text) },
 					})
+					if (chipBox) {
+						const bb = editor.getShapePageBounds(chipBox.id)
+						const lb = editor.getShapePageBounds(target.id)
+						const lShape = editor.getShape(target.id)
+						editor.updateShape({
+							id: target.id,
+							type: 'text',
+							x: lShape.x + (bb.x + bb.w / 2 - (lb.x + lb.w / 2)),
+							y: lShape.y + (bb.y + bb.h / 2 - (lb.y + lb.h / 2)),
+						})
+					}
 					touched.updated.push(target.id)
-					report.push(`set_text ${short(target.id)} -> ${JSON.stringify(String(args.text).slice(0, 40))}`)
+					report.push(
+						`set_text ${short(target.id)}${chipBox ? ` (chip label of ${short(chipBox.id)})` : ''} -> ${JSON.stringify(String(args.text).slice(0, 40))}`
+					)
 					break
 				}
 

@@ -148,15 +148,22 @@ label text, or the "name" given to an earlier op in the same batch.
       FIXED CHIP: text + an explicit size.h makes an exact-size box with a
       SEPARATE overlay label centered by real glyph bounds (labelColor sets
       its color; default black - dark labels read best on the pastel fills).
-      Without size.h, text lives on the geo and tldraw enforces a min height.
+      ALWAYS prefer this for buttons/tiles/rows: without size.h the text
+      lives ON the geo, which grows to fit it and breaks your sizing.
+      Boxes default to dash:solid and labels to font:sans (crisp, not the
+      hand-sketched draw style) - pass dash/font only to deviate.
       "name"s persist on the shape - reuse them in ANY later batch/session.
   {"add": {"screen": "Title", "kind": "image", "svg": "<svg ...>...</svg>", "at": "center"}}
-      Real visuals: an image shape. Give EITHER "svg" (inline SVG markup -
-      ideal for generated mockups/diagram art) or "src" (path to a
-      png/jpg/gif/webp/svg file, resolved relative to the ops file). Size
-      comes from "size", else the SVG's viewBox/width, else the image's own
-      pixels. Assets embed in the document as data URLs.
+      Real visuals: an image shape. Give EITHER "svg" (inline SVG markup)
+      or "src" (path to a png/jpg/gif/webp/svg file, resolved relative to
+      the ops file). Size comes from "size", else the SVG's viewBox/width,
+      else the image's own pixels. Assets embed as data URLs. STATIC ART
+      ONLY (logos, illustrations): an embedded image is uneditable in the
+      canvas - anything that is layout, text, or component structure must
+      be native shapes so humans and later agents can change it.
   {"set_text": {"id": "TMKkAD33", "text": "YOU WIN!"}}
+      On a fixed chip, targeting the BOX redirects to its overlay label and
+      re-centers it (retexting the box itself would add a second label).
   {"style": {"id": "TMKkAD33", "font": "serif", "size": "l", "color": "violet"}}
       font: draw | sans | serif | mono (+ theme-defined custom-1..custom-8)
       size: s | m | l | xl
