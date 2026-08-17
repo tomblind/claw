@@ -1404,6 +1404,22 @@ async function applyOps(editor, ops) {
 						}
 						return hits
 					}
+					// straight H/V segment vs all frames except the skip set
+					const segBlocked = (a, b, skip) => {
+						for (const f of frames) {
+							if (skip.has(f.id)) continue
+							const r = editor.getShapePageBounds(f.id)
+							if (!r) continue
+							const xmin = Math.min(a.x, b.x)
+							const xmax = Math.max(a.x, b.x)
+							const ymin = Math.min(a.y, b.y)
+							const ymax = Math.max(a.y, b.y)
+							if (xmax > r.minX + 2 && xmin < r.maxX - 2 && ymax > r.minY + 2 && ymin < r.maxY - 2) {
+								return true
+							}
+						}
+						return false
+					}
 					let fixed = 0
 					const stuck = []
 					for (const a of editor.getCurrentPageShapes()) {
@@ -1414,25 +1430,101 @@ async function applyOps(editor, ops) {
 							binds.map((b) => frameIdOf(editor.getShape(b.toId))).filter(Boolean)
 						)
 						if (!crossings(a.id, endFrames).length) continue
-						const before = editor.getShape(a.id)
-						const orig = { kind: before.props.kind, bend: before.props.bend ?? 0 }
-						let cleared = false
-						for (const bend of [160, -160, 320, -320, 520, -520, 760, -760, 1000, -1000, 1300, -1300]) {
-							editor.updateShape({ id: a.id, type: 'arrow', props: { kind: 'arc', bend } })
-							if (!crossings(a.id, endFrames).length) {
-								cleared = true
-								fixed++
-								touched.updated.push(a.id)
-								break
+						// find the arrow's real terminals
+						let p0
+						let p3
+						try {
+							const g = editor.getShapeGeometry(a.id)
+							const xf = editor.getShapePageTransform(a.id)
+							const pts = g.vertices.map((v) => xf.applyToPoint(v))
+							p0 = pts[0]
+							p3 = pts[pts.length - 1]
+						} catch {
+							stuck.push(short(a.id))
+							continue
+						}
+						// rectilinear detour: route p0 -> band -> p3 through a clear
+						// horizontal or vertical corridor (frame-gap edges plus the
+						// outside of everything). Same straight-line language as the
+						// rest of the diagram - never an arc.
+						const rects = frames
+							.filter((f) => !endFrames.has(f.id))
+							.map((f) => editor.getShapePageBounds(f.id))
+							.filter(Boolean)
+						const yCands = new Set()
+						const xCands = new Set()
+						if (rects.length) {
+							yCands.add(Math.min(...rects.map((r) => r.minY)) - 100)
+							yCands.add(Math.max(...rects.map((r) => r.maxY)) + 100)
+							xCands.add(Math.min(...rects.map((r) => r.minX)) - 100)
+							xCands.add(Math.max(...rects.map((r) => r.maxX)) + 100)
+							for (const r of rects) {
+								yCands.add(r.minY - 60)
+								yCands.add(r.maxY + 60)
+								xCands.add(r.minX - 60)
+								xCands.add(r.maxX + 60)
 							}
 						}
-						if (!cleared) {
-							editor.updateShape({ id: a.id, type: 'arrow', props: orig })
+						let best = null
+						for (const y of yCands) {
+							const via = [
+								{ x: Math.round(p0.x), y: Math.round(y) },
+								{ x: Math.round(p3.x), y: Math.round(y) },
+							]
+							if (segBlocked(p0, via[0], endFrames)) continue
+							if (segBlocked(via[0], via[1], endFrames)) continue
+							if (segBlocked(via[1], p3, endFrames)) continue
+							const cost = Math.abs(p0.y - y) + Math.abs(p3.y - y) + Math.abs(p3.x - p0.x)
+							if (!best || cost < best.cost) best = { via, cost }
+						}
+						for (const x of xCands) {
+							const via = [
+								{ x: Math.round(x), y: Math.round(p0.y) },
+								{ x: Math.round(x), y: Math.round(p3.y) },
+							]
+							if (segBlocked(p0, via[0], endFrames)) continue
+							if (segBlocked(via[0], via[1], endFrames)) continue
+							if (segBlocked(via[1], p3, endFrames)) continue
+							const cost = Math.abs(p0.x - x) + Math.abs(p3.x - x) + Math.abs(p3.y - p0.y)
+							if (!best || cost < best.cost) best = { via, cost }
+						}
+						if (!best) {
+							stuck.push(short(a.id))
+							continue
+						}
+						// anchors: pin each terminal where it already sits, so the
+						// chain's bridge segments leave from the real endpoints
+						const anchorOn = (bind, p) => {
+							const bb = editor.getShapePageBounds(bind.toId)
+							if (!bb || !bb.w || !bb.h) return undefined
+							return {
+								x: Math.round(Math.max(0, Math.min(1, (p.x - bb.minX) / bb.w)) * 100) / 100,
+								y: Math.round(Math.max(0, Math.min(1, (p.y - bb.minY) / bb.h)) * 100) / 100,
+							}
+						}
+						const startBind = binds.find((b) => b.props?.terminal === 'start')
+						const endBind = binds.find((b) => b.props?.terminal !== 'start')
+						const fromAnchor = startBind ? anchorOn(startBind, p0) : undefined
+						const toAnchor = endBind ? anchorOn(endBind, p3) : undefined
+						try {
+							await applyOps(editor, [
+								{
+									chain: {
+										id: a.id,
+										points: best.via,
+										...(fromAnchor ? { fromAnchor } : {}),
+										...(toAnchor ? { toAnchor } : {}),
+									},
+								},
+							])
+							fixed++
+							touched.updated.push(a.id)
+						} catch {
 							stuck.push(short(a.id))
 						}
 					}
 					report.push(
-						`fix_crossings -> ${fixed} arrow(s) bowed clear of frames${stuck.length ? `; ${stuck.length} could not be cleared: ${stuck.join(', ')}` : ''}`
+						`fix_crossings -> ${fixed} arrow(s) rerouted around frames via clear corridors${stuck.length ? `; ${stuck.length} could not be cleared: ${stuck.join(', ')}` : ''}`
 					)
 					break
 				}

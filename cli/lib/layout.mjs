@@ -8,9 +8,10 @@
  * channels through intermediate columns, and inter-layer spacing grows with
  * lane count. We consume those routes and translate them into what a tldraw
  * elbow can express (two anchors + one adjustable middle segment). Routes
- * too bendy to translate become arcs bowed toward clear space. Every
- * translated route is geometrically verified against the screens before it
- * ships; failures also fall back to arcs. Satellite screens (dead-end modals
+ * too bendy to translate become waypoint chains. Every translated route is
+ * geometrically verified against the screens; anything still crossing a
+ * frame is rerouted through a clear corridor by the final fix_crossings
+ * pass (rectilinear detours, never arcs). Satellite screens (dead-end modals
  * of a single hub) skip the flow entirely and grid under their hub with
  * hand-built band routing.
  *
@@ -438,33 +439,7 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 	// geometry and cut across screens. Route them end-to-end on facing sides,
 	// and when the straight run would hit a screen, bow around it with an arc
 	// - the same fix the skill teaches agents, computed instead of eyeballed.
-	const segCrossesRect = (a, b, r) => {
-		const dx = b.x - a.x
-		const dy = b.y - a.y
-		let t0 = 0
-		let t1 = 1
-		const clip = (p, q) => {
-			if (p === 0) return q >= 0
-			const t = q / p
-			if (p < 0) {
-				if (t > t1) return false
-				if (t > t0) t0 = t
-			} else {
-				if (t < t0) return false
-				if (t < t1) t1 = t
-			}
-			return true
-		}
-		return (
-			clip(-dx, a.x - r.x) &&
-			clip(dx, r.x + r.w - a.x) &&
-			clip(-dy, a.y - r.y) &&
-			clip(dy, r.y + r.h - a.y) &&
-			t1 > t0
-		)
-	}
 	const strayRouted = new Set()
-	let bowed = 0
 	for (const e of edges) {
 		if (!e.routable || e.packRouted || anchors.has(`${e.id}:from`)) continue
 		const fr = endRect(e.fromShape, e.from)
@@ -484,25 +459,11 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		const p0 = anchorPoint(fr, fa)
 		const p3 = anchorPoint(tr, ta)
 		const len = Math.hypot(p3.x - p0.x, p3.y - p0.y) || 1
-		const nx = -(p3.y - p0.y) / len
-		const ny = (p3.x - p0.x) / len
-		let needBend = 0
-		let bendSide = 0
-		for (const s of screens) {
-			if (s.id === e.from || s.id === e.to) continue
-			const r = rectOf(s.id)
-			if (!segCrossesRect(p0, p3, { x: r.x - 8, y: r.y - 8, w: r.w + 16, h: r.h + 16 })) continue
-			const off = (r.x + r.w / 2 - (p0.x + p3.x) / 2) * nx + (r.y + r.h / 2 - (p0.y + p3.y) / 2) * ny
-			const clearance = Math.hypot(r.w, r.h) / 2 - Math.abs(off) + 100
-			if (clearance > needBend) {
-				needBend = clearance
-				bendSide = off > 0 ? -1 : 1
-			}
-		}
-		e.strayBend = needBend > 0 ? Math.round(Math.min(800, needBend * 1.6)) * bendSide : 0
+		// collisions are handled by the fix_crossings pass (rectilinear
+		// corridor detours, editor-verified) - never arcs, which read wrong
+		// against an otherwise-orthogonal diagram
 		e.strayLabelAt = len > 600 ? 0.2 : null
 		strayRouted.add(e.id)
-		if (e.strayBend) bowed++
 	}
 
 	// ---- emit chain/route ops -------------------------------------------------
@@ -533,10 +494,9 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 			ops.push({
 				route: {
 					id: e.id,
-					kind: e.strayBend ? 'arc' : 'elbow',
+					kind: 'elbow',
 					...(fromAnchor ? { fromAnchor } : {}),
 					...(toAnchor ? { toAnchor } : {}),
-					...(e.strayBend ? { bend: e.strayBend } : {}),
 					...(e.strayLabelAt != null ? { labelAt: e.strayLabelAt } : {}),
 				},
 			})
@@ -584,7 +544,8 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		)
 	}
 	// last op: editor-verified collision repair - whatever the translated
-	// routes still cut through gets bowed clear using REAL arrow geometry
+	// routes still cut through gets rerouted through a clear corridor using
+	// REAL arrow geometry - rectilinear detours, never arcs
 	ops.push({ fix_crossings: {} })
 	return { ops, report }
 }
