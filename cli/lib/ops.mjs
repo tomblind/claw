@@ -26,6 +26,7 @@ const OPS = {
 	row: { required: ['ids'], optional: ['gap'] },
 	clear: { required: ['id'], optional: [] },
 	theme: { required: [], optional: ['colors', 'fonts', 'reset'] },
+	unchain_all: { required: [], optional: [] },
 	resize: { required: ['id'], optional: ['w', 'h'] },
 	connect: { required: ['from', 'to'], optional: ['label', 'color', 'kind'] },
 	route: { required: ['id'], optional: ['fromAnchor', 'toAnchor', 'mid', 'kind', 'labelAt'] },
@@ -217,6 +218,10 @@ label text, or the "name" given to an earlier op in the same batch.
       queries still see ONE transition. "points" are page-space interior
       bends; empty points unchains back to a plain arrow. \`claw layout\`
       emits these automatically - hand-write only for fine-tuning.
+  {"unchain_all": {}}
+      Restore every chain to a plain bound arrow and sweep debris from
+      broken ones. \`claw layout\` runs this first automatically; hand-run
+      it to clean a canvas whose routes have gone stale.
   {"route": {"id": "<arrow>", "fromAnchor": {"x":1,"y":0.3}, "toAnchor": {"x":0,"y":0.5}, "mid": 0.35}}
       Precise control of a bound arrow's path. Anchors are normalized points
       on each bound shape (x:1,y:0.3 = right edge, 30% down) - the arrow is

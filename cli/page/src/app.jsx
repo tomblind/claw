@@ -339,12 +339,20 @@ function lintDocument(editor) {
 				const a = pb(sibs[i].id)
 				const b = pb(sibs[j].id)
 				if (!a || !b) continue
-				const smaller = Math.min(a.w * a.h, b.w * b.h)
+				const aArea = a.w * a.h
+				const bArea = b.w * b.h
+				const smaller = Math.min(aArea, bArea)
+				const larger = Math.max(aArea, bArea)
 				const ov = overlapArea(a, b)
-				if (smaller > 0 && ov / smaller > 0.25) {
+				const frac = smaller > 0 ? ov / smaller : 0
+				// a clearly-smaller shape fully inside a bigger one is component
+				// nesting (icon in a row, switch in a card) - intentional, skip.
+				// Near-identical fully-overlapping rects are accidental duplicates.
+				if (frac >= 0.95 && smaller < larger * 0.8) continue
+				if (frac > 0.25) {
 					add(
 						'overlap',
-						`${describe(sibs[i])} overlaps ${describe(sibs[j])} by ${Math.round((ov / smaller) * 100)}% in "${frameName(containingFrame(editor, sibs[i]))}"`
+						`${describe(sibs[i])} overlaps ${describe(sibs[j])} by ${Math.round(frac * 100)}% in "${frameName(containingFrame(editor, sibs[i]))}"`
 					)
 				}
 			}
@@ -1327,6 +1335,28 @@ async function applyOps(editor, ops) {
 					touched.created.push(id)
 					report.push(
 						`connect ${short(from.id)} -> ${short(to.id)}${args.label ? ` ${JSON.stringify(args.label)}` : ''} (${elbow ? 'elbow ' : ''}arrow ${short(id)}, bound both ends)`
+					)
+					break
+				}
+
+				case 'unchain_all': {
+					// restore every chain to a plain bound arrow, then sweep debris
+					// (headless groups/segments from older or interrupted chains) -
+					// this is what makes `claw layout` re-runnable on any canvas
+					const heads = editor
+						.getCurrentPageShapes()
+						.filter((s) => s.type === 'arrow' && s.meta?.claw === 'chainhead')
+					for (const h of heads) unchainArrow(editor, h)
+					const debris = editor
+						.getCurrentPageShapes()
+						.filter(
+							(s) =>
+								s.meta?.claw === 'chainseg' || (s.type === 'group' && s.meta?.claw === 'chain')
+						)
+					if (debris.length) editor.deleteShapes(debris.map((s) => s.id))
+					touched.updated.push(...heads.map((h) => h.id))
+					report.push(
+						`unchain_all -> ${heads.length} chain(s) restored to plain arrows${debris.length ? `, ${debris.length} orphan fragment(s) swept` : ''}`
 					)
 					break
 				}

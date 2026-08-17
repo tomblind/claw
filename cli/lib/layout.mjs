@@ -170,7 +170,10 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 	}
 
 	// ---- emit move ops -------------------------------------------------------
-	const ops = []
+	// first op: restore every chain to a plain bound arrow and sweep debris
+	// from older/broken chains. Without this, re-running layout leaves stale
+	// frozen routes crossing the new arrangement (chains don't self-heal).
+	const ops = [{ unchain_all: {} }]
 	const report = []
 	let unmovableArrows = 0
 	const deltas = new Map()
