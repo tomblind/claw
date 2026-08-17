@@ -128,11 +128,15 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 			'elk.edgeRouting': 'ORTHOGONAL',
 			'elk.spacing.nodeNode': String(gapY),
 			'elk.layered.spacing.nodeNodeBetweenLayers': String(gapX),
-			// give edge channels real width so lanes don't kiss the screens
-			'elk.spacing.edgeNode': '48',
-			'elk.spacing.edgeEdge': '24',
-			'elk.layered.spacing.edgeNodeBetweenLayers': '48',
-			'elk.layered.spacing.edgeEdgeBetweenLayers': '24',
+			// give edge channels real width so lanes don't kiss the screens or
+			// visually merge with each other over long parallel runs
+			'elk.spacing.edgeNode': '64',
+			'elk.spacing.edgeEdge': '36',
+			'elk.layered.spacing.edgeNodeBetweenLayers': '64',
+			'elk.layered.spacing.edgeEdgeBetweenLayers': '36',
+			// NETWORK_SIMPLEX packs uneven-height screens tighter than the
+			// default placement, shortening edges across the board
+			'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
 			'elk.layered.wrapping.strategy': 'MULTI_EDGE',
 			'elk.layered.wrapping.additionalEdgeSpacing': String(gapY / 2),
 			'elk.separateConnectedComponents': 'true',
@@ -146,6 +150,20 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 	})
 
 	const targets = new Map(laid.children.map((c) => [c.id, { x: Math.round(c.x), y: Math.round(c.y) }]))
+	if (process.env.CLAW_LAYOUT_DEBUG) {
+		console.error(
+			'DEBUG screens:',
+			screens.length,
+			'flowScreens:',
+			flowScreens.length,
+			'targets:',
+			targets.size,
+			'sample:',
+			JSON.stringify([...targets.entries()].slice(0, 3)),
+			'screen sample:',
+			JSON.stringify(screens.slice(0, 3).map((s) => ({ id: s.id, x: s.x, y: s.y })))
+		)
+	}
 	// attach ELK's computed route to each flow edge
 	const laidEdgeById = new Map((laid.edges ?? []).map((le) => [le.id, le]))
 	flowEdges.forEach((e, i) => {
@@ -262,18 +280,67 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 	const flowRouted = []
 	for (const e of flowEdges) {
 		if (!e.routable || !e.elkRoute || e.elkRoute.length < 2) continue
-		const pts = simplify(e.elkRoute)
+		e.pts = simplify(e.elkRoute)
 		const fr = endRect(e.fromShape, e.from)
 		const tr = endRect(e.toShape, e.to)
-		const fa = anchorFor(fr, pts[0], pts[1])
-		const ta = anchorFor(tr, pts[pts.length - 1], pts[pts.length - 2])
-		anchors.set(`${e.id}:from`, fa)
-		anchors.set(`${e.id}:to`, ta)
+		anchors.set(`${e.id}:from`, anchorFor(fr, e.pts[0], e.pts[1]))
+		anchors.set(`${e.id}:to`, anchorFor(tr, e.pts[e.pts.length - 1], e.pts[e.pts.length - 2]))
+		flowRouted.push(e)
+	}
+
+	// ---- fan out anchors sharing a screen side -------------------------------
+	// ELK often lands several edges on nearly the same spot of a screen edge;
+	// after translation to the real rect they visually merge into one line.
+	// Spread each side's fan evenly, ordered by where the other end goes so
+	// the fan stays uncrossed.
+	{
+		const fans = new Map() // `${rootId}:${side}` -> [{e, end, side, away}]
+		for (const e of flowRouted) {
+			for (const end of ['from', 'to']) {
+				const a = anchors.get(`${e.id}:${end}`)
+				const side = a.x === 0 ? 'left' : a.x === 1 ? 'right' : a.y === 0 ? 'top' : 'bottom'
+				const root = end === 'from' ? e.from : e.to
+				const other = end === 'from' ? e.pts[e.pts.length - 1] : e.pts[0]
+				const key = `${root}:${side}`
+				if (!fans.has(key)) fans.set(key, [])
+				fans.get(key).push({ e, end, side, away: side === 'left' || side === 'right' ? other.y : other.x })
+			}
+		}
+		for (const fan of fans.values()) {
+			if (fan.length < 2) continue
+			fan.sort((a, b) => a.away - b.away || (a.e.id < b.e.id ? -1 : 1))
+			fan.forEach(({ e, end, side }, i) => {
+				const frac = Math.round((0.12 + (0.76 * i) / (fan.length - 1)) * 100) / 100
+				const a = anchors.get(`${e.id}:${end}`)
+				if (side === 'left' || side === 'right') a.y = frac
+				else a.x = frac
+				// remember fan position: source labels stagger by it below
+				if (end === 'from') e.labelStagger = i % 3
+			})
+		}
+	}
+
+	// ---- derive chains / labels / mids from the (possibly shifted) anchors --
+	for (const e of flowRouted) {
+		const pts = e.pts
+		const fr = endRect(e.fromShape, e.from)
+		const tr = endRect(e.toShape, e.to)
+		const fa = anchors.get(`${e.id}:from`)
+		const ta = anchors.get(`${e.id}:to`)
 		if (pts.length > 4) {
 			// too bendy for one elbow: render ELK's exact route as a waypoint chain
 			e.chainPts = pts.slice(1, -1).map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }))
-			flowRouted.push(e)
 			continue
+		}
+		// long edges: park the label near the SOURCE screen instead of the
+		// tldraw default midpoint - on a cross-canvas run the midpoint floats
+		// in empty space with no visual owner. Staggered within a fan so the
+		// labels of edges leaving one side don't stack on each other.
+		{
+			const exit = anchorPoint(fr, fa)
+			const entry = anchorPoint(tr, ta)
+			const manhattan = Math.abs(entry.x - exit.x) + Math.abs(entry.y - exit.y)
+			if (manhattan > 600) e.labelAt = 0.18 + (e.labelStagger ?? 0) * 0.07
 		}
 		if (pts.length === 4) {
 			// H-V-H or V-H-V: position the middle segment where ELK put it
@@ -287,7 +354,6 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 			}
 			e.midVertical = midVertical
 		}
-		flowRouted.push(e)
 	}
 
 	// ---- verify translated elbows against every other screen ----------------
@@ -367,6 +433,78 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		})
 	}
 
+	// ---- stray edges: everything the flow/pack routers don't own ------------
+	// (pack leaf -> elsewhere, cross-pack hops). Left alone they keep stale
+	// geometry and cut across screens. Route them end-to-end on facing sides,
+	// and when the straight run would hit a screen, bow around it with an arc
+	// - the same fix the skill teaches agents, computed instead of eyeballed.
+	const segCrossesRect = (a, b, r) => {
+		const dx = b.x - a.x
+		const dy = b.y - a.y
+		let t0 = 0
+		let t1 = 1
+		const clip = (p, q) => {
+			if (p === 0) return q >= 0
+			const t = q / p
+			if (p < 0) {
+				if (t > t1) return false
+				if (t > t0) t0 = t
+			} else {
+				if (t < t0) return false
+				if (t < t1) t1 = t
+			}
+			return true
+		}
+		return (
+			clip(-dx, a.x - r.x) &&
+			clip(dx, r.x + r.w - a.x) &&
+			clip(-dy, a.y - r.y) &&
+			clip(dy, r.y + r.h - a.y) &&
+			t1 > t0
+		)
+	}
+	const strayRouted = new Set()
+	let bowed = 0
+	for (const e of edges) {
+		if (!e.routable || e.packRouted || anchors.has(`${e.id}:from`)) continue
+		const fr = endRect(e.fromShape, e.from)
+		const tr = endRect(e.toShape, e.to)
+		const fc = { x: fr.x + fr.w / 2, y: fr.y + fr.h / 2 }
+		const tc = { x: tr.x + tr.w / 2, y: tr.y + tr.h / 2 }
+		const sideAnchor = (from, to) => {
+			const dx = to.x - from.x
+			const dy = to.y - from.y
+			if (Math.abs(dx) >= Math.abs(dy)) return { x: dx > 0 ? 1 : 0, y: 0.5 }
+			return { x: 0.5, y: dy > 0 ? 1 : 0 }
+		}
+		const fa = sideAnchor(fc, tc)
+		const ta = sideAnchor(tc, fc)
+		anchors.set(`${e.id}:from`, fa)
+		anchors.set(`${e.id}:to`, ta)
+		const p0 = anchorPoint(fr, fa)
+		const p3 = anchorPoint(tr, ta)
+		const len = Math.hypot(p3.x - p0.x, p3.y - p0.y) || 1
+		const nx = -(p3.y - p0.y) / len
+		const ny = (p3.x - p0.x) / len
+		let needBend = 0
+		let bendSide = 0
+		for (const s of screens) {
+			if (s.id === e.from || s.id === e.to) continue
+			const r = rectOf(s.id)
+			if (!segCrossesRect(p0, p3, { x: r.x - 8, y: r.y - 8, w: r.w + 16, h: r.h + 16 })) continue
+			const off = (r.x + r.w / 2 - (p0.x + p3.x) / 2) * nx + (r.y + r.h / 2 - (p0.y + p3.y) / 2) * ny
+			const clearance = Math.hypot(r.w, r.h) / 2 - Math.abs(off) + 100
+			if (clearance > needBend) {
+				needBend = clearance
+				bendSide = off > 0 ? -1 : 1
+			}
+		}
+		e.strayBend = needBend > 0 ? Math.round(Math.min(800, needBend * 1.6)) * bendSide : 0
+		e.strayLabelAt = len > 600 ? 0.2 : null
+		strayRouted.add(e.id)
+		if (e.strayBend) bowed++
+	}
+
 	// ---- emit chain/route ops -------------------------------------------------
 	let routed = 0
 	for (const e of edges) {
@@ -391,6 +529,20 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		// chain frozen at its old geometry. No-op for plain arrows, and it
 		// restores real bindings so a following route op works.
 		ops.push({ chain: { id: e.id, points: [] } })
+		if (strayRouted.has(e.id)) {
+			ops.push({
+				route: {
+					id: e.id,
+					kind: e.strayBend ? 'arc' : 'elbow',
+					...(fromAnchor ? { fromAnchor } : {}),
+					...(toAnchor ? { toAnchor } : {}),
+					...(e.strayBend ? { bend: e.strayBend } : {}),
+					...(e.strayLabelAt != null ? { labelAt: e.strayLabelAt } : {}),
+				},
+			})
+			routed++
+			continue
+		}
 		if (!fromAnchor && !toAnchor && e.mid == null) continue
 		ops.push({
 			route: {
@@ -431,5 +583,8 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 			`WARN: ${unmovableArrows} unsnapped arrow(s) span screens that moved differently - they may need re-drawing (bound arrows follow automatically)`
 		)
 	}
+	// last op: editor-verified collision repair - whatever the translated
+	// routes still cut through gets bowed clear using REAL arrow geometry
+	ops.push({ fix_crossings: {} })
 	return { ops, report }
 }

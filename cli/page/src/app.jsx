@@ -1369,6 +1369,74 @@ async function applyOps(editor, ops) {
 					break
 				}
 
+				case 'fix_crossings': {
+					// editor-verified collision repair: for every bound arrow whose
+					// REAL rendered path cuts through a frame it isn't connected to,
+					// try arc bends (small to large, both sides) until the geometry
+					// actually clears. Runs as layout's last op; the guesswork-free
+					// counterpart to route translation.
+					const frames = editor.getCurrentPageShapes().filter((s) => s.type === 'frame')
+					const frameIdOf = (t) =>
+						t == null ? null : t.type === 'frame' ? t.id : (containingFrame(editor, t)?.id ?? null)
+					const crossings = (arrowId, endFrames) => {
+						let pts
+						try {
+							const g = editor.getShapeGeometry(arrowId)
+							const xf = editor.getShapePageTransform(arrowId)
+							pts = g.vertices.map((v) => xf.applyToPoint(v))
+						} catch {
+							return []
+						}
+						const hits = []
+						for (const f of frames) {
+							if (endFrames.has(f.id)) continue
+							const r = editor.getShapePageBounds(f.id)
+							if (!r) continue
+							let hit = false
+							for (let i = 0; i < pts.length - 1 && !hit; i++) {
+								for (let t = 0; t <= 1 && !hit; t += 0.05) {
+									const x = pts[i].x + (pts[i + 1].x - pts[i].x) * t
+									const y = pts[i].y + (pts[i + 1].y - pts[i].y) * t
+									if (x > r.minX + 2 && x < r.maxX - 2 && y > r.minY + 2 && y < r.maxY - 2) hit = true
+								}
+							}
+							if (hit) hits.push(f.id)
+						}
+						return hits
+					}
+					let fixed = 0
+					const stuck = []
+					for (const a of editor.getCurrentPageShapes()) {
+						if (a.type !== 'arrow' || typeof a.meta?.claw === 'string') continue
+						const binds = editor.getBindingsFromShape(a.id, 'arrow')
+						if (binds.length < 2) continue
+						const endFrames = new Set(
+							binds.map((b) => frameIdOf(editor.getShape(b.toId))).filter(Boolean)
+						)
+						if (!crossings(a.id, endFrames).length) continue
+						const before = editor.getShape(a.id)
+						const orig = { kind: before.props.kind, bend: before.props.bend ?? 0 }
+						let cleared = false
+						for (const bend of [160, -160, 320, -320, 520, -520, 760, -760, 1000, -1000, 1300, -1300]) {
+							editor.updateShape({ id: a.id, type: 'arrow', props: { kind: 'arc', bend } })
+							if (!crossings(a.id, endFrames).length) {
+								cleared = true
+								fixed++
+								touched.updated.push(a.id)
+								break
+							}
+						}
+						if (!cleared) {
+							editor.updateShape({ id: a.id, type: 'arrow', props: orig })
+							stuck.push(short(a.id))
+						}
+					}
+					report.push(
+						`fix_crossings -> ${fixed} arrow(s) bowed clear of frames${stuck.length ? `; ${stuck.length} could not be cleared: ${stuck.join(', ')}` : ''}`
+					)
+					break
+				}
+
 				case 'unchain_all': {
 					// restore every chain to a plain bound arrow, then sweep debris
 					// (headless groups/segments from older or interrupted chains) -
@@ -1523,6 +1591,7 @@ async function applyOps(editor, ops) {
 					}
 					const patch = {}
 					if (args.kind != null) patch.kind = args.kind
+					if (args.bend != null) patch.bend = args.bend
 					if (args.mid != null) patch.elbowMidPoint = Math.max(0.05, Math.min(0.95, args.mid))
 					if (args.labelAt != null) patch.labelPosition = Math.max(0.05, Math.min(0.95, args.labelAt))
 					// routed arrows are diagram edges: sketchy "draw" dash becomes
