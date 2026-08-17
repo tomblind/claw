@@ -218,6 +218,7 @@ function applyClawTheme(editor, { force = false } = {}) {
 			el.textContent = fontFaceCss
 			document.head.appendChild(el)
 		}
+		patchSlotLabels(clawMessages, spec)
 		editor.updateThemes({ ...editor.getThemes(), default: next })
 	} catch (err) {
 		reportError('theme', err)
@@ -1758,6 +1759,28 @@ const familyAvailable = (name) => {
 }
 const stackAvailable = (stack) => String(stack).split(',').some(familyAvailable)
 
+/**
+ * Style-picker tooltips: tldraw labels picker buttons via translation keys
+ * ("font-style.custom-1"), which have no entry for custom slots and show
+ * raw. The translation map is a plain object read at render time, so we
+ * write friendly entries into it (hex for colors, family for fonts)
+ * whenever the theme changes; the pickers re-render on the same change.
+ */
+let clawMessages = null // the live translation map, captured from context
+function patchSlotLabels(messages, theme) {
+	if (!messages) return
+	try {
+		for (const slot of CUSTOM_COLOR_SLOTS) {
+			const val = theme?.colors?.[slot]
+			messages[`color-style.${slot}`] = val != null ? colorHexOf(val) : slot
+		}
+		for (const slot of CUSTOM_FONT_SLOTS) {
+			const val = theme?.fonts?.[slot]
+			messages[`font-style.${slot}`] = val != null ? fontLabelOf(val) || slot : slot
+		}
+	} catch {}
+}
+
 /** Reactive view of meta.clawTheme for any component (panel or dialog). */
 function useClawTheme(editor) {
 	const useVal = typeof TL.useValue === 'function' ? TL.useValue : (_name, fn) => fn()
@@ -2284,7 +2307,16 @@ const PANEL_PARTS = [
 const HAS_PANEL_PARTS = PANEL_PARTS.every((n) => typeof TL[n] === 'function')
 
 function CustomStylePanel(props) {
+	const editor = TL.useEditor()
 	const relevant = typeof TL.useRelevantStyles === 'function' ? TL.useRelevantStyles() : undefined
+	// capture the live translation map and keep custom-slot tooltip labels
+	// fresh (parent renders before the pickers, so they read patched entries)
+	const translation = typeof TL.useCurrentTranslation === 'function' ? TL.useCurrentTranslation() : null
+	const clawTheme = useClawTheme(editor)
+	if (translation?.messages) {
+		clawMessages = translation.messages
+		patchSlotLabels(clawMessages, clawTheme)
+	}
 	const colorRelevant = relevant?.get?.(TL.DefaultColorStyle) !== undefined
 	const fontRelevant = relevant?.get?.(TL.DefaultFontStyle) !== undefined
 	if (!HAS_PANEL_PARTS) {
