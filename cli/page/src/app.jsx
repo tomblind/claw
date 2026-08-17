@@ -1759,6 +1759,61 @@ const familyAvailable = (name) => {
 }
 const stackAvailable = (stack) => String(stack).split(',').some(familyAvailable)
 
+const FONT_FORMATS = { woff2: 'woff2', woff: 'woff', ttf: 'truetype', otf: 'opentype' }
+const formatFromUrl = (u) => FONT_FORMATS[/\.(woff2|woff|ttf|otf)(\?|$)/i.exec(u)?.[1]?.toLowerCase()]
+
+/**
+ * Turn whatever URL the user pasted into a loadable font-file URL. Google
+ * Fonts (and Bunny etc.) hand out CSS links ("css2?family=..."), so if the
+ * URL looks like a stylesheet, fetch it, parse its @font-face rules, and
+ * pick the best face: the requested family (or the first one), latin
+ * subset, upright, regular weight. Direct font-file URLs pass through.
+ */
+async function resolveWebfontUrl(url, requestedFamily) {
+	const looksCss = /\.css(\?|#|$)|\/css2?\?/i.test(url)
+	if (!looksCss) {
+		if (!requestedFamily) throw new Error('give the font a family name')
+		return { family: requestedFamily, url, format: formatFromUrl(url) }
+	}
+	const res = await fetch(url).catch(() => null)
+	if (!res?.ok) throw new Error(`could not fetch the stylesheet (${res?.status ?? 'network error'})`)
+	const css = await res.text()
+	const faces = []
+	const re = /(?:\/\*\s*([\w-]+)\s*\*\/\s*)?@font-face\s*{([^}]*)}/g
+	let m
+	while ((m = re.exec(css))) {
+		const body = m[2]
+		const fam = /font-family:\s*['"]?([^'";]+)/.exec(body)?.[1]?.trim()
+		const src = /url\((['"]?)([^)'"]+)\1\)/.exec(body)?.[2]
+		if (!fam || !src) continue
+		faces.push({
+			subset: m[1] ?? '',
+			family: fam,
+			url: src,
+			weight: /font-weight:\s*([^;]+)/.exec(body)?.[1]?.trim() ?? '',
+			style: /font-style:\s*([^;]+)/.exec(body)?.[1]?.trim() ?? 'normal',
+		})
+	}
+	if (!faces.length) throw new Error('no @font-face rules in that stylesheet')
+	const families = [...new Set(faces.map((f) => f.family))]
+	let family = requestedFamily
+	if (family) {
+		const match = families.find((f) => f.toLowerCase() === family.toLowerCase())
+		if (!match) {
+			throw new Error(`that stylesheet has: ${families.join(', ')} — put one of those in the name field`)
+		}
+		family = match
+	} else {
+		family = families[0]
+	}
+	const cands = faces.filter((f) => f.family === family)
+	const upright = cands.filter((f) => f.style === 'normal')
+	const regular = upright.filter((f) => !f.weight || /(^|\s)400(\s|$)|100 900|normal/.test(f.weight))
+	const pool = regular.length ? regular : upright.length ? upright : cands
+	const pick = pool.find((f) => f.subset === 'latin') ?? pool[0]
+	return { family, url: pick.url, format: formatFromUrl(pick.url) ?? 'woff2' }
+}
+
 /**
  * Style-picker tooltips: tldraw labels picker buttons via translation keys
  * ("font-style.custom-1"), which have no entry for custom slots and show
@@ -2046,9 +2101,10 @@ function FontCustomizeDialog() {
 
 	const submit = async () => {
 		if (!form || form.busy) return
-		const family = form.family.trim().replace(/^['"]|['"]$/g, '')
-		if (!family) return
-		const url = form.url.trim()
+		let family = form.family.trim().replace(/^['"]|['"]$/g, '')
+		let url = form.url.trim()
+		let format
+		if (!family && !url) return
 		const slot = form.slot ?? CUSTOM_FONT_SLOTS.find((s) => !(s in fonts))
 		if (!slot) {
 			window.alert(`All ${CUSTOM_FONT_SLOTS.length} custom font slots are in use`)
@@ -2056,8 +2112,14 @@ function FontCustomizeDialog() {
 		}
 		try {
 			if (url) {
-				// prove the webfont actually loads before committing it
 				setForm({ ...form, busy: true, error: null })
+				// people paste Google Fonts CSS links ("css2?family=..."), not
+				// font files - resolve those to the actual font-file URL first
+				const resolved = await resolveWebfontUrl(url, family)
+				family = resolved.family
+				url = resolved.url
+				format = resolved.format
+				// prove the webfont actually loads before committing it
 				const face = new FontFace(family, `url("${url}")`)
 				await Promise.race([
 					face.load(),
@@ -2068,7 +2130,7 @@ function FontCustomizeDialog() {
 				setForm({ ...form, error: 'Not found on this device - pick from the list or add a webfont URL' })
 				return
 			}
-			clawThemePatch(editor, 'fonts', slot, url ? { family, url } : family)
+			clawThemePatch(editor, 'fonts', slot, url ? { family, url, ...(format ? { format } : {}) } : family)
 			if (form.slot == null && TL.DefaultFontStyle) {
 				editor.setStyleForSelectedShapes?.(TL.DefaultFontStyle, slot)
 				editor.setStyleForNextShapes?.(TL.DefaultFontStyle, slot)
@@ -2232,7 +2294,7 @@ function FontCustomizeDialog() {
 						</div>
 						<input
 							className="tlui-input"
-							placeholder="Webfont URL (optional)"
+							placeholder="Webfont or Google Fonts URL (optional)"
 							value={form.url}
 							onChange={(e) => setForm({ ...form, url: e.target.value, error: null })}
 							onKeyDown={inputKeys}
