@@ -38,7 +38,9 @@
 		.modal .body { padding: 0 16px 14px; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 6px; }
 		.row-btn { display: flex; align-items: center; gap: 8px; font: inherit; font-size: 13.5px; text-align: left; background: #fff; border: 1px solid #ccc; border-radius: 6px; padding: 8px 10px; cursor: pointer; min-width: 0; }
 		.row-btn:hover { background: #f2f3f7; }
-		.row-btn.selected { border-color: #4263eb; box-shadow: 0 0 0 1px #4263eb; }
+		/* inset: follows the border's own rounded rect, so the 2px ring stays even
+		   (an outer 1px spread shadow draws its own slightly-off corner curve) */
+		.row-btn.selected { border-color: #4263eb; box-shadow: inset 0 0 0 1px #4263eb; }
 		.doc-row { display: flex; flex-direction: column; align-items: stretch; gap: 2px; }
 		.doc-row .name { font-weight: 600; }
 		.doc-row .name .live-dot { color: #4cb05e; font-size: 11px; margin-left: 6px; font-weight: 400; }
