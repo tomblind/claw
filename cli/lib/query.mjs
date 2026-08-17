@@ -31,6 +31,14 @@ export async function renderFile(tldrText, { frame = null, around = null, pad = 
 	return (await call('/api/render', { tldr: tldrText, frame, around, pad, scale })).png
 }
 
+export async function lintFile(tldrText) {
+	return await call('/api/lint', { tldr: tldrText })
+}
+
+export async function inspectFileShape(tldrText, ref) {
+	return (await call('/api/inspect', { tldr: tldrText, ref })).shape
+}
+
 export async function applyToFile(tldrText, ops, path = null) {
 	return await call('/api/apply', {
 		tldr: tldrText,

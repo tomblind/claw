@@ -264,6 +264,249 @@ function resolveShape(editor, query) {
 	throw new Error(`no unique shape matching "${q}"`)
 }
 
+const shapePlaintext = (editor, s) => {
+	try {
+		if (s.props?.richText && typeof TL.renderPlaintextFromRichText === 'function') {
+			return TL.renderPlaintextFromRichText(editor, s.props.richText).trim()
+		}
+	} catch {}
+	return String(s.props?.text ?? '').trim()
+}
+
+const containingFrame = (editor, s) => {
+	let cur = s
+	while (cur?.parentId && String(cur.parentId).startsWith('shape:')) {
+		const p = editor.getShape(cur.parentId)
+		if (!p) return null
+		if (p.type === 'frame') return p
+		cur = p
+	}
+	return null
+}
+
+/**
+ * Heuristic visual lint: the problems an agent would otherwise burn a render
+ * on, reported as text. These are likelihood flags, not certainties - the
+ * checks trade precision for costing ~nothing.
+ */
+function lintDocument(editor) {
+	const issues = []
+	const add = (kind, detail) => issues.push({ kind, detail })
+	const shapes = editor.getCurrentPageShapes()
+	const boundsCache = new Map()
+	const pb = (id) => {
+		if (!boundsCache.has(id)) boundsCache.set(id, editor.getShapePageBounds(id) ?? null)
+		return boundsCache.get(id)
+	}
+	const describe = (s) => {
+		const nm = s.meta?.clawName ?? s.props?.name
+		const t = nm ?? shapePlaintext(editor, s).slice(0, 24)
+		return t ? `${s.type} "${t}" (${s.id.slice(6, 14)})` : `${s.type} (${s.id.slice(6, 14)})`
+	}
+	const frameName = (f) => (f ? f.props?.name || f.id.slice(6, 14) : 'page')
+	const BOXY = new Set(['geo', 'image', 'note', 'video', 'embed'])
+	const overlapArea = (a, b) => {
+		const w = Math.min(a.maxX, b.maxX) - Math.max(a.minX, b.minX)
+		const h = Math.min(a.maxY, b.maxY) - Math.max(a.minY, b.minY)
+		return w > 0 && h > 0 ? w * h : 0
+	}
+
+	// children poking out of their frame
+	for (const s of shapes) {
+		if (s.type === 'arrow') continue
+		const parent = String(s.parentId ?? '').startsWith('shape:') ? editor.getShape(s.parentId) : null
+		if (!parent || parent.type !== 'frame') continue
+		const cb = pb(s.id)
+		const fb = pb(parent.id)
+		if (!cb || !fb) continue
+		const out = Math.max(fb.minX - cb.minX, fb.minY - cb.minY, cb.maxX - fb.maxX, cb.maxY - fb.maxY)
+		if (out > 2) {
+			add('outside-frame', `${describe(s)} extends ${Math.round(out)}px outside frame "${frameName(parent)}"`)
+		}
+	}
+
+	// sibling boxes overlapping (text and arrows excluded - overlap is their job)
+	const byParent = new Map()
+	for (const s of shapes) {
+		if (!BOXY.has(s.type)) continue
+		const key = s.parentId ?? 'page'
+		if (!byParent.has(key)) byParent.set(key, [])
+		byParent.get(key).push(s)
+	}
+	for (const sibs of byParent.values()) {
+		for (let i = 0; i < sibs.length; i++) {
+			for (let j = i + 1; j < sibs.length; j++) {
+				const a = pb(sibs[i].id)
+				const b = pb(sibs[j].id)
+				if (!a || !b) continue
+				const smaller = Math.min(a.w * a.h, b.w * b.h)
+				const ov = overlapArea(a, b)
+				if (smaller > 0 && ov / smaller > 0.25) {
+					add(
+						'overlap',
+						`${describe(sibs[i])} overlaps ${describe(sibs[j])} by ${Math.round((ov / smaller) * 100)}% in "${frameName(containingFrame(editor, sibs[i]))}"`
+					)
+				}
+			}
+		}
+	}
+
+	// text labels wider than the box they sit on (the fixed-chip pattern);
+	// remember the pairs for the contrast check below
+	const labelHosts = []
+	for (const s of shapes) {
+		if (s.type !== 'text') continue
+		const tb = pb(s.id)
+		if (!tb) continue
+		const cx = (tb.minX + tb.maxX) / 2
+		const cy = (tb.minY + tb.maxY) / 2
+		let host = null
+		for (const g of shapes) {
+			if (!BOXY.has(g.type)) continue
+			const gb = pb(g.id)
+			if (!gb || cx < gb.minX || cx > gb.maxX || cy < gb.minY || cy > gb.maxY) continue
+			if (!host || gb.w * gb.h < pb(host.id).w * pb(host.id).h) host = g
+		}
+		if (!host) continue
+		labelHosts.push({ text: s, host })
+		const hb = pb(host.id)
+		if (tb.w > hb.w + 2) {
+			add('label-overflow', `label ${describe(s)} is ${Math.round(tb.w - hb.w)}px wider than its box ${describe(host)}`)
+		}
+	}
+
+	// connected arrows cutting through unrelated frames
+	const frameRects = shapes
+		.filter((f) => f.type === 'frame')
+		.map((f) => ({ f, b: pb(f.id) }))
+		.filter((x) => x.b)
+	const segHitsRect = (p1, p2, r) => {
+		if (Math.max(p1.x, p2.x) < r.minX || Math.min(p1.x, p2.x) > r.maxX) return false
+		if (Math.max(p1.y, p2.y) < r.minY || Math.min(p1.y, p2.y) > r.maxY) return false
+		// sampled interior test - robust enough for a lint
+		for (let t = 0; t <= 1; t += 0.05) {
+			const x = p1.x + (p2.x - p1.x) * t
+			const y = p1.y + (p2.y - p1.y) * t
+			if (x > r.minX + 2 && x < r.maxX - 2 && y > r.minY + 2 && y < r.maxY - 2) return true
+		}
+		return false
+	}
+	for (const s of shapes) {
+		if (s.type !== 'arrow') continue
+		let endFrames
+		try {
+			endFrames = new Set(
+				editor
+					.getBindingsFromShape(s.id, 'arrow')
+					.map((b) => editor.getShape(b.toId))
+					.filter(Boolean)
+					.map((t) => (t.type === 'frame' ? t.id : (containingFrame(editor, t)?.id ?? null)))
+					.filter(Boolean)
+			)
+		} catch {
+			continue
+		}
+		if (!endFrames.size) continue
+		let pts
+		try {
+			const geo = editor.getShapeGeometry(s.id)
+			const xf = editor.getShapePageTransform(s.id)
+			pts = geo.vertices.map((v) => xf.applyToPoint(v))
+		} catch {
+			continue
+		}
+		for (const { f, b } of frameRects) {
+			if (endFrames.has(f.id)) continue
+			let hit = false
+			for (let i = 0; i < pts.length - 1 && !hit; i++) hit = segHitsRect(pts[i], pts[i + 1], b)
+			if (hit) add('arrow-through', `arrow ${describe(s)} cuts through frame "${frameName(f)}"`)
+		}
+	}
+
+	// unreadable label-on-fill combinations
+	const lum = (hex) => {
+		const m = /^#?([0-9a-f]{6})/i.exec(String(hex))
+		if (!m) return null
+		const n = parseInt(m[1], 16)
+		const ch = (v) => {
+			v /= 255
+			return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4
+		}
+		return 0.2126 * ch(n >> 16) + 0.7152 * ch((n >> 8) & 255) + 0.0722 * ch(n & 255)
+	}
+	let palette = null
+	try {
+		palette = editor.getCurrentTheme().colors[editor.getColorMode?.() ?? 'light']
+	} catch {}
+	if (palette) {
+		const contrastCheck = (inkName, bgName, subject) => {
+			const li = lum(palette[inkName]?.solid)
+			const lb = lum(palette[bgName]?.semi)
+			if (li == null || lb == null) return
+			const c = (Math.max(li, lb) + 0.05) / (Math.min(li, lb) + 0.05)
+			if (c < 1.6) {
+				add('low-contrast', `${subject}: "${inkName}" text on "${bgName}" fill reads at ${c.toFixed(1)}:1`)
+			}
+		}
+		// geo shapes carrying their own label
+		for (const s of shapes) {
+			if (s.type !== 'geo' || s.props?.fill !== 'solid' || !shapePlaintext(editor, s)) continue
+			contrastCheck(s.props.labelColor ?? 'black', s.props.color, describe(s))
+		}
+		// overlay labels centered on a solid-filled box (the fixed-chip pattern)
+		for (const { text, host } of labelHosts) {
+			if (host.type !== 'geo' || host.props?.fill !== 'solid') continue
+			contrastCheck(text.props?.color ?? 'black', host.props.color, `label ${describe(text)} on ${describe(host)}`)
+		}
+	}
+
+	return { issues, shapes: shapes.length }
+}
+
+/** Full resolved detail for one shape - the "focused" level of context. */
+function inspectShapeDetail(editor, query) {
+	const s = resolveShape(editor, query)
+	const b = editor.getShapePageBounds(s.id)
+	let palette = null
+	let themeFonts = null
+	try {
+		const theme = editor.getCurrentTheme()
+		palette = theme.colors[editor.getColorMode?.() ?? 'light']
+		themeFonts = theme.fonts
+	} catch {}
+	const props = {}
+	for (const [k, v] of Object.entries(s.props ?? {})) {
+		if (k !== 'richText') props[k] = v
+	}
+	const resolveColor = (name) =>
+		name == null
+			? undefined
+			: palette?.[name]
+				? { name, solid: palette[name].solid, semi: palette[name].semi }
+				: { name }
+	const frame = containingFrame(editor, s)
+	return {
+		id: s.id,
+		type: s.type,
+		name: s.meta?.clawName ?? s.props?.name ?? null,
+		text: shapePlaintext(editor, s) || null,
+		frame: frame ? frame.props?.name || frame.id.slice(6, 14) : null,
+		bounds: b
+			? { x: Math.round(b.minX), y: Math.round(b.minY), w: Math.round(b.w), h: Math.round(b.h) }
+			: null,
+		rotation: s.rotation || 0,
+		opacity: s.opacity ?? 1,
+		props,
+		resolved: {
+			color: resolveColor(s.props?.color),
+			labelColor: resolveColor(s.props?.labelColor),
+			font: s.props?.font
+				? { name: s.props.font, family: themeFonts?.[s.props.font]?.fontFamily ?? null }
+				: undefined,
+		},
+	}
+}
+
 function setupHost(editor) {
 	const inSyncRoom = syncParams() != null
 	window.host = {
@@ -392,6 +635,16 @@ function setupHost(editor) {
 		 */
 		async project() {
 			return projectDocument(editor)
+		},
+
+		/** Heuristic visual checks - text-only stand-in for render-eyeballing. */
+		async lint() {
+			return lintDocument(editor)
+		},
+
+		/** Full resolved detail for one shape (focused level of context). */
+		async inspect(query) {
+			return inspectShapeDetail(editor, query)
 		},
 
 		/**
@@ -603,6 +856,24 @@ function unchainArrow(editor, head) {
 
 async function applyOps(editor, ops) {
 	ensureCustomSlots() // defensive: anything that parsed a file may have stripped them
+	// sanitize numeric geometry before anything executes: reject non-finite
+	// numbers loudly, round float noise (2 decimals - fractional anchors like
+	// 0.25 survive), clamp positions and sizes to sane canvas ranges
+	const sanitizeGeom = (obj, opIdx) => {
+		if (!obj || typeof obj !== 'object') return
+		for (const [k, v] of Object.entries(obj)) {
+			if (typeof v === 'number') {
+				if (!Number.isFinite(v)) throw new Error(`op ${opIdx}: "${k}" is not a finite number`)
+				const r = Math.round(v * 100) / 100
+				if (k === 'x' || k === 'y') obj[k] = Math.max(-100000, Math.min(100000, r))
+				else if (k === 'w' || k === 'h') obj[k] = Math.max(0.01, Math.min(20000, r))
+				else obj[k] = r
+			} else if (v && typeof v === 'object') {
+				sanitizeGeom(v, opIdx)
+			}
+		}
+	}
+	ops.forEach((op, i) => sanitizeGeom(op, i + 1))
 	const report = []
 	const aliases = new Map() // name given in add_screen -> shape id
 	const stackY = new Map() // screenId -> next y offset for at:"top" stacking

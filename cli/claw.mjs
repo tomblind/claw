@@ -6,7 +6,7 @@ import { diff } from './lib/diff.mjs'
 import { flowsText, outlineText } from './lib/format.mjs'
 import { readTldr, TldrError } from './lib/load.mjs'
 import { opsHelp, readOps } from './lib/ops.mjs'
-import { applyToFile, newFromOps, projectFile, projectPair, renderFile } from './lib/query.mjs'
+import { applyToFile, inspectFileShape, lintFile, newFromOps, projectFile, projectPair, renderFile } from './lib/query.mjs'
 
 import { VERSION } from './lib/version.mjs'
 
@@ -25,6 +25,17 @@ USAGE
       The arrow graph. Recorded transitions are facts from the file; endpoints
       the file doesn't record are deduced from geometry and reported separately
       with the evidence. --no-infer shows only recorded bindings.
+
+  claw lint <file.tldr> [--json]
+      Heuristic visual checks, as text: boxes poking out of their frame,
+      overlapping siblings, labels wider than their box, connected arrows
+      cutting through unrelated screens, unreadable label-on-fill contrast.
+      Run after apply; far cheaper than rendering to look for problems.
+
+  claw inspect <file.tldr> <shape ref> [--json]
+      Everything about one shape: full props, page bounds, containing frame,
+      and resolved styling (actual hex values, actual font family - custom
+      slots included). The zoom-in companion to outline.
 
   claw render <file.tldr> [--frame <ref>] [--around <ref> --pad N] [-o out] [--scale N]
       Pixel-accurate PNG rendered by tldraw itself. Auto-fits within 2000px
@@ -278,6 +289,50 @@ async function main() {
 			const from = flags.from && flags.from !== true ? String(flags.from) : null
 			process.stdout.write(`${flowsText(projection, { from, infer: !flags['no-infer'] })}\n`)
 			emitWarnings(projection)
+			return 0
+		}
+
+		case 'lint': {
+			const result = await lintFile(raw)
+			if (flags.json) {
+				process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
+				return 0
+			}
+			if (!result.issues.length) {
+				process.stdout.write(`ok: no issues found (${result.shapes} shapes checked)\n`)
+				return 0
+			}
+			process.stdout.write(`${result.issues.length} issue(s) in ${result.shapes} shapes:\n`)
+			for (const issue of result.issues) {
+				process.stdout.write(`  ${issue.kind.padEnd(15)} ${issue.detail}\n`)
+			}
+			process.stdout.write(`(heuristics - render to confirm anything surprising)\n`)
+			return 0
+		}
+
+		case 'inspect': {
+			const shapeRef = positional[2]
+			if (!shapeRef) throw new TldrError('inspect: missing <shape ref> (id, short id, name, or label text)', 1)
+			const shape = await inspectFileShape(raw, String(shapeRef))
+			if (flags.json) {
+				process.stdout.write(`${JSON.stringify(shape, null, 2)}\n`)
+				return 0
+			}
+			const lines = []
+			lines.push(`${shape.type} ${shape.id.slice(6)}${shape.name ? `  "${shape.name}"` : ''}`)
+			if (shape.text) lines.push(`  text: ${JSON.stringify(shape.text)}`)
+			if (shape.frame) lines.push(`  frame: ${shape.frame}`)
+			if (shape.bounds) lines.push(`  bounds: ${shape.bounds.w}x${shape.bounds.h} @${shape.bounds.x},${shape.bounds.y}`)
+			if (shape.rotation) lines.push(`  rotation: ${shape.rotation}`)
+			if (shape.opacity !== 1) lines.push(`  opacity: ${shape.opacity}`)
+			const r = shape.resolved ?? {}
+			if (r.color) lines.push(`  color: ${r.color.name}${r.color.solid ? ` (${r.color.solid}, fill ${r.color.semi})` : ''}`)
+			if (r.labelColor) lines.push(`  labelColor: ${r.labelColor.name}${r.labelColor.solid ? ` (${r.labelColor.solid})` : ''}`)
+			if (r.font) lines.push(`  font: ${r.font.name}${r.font.family ? ` (${r.font.family})` : ''}`)
+			const skip = new Set(['color', 'labelColor', 'font', 'name'])
+			const rest = Object.entries(shape.props ?? {}).filter(([k]) => !skip.has(k))
+			if (rest.length) lines.push(`  props: ${rest.map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(' ')}`)
+			process.stdout.write(`${lines.join('\n')}\n`)
 			return 0
 		}
 

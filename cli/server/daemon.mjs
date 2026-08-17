@@ -191,6 +191,16 @@ const host = {
 			await call('load', [tldr])
 			return await call('render', [opts])
 		}),
+	lint: (tldr) =>
+		withExecutor(async (call) => {
+			await call('load', [tldr])
+			return await call('lint', [])
+		}),
+	inspect: (tldr, ref) =>
+		withExecutor(async (call) => {
+			await call('load', [tldr])
+			return await call('inspect', [ref])
+		}),
 	apply: (tldr, ops) =>
 		withExecutor(async (call) => {
 			await call('load', [tldr])
@@ -273,6 +283,16 @@ const api = {
 				scale: body.scale ?? null,
 			}),
 		}
+	},
+
+	'POST /api/lint': async (body) => {
+		touch()
+		return await host.lint(required(body, 'tldr'))
+	},
+
+	'POST /api/inspect': async (body) => {
+		touch()
+		return { shape: await host.inspect(required(body, 'tldr'), required(body, 'ref')) }
 	},
 
 	'POST /api/apply': async (body) => {
