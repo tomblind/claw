@@ -21,8 +21,6 @@
 		.tab .label { overflow: hidden; text-overflow: ellipsis; }
 		.tab-x { font: inherit; font-size: 12px; line-height: 1; border: none; background: transparent; color: inherit; opacity: .55; border-radius: 4px; padding: 3px 5px; cursor: pointer; }
 		.tab-x:hover { opacity: 1; background: rgba(128,128,128,.25); }
-		.tab-x.disabled { opacity: .18; cursor: default; }
-		.tab-x.disabled:hover { background: transparent; }
 		#dot { width: 9px; height: 9px; border-radius: 50%; background: #666; margin: 0 4px 12px 6px; flex-shrink: 0; }
 		#dot.up { background: #4cb05e; }
 
@@ -34,14 +32,17 @@
 
 		.modal-wrap { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,.35); z-index: 50; }
 		.modal-wrap.show { display: flex; }
-		.modal { background: #fff; color: #1d1d1d; border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,.35); width: 480px; max-width: calc(100vw - 40px); max-height: calc(100vh - 80px); display: flex; flex-direction: column; }
+		.modal { background: #fff; color: #1d1d1d; border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,.35); width: 500px; max-width: calc(100vw - 40px); max-height: calc(100vh - 80px); display: flex; flex-direction: column; overflow: hidden; }
 		.modal header { display: flex; align-items: center; padding: 14px 16px 10px; font-size: 16px; font-weight: 600; }
 		.modal header .x { margin-left: auto; border: none; background: none; font-size: 16px; cursor: pointer; color: #555; padding: 2px 6px; }
-		.modal .body { padding: 0 16px 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
-		.row-btn { display: flex; align-items: center; gap: 8px; font: inherit; font-size: 13.5px; text-align: left; background: #fff; border: 1px solid #ccc; border-radius: 6px; padding: 8px 10px; cursor: pointer; }
+		.modal .body { padding: 0 16px 14px; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 6px; }
+		.row-btn { display: flex; align-items: center; gap: 8px; font: inherit; font-size: 13.5px; text-align: left; background: #fff; border: 1px solid #ccc; border-radius: 6px; padding: 8px 10px; cursor: pointer; min-width: 0; }
 		.row-btn:hover { background: #f2f3f7; }
 		.row-btn.selected { border-color: #4263eb; box-shadow: 0 0 0 1px #4263eb; }
-		.row-btn .sub { color: #999; font-size: 12px; margin-left: auto; white-space: nowrap; }
+		.doc-row { display: flex; flex-direction: column; align-items: stretch; gap: 2px; }
+		.doc-row .name { font-weight: 600; }
+		.doc-row .name .live-dot { color: #4cb05e; font-size: 11px; margin-left: 6px; font-weight: 400; }
+		.doc-row .path { color: #9aa; font-size: 12px; white-space: nowrap; overflow: hidden; }
 		.field-row { display: flex; align-items: center; gap: 8px; padding-top: 6px; }
 		.field-row label { font-size: 13.5px; }
 		.field-row input { flex: 1; font: inherit; font-size: 13.5px; padding: 7px 9px; border: 1px solid #ccc; border-radius: 6px; }
@@ -104,15 +105,44 @@
 	const qs = new URLSearchParams(location.search)
 	const IN_APP = qs.get('app') === '1'
 
-	let tabs = [] // [{id, path, file}] in arrival order; new rooms append quietly
+	// Tabs are THIS WINDOW's workspace - the docs the local user chose to view,
+	// not a mirror of what's live on the core. Agents and other clients open
+	// rooms all the time; those are discoverable in the Open modal instead.
+	// Persisted so an app restart / page reload keeps the workspace.
+	const TABS_KEY = 'claw-shell-tabs'
+	let tabs = [] // [{id, path, file}]
 	let activeId = null
 	let shellState = { version: '', executor: 'none', rooms: [], recent: [], lan: [], locations: [] }
 	let newModalDir = null
 
-	// deep link: /f/<id> serves this shell with that doc active
-	const pathMatch = location.pathname.match(/^\/f\/([^/]+)/)
-	if (pathMatch) activeId = pathMatch[1]
+	try {
+		const saved = JSON.parse(localStorage.getItem(TABS_KEY) ?? 'null')
+		if (saved && Array.isArray(saved.tabs)) {
+			tabs = saved.tabs.filter((t) => t && t.id && t.path && t.file)
+			activeId = saved.activeId && tabs.some((t) => t.id === saved.activeId) ? saved.activeId : (tabs[0]?.id ?? null)
+		}
+	} catch {}
 
+	// deep link: /f/<id> serves this shell with that doc active (CLI watch-live
+	// URLs, phone bookmarks). The path/file name resolve on the first poll.
+	const pathMatch = location.pathname.match(/^\/f\/([^/]+)/)
+	if (pathMatch) {
+		const id = pathMatch[1]
+		if (!tabs.some((t) => t.id === id)) {
+			let path = id
+			try {
+				path = atob(id.replaceAll('-', '+').replaceAll('_', '/'))
+			} catch {}
+			tabs.push({ id, path, file: path.split(/[\\/]/).pop() })
+		}
+		activeId = id
+	}
+
+	const persist = () => {
+		try {
+			localStorage.setItem(TABS_KEY, JSON.stringify({ tabs, activeId }))
+		} catch {}
+	}
 	const post = (url, body) =>
 		fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body ?? {}) })
 
@@ -122,10 +152,36 @@
 		setTimeout(() => $('toast').classList.remove('show'), 1600)
 	}
 
+	/** Middle-truncate a filesystem path so modal rows never scroll sideways. */
+	function shortPath(p, max = 62) {
+		if (p.length <= max) return p
+		return p.slice(0, 6) + '…' + p.slice(-(max - 7))
+	}
+
 	function setActive(id) {
 		activeId = id
 		history.replaceState(null, '', (id ? `/f/${id}` : '/') + (IN_APP ? '?app=1' : ''))
+		persist()
 		render()
+	}
+
+	function addTab(id, path, file) {
+		if (!tabs.some((t) => t.id === id)) tabs.push({ id, path, file })
+		setActive(id)
+	}
+
+	// close = hide from THIS window only. The doc can stay live for other
+	// clients (or an agent); the core evicts unwatched idle rooms on its own.
+	function closeTab(id) {
+		const idx = tabs.findIndex((t) => t.id === id)
+		tabs = tabs.filter((t) => t.id !== id)
+		if (id === activeId) {
+			const neighbor = tabs[idx] ?? tabs[idx - 1] ?? null
+			setActive(neighbor ? neighbor.id : null)
+		} else {
+			persist()
+			render()
+		}
 	}
 
 	function render() {
@@ -142,24 +198,14 @@
 			label.className = 'label'
 			label.textContent = t.file
 			el.appendChild(label)
-			// ✕ closes the room (flushes to disk first). Disabled while other
-			// clients are connected or an agent wrote seconds ago - the doc is
-			// theirs too, not just this window's
-			const others = (t.clients ?? 0) - (isActive ? 1 : 0)
-			const agentBusy = t.agentWriteAt && Date.now() - t.agentWriteAt < 15000
-			const closable = others <= 0 && !agentBusy
 			const x = document.createElement('button')
-			x.className = 'tab-x' + (closable ? '' : ' disabled')
+			x.className = 'tab-x'
 			x.dataset.testid = 'shell-tab-close'
 			x.textContent = '✕'
-			x.title = closable
-				? 'Close (saves to disk)'
-				: agentBusy
-					? 'An agent is working on this canvas'
-					: `In use by ${others} other client${others === 1 ? '' : 's'}`
+			x.title = 'Close this tab (the document stays available to others)'
 			x.onclick = (e) => {
 				e.stopPropagation()
-				if (closable) closeTab(t.id)
+				closeTab(t.id)
 			}
 			el.appendChild(x)
 			bar.appendChild(el)
@@ -181,56 +227,19 @@
 			shellState = await r.json()
 			$('dot').className = shellState.executor === 'connected' ? 'up' : ''
 			$('dot').title = 'agent executor: ' + shellState.executor
-			// tabs mirror live rooms: append newcomers WITHOUT stealing focus
-			// (agent-opened docs surface quietly; user actions call setActive)
-			const live = new Map(shellState.rooms.map((room) => [room.id, room]))
-			tabs = tabs.filter((t) => live.has(t.id) || t.id === activeId)
+			// refresh tab labels for deep-linked tabs whose room is now known
 			for (const t of tabs) {
-				const room = live.get(t.id)
-				if (room) Object.assign(t, { clients: room.clients, agentWriteAt: room.agentWriteAt })
+				const room = shellState.rooms.find((room) => room.id === t.id)
+				if (room && (t.file !== room.file || t.path !== room.path)) {
+					t.file = room.file
+					t.path = room.path
+					persist()
+					render()
+				}
 			}
-			const known = new Set(tabs.map((t) => t.id))
-			for (const room of shellState.rooms) {
-				if (!known.has(room.id))
-					tabs.push({ id: room.id, path: room.path, file: room.file, clients: room.clients, agentWriteAt: room.agentWriteAt })
-			}
-			// nothing was active (fresh window): showing the first doc steals
-			// focus from nobody. Never switch away from an active tab, though.
-			if (!activeId && tabs.length) setActive(tabs[0].id)
-			render()
 		} catch {
 			$('dot').className = ''
 		}
-	}
-
-	// displayed tabs shield their rooms from idle eviction - without this,
-	// background rooms would evict and tabs would silently vanish
-	function keepalive() {
-		if (tabs.length) post('/api/keepalive', { ids: tabs.map((t) => t.id) }).catch(() => {})
-	}
-
-	async function closeTab(id) {
-		const wasActive = id === activeId
-		if (wasActive) {
-			// hand focus to a neighbor (or the empty state) and blank the iframe
-			// BEFORE asking the core to close, so our own canvas connection is
-			// the only session it might still see
-			const idx = tabs.findIndex((t) => t.id === id)
-			const neighbor = tabs[idx + 1] ?? tabs[idx - 1] ?? null
-			setActive(neighbor ? neighbor.id : null)
-		}
-		tabs = tabs.filter((t) => t.id !== id)
-		render()
-		try {
-			const r = await post('/api/close-room', { id, closingActive: wasActive })
-			if (!r.ok) {
-				const b = await r.json().catch(() => ({}))
-				throw new Error(b.error ?? 'could not close')
-			}
-		} catch (err) {
-			toast(String(err.message ?? err))
-		}
-		poll()
 	}
 
 	// ---- native dialog bridge (app only: the parent window owns Neutralino) --
@@ -253,8 +262,32 @@
 		})
 	}
 
-	// ---- open modal ----------------------------------------------------------
-	function showOpenModal() {
+	// ---- open modal: Live & Recent, the window onto everything on the core ---
+	function docRow(name, path, live, onClick) {
+		const b = document.createElement('button')
+		b.className = 'row-btn doc-row'
+		b.dataset.testid = live ? 'shell-live-doc' : 'shell-recent'
+		b.title = path
+		const nameEl = document.createElement('span')
+		nameEl.className = 'name'
+		nameEl.textContent = name
+		if (live) {
+			const dot = document.createElement('span')
+			dot.className = 'live-dot'
+			dot.textContent = '● live'
+			nameEl.appendChild(dot)
+		}
+		const pathEl = document.createElement('span')
+		pathEl.className = 'path'
+		pathEl.textContent = shortPath(path)
+		b.appendChild(nameEl)
+		b.appendChild(pathEl)
+		b.onclick = onClick
+		return b
+	}
+
+	async function showOpenModal() {
+		await poll() // fresh live/recent lists
 		const body = $('open-body')
 		body.textContent = ''
 		if (IN_APP) {
@@ -268,23 +301,33 @@
 			}
 			body.appendChild(b)
 		}
-		const recents = shellState.recent.filter((e) => !e.live)
-		for (const e of recents) {
-			const b = document.createElement('button')
-			b.className = 'row-btn'
-			b.dataset.testid = 'shell-recent'
-			b.textContent = e.path.split(/[\\/]/).pop()
-			const sub = document.createElement('span')
-			sub.className = 'sub'
-			sub.textContent = e.path
-			b.appendChild(sub)
-			b.onclick = () => openPath(e.path)
-			body.appendChild(b)
+		const label = document.createElement('div')
+		label.className = 'section-label'
+		label.textContent = 'Live & Recent:'
+		body.appendChild(label)
+		// live rooms first (whatever agents/other clients have open), then
+		// recents that aren't live; dedup by path
+		const seen = new Set()
+		for (const room of shellState.rooms) {
+			seen.add(room.path)
+			body.appendChild(
+				docRow(room.file, room.path, true, () => {
+					closeModals()
+					addTab(room.id, room.path, room.file)
+				})
+			)
 		}
-		if (!recents.length && !IN_APP) {
+		for (const e of shellState.recent) {
+			if (seen.has(e.path)) continue
+			seen.add(e.path)
+			body.appendChild(docRow(e.path.split(/[\\/]/).pop(), e.path, false, () => openPath(e.path)))
+		}
+		if (seen.size === 0) {
 			const d = document.createElement('div')
 			d.className = 'muted'
-			d.textContent = 'No recent documents. (Opening arbitrary disk paths needs the app.)'
+			d.textContent = IN_APP
+				? 'Nothing live or recent yet.'
+				: 'Nothing live or recent yet. (Opening arbitrary disk paths needs the app.)'
 			body.appendChild(d)
 		}
 		$('open-modal').classList.add('show')
@@ -296,15 +339,15 @@
 			const b = await r.json()
 			if (!r.ok) throw new Error(b.error ?? 'could not open')
 			closeModals()
-			await poll()
-			setActive(b.id)
+			addTab(b.id, path, path.split(/[\\/]/).pop())
 		} catch (err) {
 			toast(String(err.message ?? err))
 		}
 	}
 
 	// ---- new modal -----------------------------------------------------------
-	function showNewModal() {
+	async function showNewModal() {
+		await poll() // fresh save locations
 		$('new-err').textContent = ''
 		const diskWrap = $('new-disk-wrap')
 		diskWrap.textContent = ''
@@ -328,7 +371,8 @@
 			const b = document.createElement('button')
 			b.className = 'row-btn' + (dir === newModalDir ? ' selected' : '')
 			b.dataset.testid = 'shell-location'
-			b.textContent = dir
+			b.title = dir
+			b.textContent = shortPath(dir)
 			b.onclick = () => {
 				newModalDir = dir
 				for (const el of locs.children) el.classList.toggle('selected', el === b)
@@ -346,8 +390,7 @@
 			const b = await r.json()
 			if (!r.ok) throw new Error(b.error ?? 'could not create')
 			closeModals()
-			await poll()
-			setActive(b.id)
+			addTab(b.id, fullPath, fullPath.split(/[\\/]/).pop())
 		} catch (err) {
 			$('new-err').textContent = String(err.message ?? err)
 		}
@@ -397,10 +440,10 @@
 		}
 	}
 
+	persist()
 	render()
 	poll()
-	setInterval(poll, 2500)
-	setInterval(keepalive, 60000)
+	setInterval(poll, 5000)
 	</script>
 </body>
 </html>

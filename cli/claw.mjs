@@ -71,8 +71,8 @@ THE APP
   Commands run against the canvas app - a visible desktop window that holds
   the live state (sync rooms + the editor that executes agent commands).
   It launches automatically on first use; closing the window stops
-  everything. Every live doc is a tab in its window (and at the URL
-  shown by \`claw status\`, from any browser on the network).
+  everything. Live docs are listed in the window's Open dialog (and at
+  the URL shown by \`claw status\`, from any browser on the network).
   claw status    show whether it's running, its port, and executor state
   claw stop      stop the core (the app window will offer a retry)
   claw serve     run the bare core in the foreground with live logs

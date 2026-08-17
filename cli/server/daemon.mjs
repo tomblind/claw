@@ -5,7 +5,7 @@ import { homedir, networkInterfaces } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { VERSION } from '../lib/version.mjs'
-import { canonicalPath, RoomManager, pathToRoomId, roomIdToPath } from './rooms.mjs'
+import { canonicalPath, RoomManager, pathToRoomId } from './rooms.mjs'
 
 /**
  * The canvas core. Runs as an owned child of the desktop app — the app IS
@@ -346,44 +346,9 @@ const api = {
 		locations: saveLocations(),
 	}),
 
-	// tabs displayed in a shell shield rooms from idle eviction. A separate
-	// field from lastActivity on purpose: lastActivity means someone actually
-	// DID something, which the ✕-close guard relies on
-	'POST /api/keepalive': async (body) => {
-		const ids = Array.isArray(body.ids) ? body.ids : []
-		let touched = 0
-		for (const id of ids) {
-			try {
-				const entry = rooms.getByPath(roomIdToPath(id))
-				if (entry) {
-					entry.keepaliveAt = Date.now()
-					touched++
-				}
-			} catch {}
-		}
-		return { ok: true, touched }
-	},
-
-	// tab ✕: close a room nobody else is using. closingActive means the
-	// caller's own canvas iframe is (or was moments ago) the one connected
-	// session, so tolerate 1; anything beyond that is another client
-	'POST /api/close-room': async (body) => {
-		const id = required(body, 'id')
-		const entry = rooms.getByPath(roomIdToPath(id))
-		if (!entry) return { ok: true, closed: false }
-		const sessions = entry.room.getNumActiveSessions()
-		if (sessions > (body.closingActive ? 1 : 0)) {
-			const err = new Error(`in use by ${sessions} connected client(s)`)
-			err.statusCode = 409
-			throw err
-		}
-		if (Date.now() - (entry.agentWriteAt ?? 0) < 15_000) {
-			const err = new Error('an agent wrote to this canvas seconds ago')
-			err.statusCode = 409
-			throw err
-		}
-		return { ok: true, closed: rooms.closePath(entry.path) }
-	},
+	// NOTE: tabs are shell-local state (a window's workspace), so there is no
+	// keepalive or close-room endpoint - rooms live by their own rules:
+	// created on view/write, evicted when idle with no clients.
 
 	'POST /api/create': async (body) => {
 		touch()
