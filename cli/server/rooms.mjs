@@ -4,6 +4,12 @@ const { createTLSchema } = tlschema
 import { TLSocketRoom } from '@tldraw/sync-core'
 import { existsSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
+import {
+	CUSTOM_COLOR_SLOTS,
+	CUSTOM_FONT_SLOTS,
+	extractCustomStyles,
+	restoreCustomStyles,
+} from '../lib/custom-slots.mjs'
 
 /**
  * Live sync rooms — one per .tldr file. While a room is open, the ROOM is the
@@ -44,10 +50,9 @@ export const pathToRoomId = (path) => Buffer.from(canonicalPath(path), 'utf8').t
 export const roomIdToPath = (id) => Buffer.from(id, 'base64url').toString('utf8')
 
 // register claw's reserved custom color slots BEFORE any document validates:
-// the sync server parses .tldr files on room hydrate, and a shape using
-// custom-N must pass the enum check here just like in the editor pages
-const CUSTOM_COLOR_SLOTS = Array.from({ length: 24 }, (_, i) => `custom-${i + 1}`)
-const CUSTOM_FONT_SLOTS = Array.from({ length: 8 }, (_, i) => `custom-${i + 1}`)
+// room MEMORY carries real custom-N values (files on disk never do - see
+// custom-slots.mjs), and a synced shape using custom-N must pass the enum
+// check here just like in the editor pages.
 // DefaultLabelColorStyle isn't a root export; the same enum instance is
 // reachable through any shape-props object that uses it
 for (const styleProp of [
@@ -75,14 +80,18 @@ function recordsFromTldr(raw) {
 	if (migrated.type !== 'success') {
 		throw new Error(`tldraw schema migration failed: ${migrated.reason ?? migrated.type}`)
 	}
-	return Object.values(migrated.value)
+	// file -> memory: custom style slots come back out of meta.claw (files on
+	// disk carry vanilla-safe fallbacks so other tldraw editors can open them)
+	return restoreCustomStyles(Object.values(migrated.value))
 }
 
 /** Room snapshot -> .tldr file text (matches what tldraw's serializer produces). */
 function tldrFromSnapshot(snapshot) {
 	const records = snapshot.documents
-		.map((d) => d.state)
+		.map((d) => structuredClone(d.state)) // clone: the transform must never touch live room state
 		.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+	// memory -> file: swap custom style slots for standard fallbacks + meta.claw
+	extractCustomStyles(records)
 	return JSON.stringify({
 		tldrawFileFormatVersion: 1,
 		schema: schema.serialize(),

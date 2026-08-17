@@ -151,9 +151,10 @@ edit them (SVG is uneditable in the canvas — use it only for art/logos).
   slots `custom-1`..`custom-24`) and fonts (slots `custom-1`..`custom-8`) —
   strictly additive; the 13 standard colors and 4 standard fonts are never
   replaced. Stored in the file; every claw surface and render honors it.
-  Shapes that USE a custom slot make the file claw-only: other tldraw apps
-  report it as corrupted. For truly saturated custom fills set the color's
-  `semi` variant to the same hex.
+  Files stay portable: on disk, custom-slot shapes store the nearest
+  standard color/font (other tldraw apps show that approximation), with the
+  claw value in shape meta. For truly saturated custom fills set the
+  color's `semi` variant to the same hex.
 - **Regenerating one screen**: `clear` the frame (children gone, frame +
   arrows + layout survive), then re-add its interior. Never delete children
   one by one.

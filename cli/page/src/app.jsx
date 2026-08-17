@@ -9,6 +9,12 @@ import { createRoot } from 'react-dom/client'
 import * as TL from 'tldraw'
 import { useSync } from '@tldraw/sync'
 import 'tldraw/tldraw.css'
+import {
+	CUSTOM_COLOR_SLOTS,
+	CUSTOM_FONT_SLOTS,
+	extractCustomStyles,
+	restoreCustomStyles,
+} from '../../lib/custom-slots.mjs'
 
 const { Tldraw } = TL
 
@@ -32,12 +38,10 @@ const EXECUTOR = new URLSearchParams(location.search).get('executor') != null
 // come from document meta (clawTheme.colors) and slots without a value stay
 // hidden in the picker. NOTE: canvases using these are claw-only (vanilla
 // tldraw rejects unknown enum values).
-export const CUSTOM_COLOR_SLOTS = Array.from({ length: 24 }, (_, i) => `custom-${i + 1}`)
-// Reserved custom font slots, same idea: the 4 standard fonts (draw sans
-// serif mono) are never replaced; new fonts get their own enum values. Both
-// render paths key straight into theme.fonts[value] (getFontFamily on screen,
-// getThemeFontFaces for export embedding), so a theme entry is all they need.
-export const CUSTOM_FONT_SLOTS = Array.from({ length: 8 }, (_, i) => `custom-${i + 1}`)
+// (slot lists live in cli/lib/custom-slots.mjs, shared with the sync server,
+// alongside the file-boundary transform that keeps saved .tldr files valid
+// for other tldraw editors. Fonts render straight from theme.fonts[value] -
+// getFontFamily on screen, getThemeFontFaces for export embedding.)
 // Slot registration must go through the `themes` option (of <Tldraw> AND
 // useSync): store creation calls registerColorsFromThemes, which REMOVES any
 // enum value not declared by a theme definition — ad-hoc addValues gets
@@ -267,6 +271,16 @@ function setupHost(editor) {
 			if (inSyncRoom) {
 				throw new Error('load() is standalone-only: a sync room owns its document')
 			}
+			// file -> memory: custom style slots come back out of meta.claw (the
+			// file itself carries only vanilla-safe fallback values). If the text
+			// isn't parseable JSON, fall through and let tldraw report it.
+			try {
+				const file = JSON.parse(json)
+				if (Array.isArray(file.records)) {
+					restoreCustomStyles(file.records)
+					json = JSON.stringify(file)
+				}
+			} catch {}
 			const parsed = TL.parseTldrawJsonFile({ schema: editor.store.schema, json })
 			if (!parsed.ok) {
 				throw new Error(`tldraw could not parse the file: ${JSON.stringify(parsed.error)}`)
@@ -360,7 +374,13 @@ function setupHost(editor) {
 
 		/** Serialize the current document back to .tldr text (tldraw's own writer). */
 		async serialize() {
-			return await TL.serializeTldrawJson(editor)
+			const text = await TL.serializeTldrawJson(editor)
+			// memory -> file: swap custom style slots for standard fallbacks +
+			// meta.claw, so the saved file opens in any tldraw editor. No catch:
+			// writing custom-N to disk would silently break that guarantee.
+			const file = JSON.parse(text)
+			if (Array.isArray(file.records)) extractCustomStyles(file.records)
+			return JSON.stringify(file)
 		},
 
 		/**

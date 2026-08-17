@@ -235,11 +235,13 @@ label text, or the "name" given to an earlier op in the same batch.
       the document;
       every claw surface (app, browser, phone, renders) shows it.
       {"theme": {"reset": true}} clears it (shapes still using custom-N keep
-      validating but render placeholder grey/default font). WARNING: a canvas
-      whose shapes USE a custom color or font opens only in claw - vanilla
-      tldraw (e.g. the VS Code extension) reports it as a corrupted file.
-      Prefer the standard names; reach for custom slots only when the design
-      genuinely needs them.
+      validating but render placeholder grey/default font). PORTABILITY:
+      saved files stay valid for other tldraw editors - on disk a
+      custom-slot shape stores the nearest standard color/font, with the
+      claw value in shape meta; other editors (e.g. the VS Code extension)
+      open the file fine and show that approximation, and an edit they make
+      to such a prop wins over the stored custom value on the next claw
+      load.
   {"delete": {"id": "..."}}
       Idempotent: an id that no longer resolves is skipped with a note, not
       an error (deleting a group's children dissolves the group, so its id
