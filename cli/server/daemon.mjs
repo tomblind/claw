@@ -346,8 +346,9 @@ const api = {
 		locations: saveLocations(),
 	}),
 
-	// tabs displayed in a shell count as activity; without this, background
-	// rooms hit idle eviction and their tabs silently vanish
+	// tabs displayed in a shell shield rooms from idle eviction. A separate
+	// field from lastActivity on purpose: lastActivity means someone actually
+	// DID something, which the ✕-close guard relies on
 	'POST /api/keepalive': async (body) => {
 		const ids = Array.isArray(body.ids) ? body.ids : []
 		let touched = 0
@@ -355,12 +356,33 @@ const api = {
 			try {
 				const entry = rooms.getByPath(roomIdToPath(id))
 				if (entry) {
-					entry.lastActivity = Date.now()
+					entry.keepaliveAt = Date.now()
 					touched++
 				}
 			} catch {}
 		}
 		return { ok: true, touched }
+	},
+
+	// tab ✕: close a room nobody else is using. closingActive means the
+	// caller's own canvas iframe is (or was moments ago) the one connected
+	// session, so tolerate 1; anything beyond that is another client
+	'POST /api/close-room': async (body) => {
+		const id = required(body, 'id')
+		const entry = rooms.getByPath(roomIdToPath(id))
+		if (!entry) return { ok: true, closed: false }
+		const sessions = entry.room.getNumActiveSessions()
+		if (sessions > (body.closingActive ? 1 : 0)) {
+			const err = new Error(`in use by ${sessions} connected client(s)`)
+			err.statusCode = 409
+			throw err
+		}
+		if (Date.now() - (entry.agentWriteAt ?? 0) < 15_000) {
+			const err = new Error('an agent wrote to this canvas seconds ago')
+			err.statusCode = 409
+			throw err
+		}
+		return { ok: true, closed: rooms.closePath(entry.path) }
 	},
 
 	'POST /api/create': async (body) => {

@@ -15,9 +15,14 @@
 		.icon-btn { font: inherit; font-size: 15px; background: transparent; color: #e8eaf1; border: none; border-radius: 6px; padding: 5px 9px; margin-bottom: 4px; cursor: pointer; line-height: 1; }
 		.icon-btn:hover { background: #32324a; }
 		#tabs { display: flex; align-items: flex-end; gap: 3px; overflow-x: auto; flex: 1; scrollbar-width: none; }
-		.tab { font-size: 13px; color: #c9ccd8; background: #23232e; border: 1px solid #30303e; border-bottom: none; border-radius: 7px 7px 0 0; padding: 7px 16px 8px; cursor: pointer; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; flex-shrink: 0; }
+		.tab { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #c9ccd8; background: #23232e; border: 1px solid #30303e; border-bottom: none; border-radius: 7px 7px 0 0; padding: 6px 8px 7px 16px; cursor: pointer; white-space: nowrap; max-width: 240px; flex-shrink: 0; user-select: none; }
 		.tab:hover { background: #2e2e3c; }
 		.tab.active { background: #fbfbfb; color: #1d1d1d; }
+		.tab .label { overflow: hidden; text-overflow: ellipsis; }
+		.tab-x { font: inherit; font-size: 12px; line-height: 1; border: none; background: transparent; color: inherit; opacity: .55; border-radius: 4px; padding: 3px 5px; cursor: pointer; }
+		.tab-x:hover { opacity: 1; background: rgba(128,128,128,.25); }
+		.tab-x.disabled { opacity: .18; cursor: default; }
+		.tab-x.disabled:hover { background: transparent; }
 		#dot { width: 9px; height: 9px; border-radius: 50%; background: #666; margin: 0 4px 12px 6px; flex-shrink: 0; }
 		#dot.up { background: #4cb05e; }
 
@@ -127,12 +132,36 @@
 		const bar = $('tabs')
 		bar.textContent = ''
 		for (const t of tabs) {
-			const el = document.createElement('button')
-			el.className = 'tab' + (t.id === activeId ? ' active' : '')
-			el.textContent = t.file
+			const isActive = t.id === activeId
+			const el = document.createElement('div')
+			el.className = 'tab' + (isActive ? ' active' : '')
 			el.title = t.path
 			el.dataset.testid = 'shell-tab'
 			el.onclick = () => setActive(t.id)
+			const label = document.createElement('span')
+			label.className = 'label'
+			label.textContent = t.file
+			el.appendChild(label)
+			// ✕ closes the room (flushes to disk first). Disabled while other
+			// clients are connected or an agent wrote seconds ago - the doc is
+			// theirs too, not just this window's
+			const others = (t.clients ?? 0) - (isActive ? 1 : 0)
+			const agentBusy = t.agentWriteAt && Date.now() - t.agentWriteAt < 15000
+			const closable = others <= 0 && !agentBusy
+			const x = document.createElement('button')
+			x.className = 'tab-x' + (closable ? '' : ' disabled')
+			x.dataset.testid = 'shell-tab-close'
+			x.textContent = '✕'
+			x.title = closable
+				? 'Close (saves to disk)'
+				: agentBusy
+					? 'An agent is working on this canvas'
+					: `In use by ${others} other client${others === 1 ? '' : 's'}`
+			x.onclick = (e) => {
+				e.stopPropagation()
+				if (closable) closeTab(t.id)
+			}
+			el.appendChild(x)
 			bar.appendChild(el)
 		}
 		// swap-on-switch: one iframe, src follows the active tab
@@ -156,9 +185,14 @@
 			// (agent-opened docs surface quietly; user actions call setActive)
 			const live = new Map(shellState.rooms.map((room) => [room.id, room]))
 			tabs = tabs.filter((t) => live.has(t.id) || t.id === activeId)
+			for (const t of tabs) {
+				const room = live.get(t.id)
+				if (room) Object.assign(t, { clients: room.clients, agentWriteAt: room.agentWriteAt })
+			}
 			const known = new Set(tabs.map((t) => t.id))
 			for (const room of shellState.rooms) {
-				if (!known.has(room.id)) tabs.push({ id: room.id, path: room.path, file: room.file })
+				if (!known.has(room.id))
+					tabs.push({ id: room.id, path: room.path, file: room.file, clients: room.clients, agentWriteAt: room.agentWriteAt })
 			}
 			// nothing was active (fresh window): showing the first doc steals
 			// focus from nobody. Never switch away from an active tab, though.
@@ -169,10 +203,34 @@
 		}
 	}
 
-	// displayed tabs count as activity - without this, background rooms would
-	// hit the core's idle eviction and tabs would silently vanish
+	// displayed tabs shield their rooms from idle eviction - without this,
+	// background rooms would evict and tabs would silently vanish
 	function keepalive() {
 		if (tabs.length) post('/api/keepalive', { ids: tabs.map((t) => t.id) }).catch(() => {})
+	}
+
+	async function closeTab(id) {
+		const wasActive = id === activeId
+		if (wasActive) {
+			// hand focus to a neighbor (or the empty state) and blank the iframe
+			// BEFORE asking the core to close, so our own canvas connection is
+			// the only session it might still see
+			const idx = tabs.findIndex((t) => t.id === id)
+			const neighbor = tabs[idx + 1] ?? tabs[idx - 1] ?? null
+			setActive(neighbor ? neighbor.id : null)
+		}
+		tabs = tabs.filter((t) => t.id !== id)
+		render()
+		try {
+			const r = await post('/api/close-room', { id, closingActive: wasActive })
+			if (!r.ok) {
+				const b = await r.json().catch(() => ({}))
+				throw new Error(b.error ?? 'could not close')
+			}
+		} catch (err) {
+			toast(String(err.message ?? err))
+		}
+		poll()
 	}
 
 	// ---- native dialog bridge (app only: the parent window owns Neutralino) --

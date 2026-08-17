@@ -106,6 +106,7 @@ export class RoomManager {
 			clients: e.room.getNumActiveSessions(),
 			dirty: e.dirty,
 			openedAt: e.openedAt,
+			agentWriteAt: e.agentWriteAt ?? 0,
 		}))
 	}
 
@@ -135,6 +136,8 @@ export class RoomManager {
 			dirty: false,
 			openedAt: Date.now(),
 			lastActivity: Date.now(),
+			keepaliveAt: 0, // shell tabs pinging "still displayed" (not real activity)
+			agentWriteAt: 0, // last server-side agent write (apply/new via loadText)
 			saveTimer: null,
 			room: null,
 		}
@@ -214,6 +217,7 @@ export class RoomManager {
 		})
 		entry.dirty = true
 		entry.lastActivity = Date.now()
+		entry.agentWriteAt = Date.now()
 		clearTimeout(entry.saveTimer)
 		entry.saveTimer = setTimeout(() => this.flushEntry(entry), SAVE_DEBOUNCE_MS)
 	}
@@ -222,10 +226,11 @@ export class RoomManager {
 		for (const entry of this.#rooms.values()) this.flushEntry(entry)
 	}
 
-	/** Close rooms idle past the limit (no clients, no changes). */
+	/** Close rooms idle past the limit (no clients, no changes, no shell tab). */
 	evictIdle() {
 		for (const [id, entry] of this.#rooms) {
-			const idle = Date.now() - entry.lastActivity > ROOM_IDLE_MS
+			const lastSeen = Math.max(entry.lastActivity, entry.keepaliveAt ?? 0)
+			const idle = Date.now() - lastSeen > ROOM_IDLE_MS
 			if (idle && entry.room.getNumActiveSessions() === 0) {
 				this.flushEntry(entry)
 				entry.room.close()
@@ -233,6 +238,17 @@ export class RoomManager {
 				this.#log(`room evicted (idle): ${basename(entry.path)}`)
 			}
 		}
+	}
+
+	/** Explicitly close one room (tab ✕): flush to disk, drop from the map. */
+	closePath(path) {
+		const entry = this.getByPath(path)
+		if (!entry) return false
+		this.flushEntry(entry)
+		entry.room.close()
+		this.#rooms.delete(entry.id)
+		this.#log(`room closed (tab): ${basename(entry.path)}`)
+		return true
 	}
 
 	closeAll() {
