@@ -82,18 +82,30 @@ export function nearestStandardFont(val) {
 const docThemeOf = (records) =>
 	records.find((r) => r.typeName === 'document')?.meta?.clawTheme ?? null
 
-/** file -> memory: put custom values back into props, drop meta.claw. */
+/**
+ * file -> memory: put custom values back into props, drop the style payload.
+ *
+ * NAMESPACE WARNING: the payload lives in meta.clawStyle. It must NEVER be
+ * meta.claw - that key belongs to the chain system ('chainhead'/'chainseg'/
+ * 'chain' string markers), and v0.22-0.24.1 used it for styles, stripping
+ * chain markers on every load (chains silently became untracked fragment
+ * trains). Legacy object-valued meta.claw is still read and cleaned up;
+ * string-valued meta.claw is a chain marker and is never touched.
+ */
 export function restoreCustomStyles(records) {
 	for (const r of records) {
-		if (r.typeName !== 'shape' || !r.meta?.claw) continue
-		const claw = r.meta.claw
+		if (r.typeName !== 'shape') continue
+		const legacy = typeof r.meta?.claw === 'object' && r.meta.claw !== null ? r.meta.claw : null
+		const payload = r.meta?.clawStyle ?? legacy
+		if (!payload) continue
 		for (const key of STYLE_KEYS) {
-			if (!isCustom(claw[key])) continue
+			if (!isCustom(payload[key])) continue
 			// a vanilla editor changed this prop since claw saved it - its edit
 			// wins and the stale claw value is discarded
-			if (r.props?.[key] === claw[`${key}Fallback`]) r.props[key] = claw[key]
+			if (r.props?.[key] === payload[`${key}Fallback`]) r.props[key] = payload[key]
 		}
-		const { claw: _dropped, ...rest } = r.meta
+		const { clawStyle: _dropped, ...rest } = r.meta
+		if (legacy) delete rest.claw
 		r.meta = rest
 	}
 	return records
@@ -117,7 +129,7 @@ export function extractCustomStyles(records) {
 			claw[`${key}Fallback`] = fallback
 			r.props[key] = fallback
 		}
-		if (claw) r.meta = { ...(r.meta ?? {}), claw }
+		if (claw) r.meta = { ...(r.meta ?? {}), clawStyle: claw }
 	}
 	return records
 }

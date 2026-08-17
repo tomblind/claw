@@ -383,6 +383,36 @@ function lintDocument(editor) {
 		}
 	}
 
+	// unbound arrows: frozen geometry that will not follow its screens - the
+	// single biggest cause of spaghetti flow canvases. Chain parts are exempt
+	// (deliberately unbound); short intra-frame annotation arrows are too.
+	for (const s of shapes) {
+		// string meta.claw = chain part (deliberately unbound); object values
+		// are legacy style payloads and don't exempt anything
+		if (s.type !== 'arrow' || typeof s.meta?.claw === 'string') continue
+		let bindings = []
+		try {
+			bindings = editor.getBindingsFromShape(s.id, 'arrow')
+		} catch {}
+		if (bindings.length >= 2) continue
+		const b = pb(s.id)
+		const insideOneFrame =
+			b && frameOfPoint(b.minX, b.minY) != null && frameOfPoint(b.minX, b.minY) === frameOfPoint(b.maxX, b.maxY)
+		if (insideOneFrame && b.w < 400 && b.h < 400) continue // local annotation
+		add(
+			'unbound-arrow',
+			`arrow ${describe(s)} has ${bindings.length ? 'only one bound end' : 'no bindings'} - it will not follow screens when anything moves; recreate it with connect`
+		)
+	}
+	function frameOfPoint(x, y) {
+		for (const f of shapes) {
+			if (f.type !== 'frame') continue
+			const fb = pb(f.id)
+			if (fb && x >= fb.minX && x <= fb.maxX && y >= fb.minY && y <= fb.maxY) return f.id
+		}
+		return null
+	}
+
 	// connected arrows cutting through unrelated frames
 	const frameRects = shapes
 		.filter((f) => f.type === 'frame')
