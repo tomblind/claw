@@ -52,8 +52,13 @@ needs to score comparably on the measures below and respect the rules.
 
 ## Status
 
-- Captured in engine (v0.24.5): anchor fusing at side centers, chains
-  avoided in favor of corridor detours only when a route genuinely fails.
-- Not yet captured: between-referencers placement, hub-orbit stacking,
-  branch-point label positioning. The ELK layered arrangement remains the
-  placement engine until a dedicated pass replaces or post-processes it.
+- Captured in engine (v0.24.5): anchor fusing at side centers; fused-trunk
+  labels just after the branch point.
+- Captured in engine (v0.25.0): shared satellites (low-degree screens with
+  2+ hub-like referencers) leave the flow graph and sit at the barycenter
+  between their referencers; single-hub packs stack as one column beside
+  the hub with a fused side trunk; unrelated near-parallel lanes keep a
+  48px minimum separation.
+- Not yet captured: keeping labels off screens in every case, reducing
+  waypoint-chain count toward the reference's zero, and branch-point label
+  positioning for corridor-detour chains.

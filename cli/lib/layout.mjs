@@ -89,33 +89,44 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		}
 	}
 
-	// pack grids: wide beats deep (max 2 rows up to 6 columns); odd rows are
-	// offset half a cell (brick lattice) so a drop into row 2 falls through
-	// the GAP between the row-1 screens above it
-	const PACK_GAP = Math.round(gapY * 0.4)
-	const MAX_COLS = 6
-	const footprint = new Map() // hubId -> {w, h, cols, rows, cellW, cellH}
-	for (const [hub, leaves] of packs) {
-		leaves.sort((a, b) => (byId.get(a).name ?? a).localeCompare(byId.get(b).name ?? b))
-		const cellW = Math.max(...leaves.map((l) => byId.get(l).w)) + PACK_GAP
-		const cellH = Math.max(...leaves.map((l) => byId.get(l).h)) + PACK_GAP
-		const cols = Math.min(MAX_COLS, Math.max(2, Math.ceil(leaves.length / 2)))
-		const rows = Math.ceil(leaves.length / cols)
-		const packW = cols * cellW - PACK_GAP + (rows > 1 ? cellW / 2 : 0)
-		const packH = rows * cellH - PACK_GAP
-		const h = byId.get(hub)
-		footprint.set(hub, {
-			w: Math.max(h.w, packW),
-			h: h.h + gapY / 2 + packH,
-			cols,
-			rows,
-			cellW,
-			cellH,
-		})
+	// ---- shared satellites (reference rule 1) --------------------------------
+	// A low-degree screen referenced by two or more hub-like screens (Settings
+	// reachable from both game modes, a shared share-sheet) leaves the flow
+	// graph entirely. A column layout necessarily pushes it past ALL of its
+	// referencers; instead it will sit at the barycenter BETWEEN them.
+	const degree = (id) => neighborSets.get(id)?.size ?? 0
+	const hubLike = (id) => degree(id) >= 4
+	const satellites = new Set()
+	for (const s of screens) {
+		if (packOf.has(s.id) || packs.has(s.id)) continue
+		const d = degree(s.id)
+		if (d < 2 || d > 3) continue
+		const hubNeighbors = [...neighborSets.get(s.id)].filter(hubLike)
+		if (hubNeighbors.length >= 2) satellites.add(s.id)
 	}
 
-	const flowScreens = screens.filter((s) => !packOf.has(s.id))
-	const flowEdges = edges.filter((e) => !packOf.has(e.from) && !packOf.has(e.to))
+	// pack columns: leaves stack in ONE column beside the hub (the reference
+	// stacks a hub's outcome screens next to it with a fused return trunk),
+	// with real breathing room between them
+	const PACK_GAP = Math.round(gapY / 3)
+	const footprint = new Map() // hubId -> {w, h, colW, colH}
+	for (const [hub, leaves] of packs) {
+		leaves.sort((a, b) => (byId.get(a).name ?? a).localeCompare(byId.get(b).name ?? b))
+		const colW = Math.max(...leaves.map((l) => byId.get(l).w))
+		const colH =
+			leaves.reduce((acc, l) => acc + byId.get(l).h, 0) + PACK_GAP * (leaves.length - 1)
+		const h = byId.get(hub)
+		footprint.set(hub, { w: h.w + gapX / 2 + colW, h: Math.max(h.h, colH), colW, colH })
+	}
+
+	const flowScreens = screens.filter((s) => !packOf.has(s.id) && !satellites.has(s.id))
+	const flowEdges = edges.filter(
+		(e) =>
+			!packOf.has(e.from) &&
+			!packOf.has(e.to) &&
+			!satellites.has(e.from) &&
+			!satellites.has(e.to)
+	)
 
 	// ---- placement AND routing: ELK layered -------------------------------
 	const { default: ELK } = await import('elkjs')
@@ -172,20 +183,99 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		if (s) e.elkRoute = [s.startPoint, ...(s.bendPoints ?? []), s.endPoint]
 	})
 
-	// place each pack's grid under its hub, inside the reserved footprint
+	// place each pack's column beside its hub, inside the reserved footprint
 	for (const [hub, leaves] of packs) {
-		const f = footprint.get(hub)
 		const t = targets.get(hub)
 		if (!t) continue
-		leaves.forEach((leaf, i) => {
-			const col = i % f.cols
-			const row = Math.floor(i / f.cols)
-			const brick = row % 2 === 1 ? f.cellW / 2 : 0
-			targets.set(leaf, {
-				x: Math.round(t.x + col * f.cellW + brick),
-				y: Math.round(t.y + byId.get(hub).h + gapY / 2 + row * f.cellH),
-			})
-		})
+		const hubShape = byId.get(hub)
+		let y = t.y
+		for (const leaf of leaves) {
+			targets.set(leaf, { x: Math.round(t.x + hubShape.w + gapX / 2), y: Math.round(y) })
+			y += byId.get(leaf).h + PACK_GAP
+		}
+	}
+
+	// place satellites at the barycenter of their placed neighbors, nudged to
+	// the nearest clear spot (waves, so satellites can depend on each other)
+	let satellitesPlaced = 0
+	{
+		const margin = Math.round(gapY / 3)
+		const rectAt = (id) => {
+			const t = targets.get(id)
+			const s = byId.get(id)
+			return t && s ? { x: t.x, y: t.y, w: s.w, h: s.h } : null
+		}
+		const collides = (r) => {
+			for (const id of targets.keys()) {
+				const o = rectAt(id)
+				if (!o) continue
+				if (
+					r.x < o.x + o.w + margin &&
+					r.x + r.w + margin > o.x &&
+					r.y < o.y + o.h + margin &&
+					r.y + r.h + margin > o.y
+				) {
+					return true
+				}
+			}
+			return false
+		}
+		let pending = [...satellites]
+		for (let wave = 0; wave < 4 && pending.length; wave++) {
+			const still = []
+			for (const id of pending) {
+				const neighbors = [...neighborSets.get(id)].filter((n) => targets.has(n))
+				const want = Math.min(2, neighborSets.get(id).size)
+				if (neighbors.length < want && wave < 3) {
+					still.push(id)
+					continue
+				}
+				if (!neighbors.length) {
+					still.push(id)
+					continue
+				}
+				const s = byId.get(id)
+				const cx =
+					neighbors.reduce((acc, n) => acc + targets.get(n).x + byId.get(n).w / 2, 0) /
+					neighbors.length
+				const cy =
+					neighbors.reduce((acc, n) => acc + targets.get(n).y + byId.get(n).h / 2, 0) /
+					neighbors.length
+				const base = { x: cx - s.w / 2, y: cy - s.h / 2 }
+				let spot = null
+				search: for (let radius = 0; radius <= 6; radius++) {
+					const step = radius * (gapY / 2)
+					const cands =
+						radius === 0
+							? [base]
+							: [
+									{ x: base.x, y: base.y - step },
+									{ x: base.x, y: base.y + step },
+									{ x: base.x - step, y: base.y },
+									{ x: base.x + step, y: base.y },
+									{ x: base.x - step, y: base.y - step },
+									{ x: base.x + step, y: base.y - step },
+									{ x: base.x - step, y: base.y + step },
+									{ x: base.x + step, y: base.y + step },
+								]
+					for (const c of cands) {
+						if (!collides({ x: c.x, y: c.y, w: s.w, h: s.h })) {
+							spot = c
+							break search
+						}
+					}
+				}
+				if (spot) {
+					targets.set(id, { x: Math.round(spot.x), y: Math.round(spot.y) })
+					satellitesPlaced++
+				} else {
+					still.push(id)
+				}
+			}
+			if (still.length === pending.length) break
+			pending = still
+		}
+		// anything unplaceable keeps its current position; bound arrows adapt
 	}
 
 	// ---- emit move ops -------------------------------------------------------
@@ -414,34 +504,93 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		}
 	}
 
-	// ---- pack edges: hand-routed bands (hub bottom fan -> brick-gap drops) --
+	// ---- pack edges: one fused trunk out of the hub's right side, branching
+	// to each leaf's left-center (reference rules 5 and 8)
 	for (const [hub] of packs) {
+		const hubT = targets.get(hub)
+		if (!hubT) continue
+		const hubShape = byId.get(hub)
 		const packEdges = edges.filter(
 			(e) =>
 				e.routable &&
 				((e.from === hub && packOf.get(e.to) === hub) || (e.to === hub && packOf.get(e.from) === hub))
 		)
-		const leafOf = (e) => (packOf.has(e.from) ? e.from : e.to)
-		packEdges.sort((a, b) => {
-			const la = targets.get(leafOf(a))
-			const lb = targets.get(leafOf(b))
-			return la.x - lb.x || la.y - lb.y || (a.id < b.id ? -1 : 1)
-		})
-		const hubBottom = targets.get(hub).y + byId.get(hub).h
-		packEdges.forEach((e, i) => {
-			const frac = packEdges.length === 1 ? 0.5 : 0.15 + (0.7 * i) / (packEdges.length - 1)
-			const f = Math.round(frac * 100) / 100
+		const laneX = hubT.x + hubShape.w + gapX / 4
+		for (const e of packEdges) {
 			const hubEnd = e.from === hub ? 'from' : 'to'
-			anchors.set(`${e.id}:${hubEnd}`, { x: f, y: 1 })
-			anchors.set(`${e.id}:${hubEnd === 'from' ? 'to' : 'from'}`, { x: 0.5, y: 0 })
-			const leafTop = targets.get(leafOf(e)).y
-			if (leafTop > hubBottom) {
-				e.mid = Math.round(Math.max(0.05, Math.min(0.95, gapY / 4 / (leafTop - hubBottom))) * 100) / 100
-				const row = Math.round((leafTop - hubBottom - gapY / 2) / footprint.get(hub).cellH)
-				e.labelAt = row >= 1 ? 0.3 : null
+			const leafId = hubEnd === 'from' ? e.to : e.from
+			anchors.set(`${e.id}:${hubEnd}`, { x: 1, y: 0.5 })
+			anchors.set(`${e.id}:${hubEnd === 'from' ? 'to' : 'from'}`, { x: 0, y: 0.5 })
+			const exitX = hubT.x + hubShape.w
+			const entryX = targets.get(leafId).x
+			const span = entryX - exitX
+			if (Math.abs(span) > 1) {
+				e.mid = Math.round(Math.max(0.05, Math.min(0.95, (laneX - exitX) / span)) * 100) / 100
+			}
+			e.midVertical = true
+			e.fused = true
+			e.laneAbs = laneX
+			const leafShape = byId.get(leafId)
+			const dy = Math.abs(
+				targets.get(leafId).y + leafShape.h / 2 - (hubT.y + hubShape.h / 2)
+			)
+			const manhattan = Math.abs(span) + dy
+			if (manhattan > 1) {
+				e.labelAt =
+					Math.round(Math.max(0.1, Math.min(0.7, (gapX / 4 + 60) / manhattan)) * 100) / 100
 			}
 			e.packRouted = true
-		})
+		}
+	}
+
+	// ---- minimum lane separation (user rule: unrelated near-parallel runs
+	// keep their distance; a fused trunk is one line and exempt within itself)
+	{
+		const MIN_SEP = 48
+		const laneEntries = []
+		for (const e of edges) {
+			if (!e.routable || e.mid == null || e.chainPts) continue
+			const fa = anchors.get(`${e.id}:from`)
+			const ta = anchors.get(`${e.id}:to`)
+			if (!fa || !ta) continue
+			const exit = anchorPoint(endRect(e.fromShape, e.from), fa)
+			const entry = anchorPoint(endRect(e.toShape, e.to), ta)
+			const vertical = !!e.midVertical
+			const lane = vertical ? exit.x + e.mid * (entry.x - exit.x) : exit.y + e.mid * (entry.y - exit.y)
+			laneEntries.push({
+				e,
+				exit,
+				entry,
+				lane,
+				vertical,
+				lo: vertical ? Math.min(exit.y, entry.y) : Math.min(exit.x, entry.x),
+				hi: vertical ? Math.max(exit.y, entry.y) : Math.max(exit.x, entry.x),
+				group:
+					e.laneAbs != null
+						? `pack:${e.laneAbs}`
+						: e.sharedLane != null
+							? `fuse:${e.from}:${e.sharedLane}`
+							: e.id,
+			})
+		}
+		for (const vertical of [true, false]) {
+			const list = laneEntries.filter((en) => en.vertical === vertical).sort((a, b) => a.lane - b.lane)
+			for (let i = 1; i < list.length; i++) {
+				const prev = list[i - 1]
+				const cur = list[i]
+				if (cur.group === prev.group) continue
+				const overlap = Math.min(prev.hi, cur.hi) - Math.max(prev.lo, cur.lo)
+				if (overlap < 40) continue
+				if (cur.lane - prev.lane >= MIN_SEP) continue
+				const shifted = prev.lane + MIN_SEP
+				const span = vertical ? cur.entry.x - cur.exit.x : cur.entry.y - cur.exit.y
+				if (Math.abs(span) < 1) continue
+				const nm = (shifted - (vertical ? cur.exit.x : cur.exit.y)) / span
+				if (nm < 0.05 || nm > 0.95) continue
+				cur.e.mid = Math.round(nm * 100) / 100
+				cur.lane = shifted
+			}
+		}
 	}
 
 	// ---- stray edges: everything the flow/pack routers don't own ------------
@@ -538,7 +687,8 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 
 	report.push(
 		`${deltas.size} of ${screens.length} screens arranged by ELK layered into ${columns} flow column(s)` +
-			`${packs.size ? ` + ${packs.size} satellite pack(s) (${[...packs.values()].reduce((a, l) => a + l.length, 0)} screens gridded under their hubs)` : ''} (${edges.length} transitions considered)`
+			`${packs.size ? ` + ${packs.size} pack column(s) (${[...packs.values()].reduce((a, l) => a + l.length, 0)} screens stacked beside their hubs)` : ''}` +
+			`${satellitesPlaced ? ` + ${satellitesPlaced} shared screen(s) placed between their referencers` : ''} (${edges.length} transitions considered)`
 	)
 	if (routed) {
 		report.push(`${routed} transition arrows routed along ELK's reserved channels`)
