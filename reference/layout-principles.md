@@ -63,5 +63,10 @@ needs to score comparably on the measures below and respect the rules.
   into clean elbows; crossing elbows try nudged lanes (both in the planner
   and against real geometry in fix_crossings) before any chain is created;
   labels relocate along their arrow until they sit clear of every screen.
-- Not yet captured: the last few chains (dense corridors where no single
-  elbow clears), and branch-point labels for chained routes.
+- Captured in engine (v0.27.0): pack columns sit on the side AWAY from
+  the hub's flow traffic; outgoing arrows anchor at 0.38 of a side and
+  incoming at 0.62 so a start point is never also an end point; same-side
+  anchor routes (up-across-down and mirrors) are tried before any chain,
+  both in the planner and against real geometry in fix_crossings.
+- Not yet captured: branch-point labels for chained routes, and the final
+  chain (one dense corridor with no single-elbow route).

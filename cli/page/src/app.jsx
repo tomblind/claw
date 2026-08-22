@@ -1458,6 +1458,52 @@ async function applyOps(editor, ops) {
 							}
 							editor.updateShape({ id: a.id, type: 'arrow', props: orig })
 						}
+						// next: same-side anchor pairs (up-across-down and mirror
+						// routes) - tldraw's elbow router draws these natively once
+						// both terminals sit on matching sides. Verified against the
+						// real geometry like everything else here.
+						{
+							const startBind = binds.find((b) => b.props?.terminal === 'start')
+							const endBind = binds.find((b) => b.props?.terminal !== 'start')
+							if (startBind && endBind) {
+								const origStart = { ...startBind.props }
+								const origEnd = { ...endBind.props }
+								const setAnchors = (sa, ea) => {
+									editor.updateBinding({
+										id: startBind.id,
+										type: 'arrow',
+										props: { ...startBind.props, normalizedAnchor: sa, snap: 'edge-point', isPrecise: true },
+									})
+									editor.updateBinding({
+										id: endBind.id,
+										type: 'arrow',
+										props: { ...endBind.props, normalizedAnchor: ea, snap: 'edge-point', isPrecise: true },
+									})
+								}
+								const pairs = [
+									[{ x: 0.38, y: 0 }, { x: 0.62, y: 0 }],
+									[{ x: 0.38, y: 1 }, { x: 0.62, y: 1 }],
+									[{ x: 0, y: 0.38 }, { x: 0, y: 0.62 }],
+									[{ x: 1, y: 0.38 }, { x: 1, y: 0.62 }],
+								]
+								let cleared = false
+								for (const [sa, ea] of pairs) {
+									setAnchors(sa, ea)
+									editor.updateShape({ id: a.id, type: 'arrow', props: { kind: 'elbow' } })
+									if (!crossings(a.id, endFrames).length) {
+										cleared = true
+										break
+									}
+								}
+								if (cleared) {
+									fixed++
+									touched.updated.push(a.id)
+									continue
+								}
+								editor.updateBinding({ id: startBind.id, type: 'arrow', props: origStart })
+								editor.updateBinding({ id: endBind.id, type: 'arrow', props: origEnd })
+							}
+						}
 						// find the arrow's real terminals
 						let p0
 						let p3

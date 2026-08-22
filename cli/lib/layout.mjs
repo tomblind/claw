@@ -184,14 +184,34 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		if (s) e.elkRoute = [s.startPoint, ...(s.bendPoints ?? []), s.endPoint]
 	})
 
-	// place each pack's column beside its hub, inside the reserved footprint
+	// place each pack's column beside its hub, inside the reserved footprint.
+	// Side selection (user finding): the column must sit AWAY from the hub's
+	// flow traffic, or every outbound arrow threads between the satellites.
+	const packSide = new Map() // hubId -> 1 (column right) | -1 (column left)
 	for (const [hub, leaves] of packs) {
 		const t = targets.get(hub)
 		if (!t) continue
 		const hubShape = byId.get(hub)
+		const f = footprint.get(hub)
+		let traffic = 0
+		for (const e of flowEdges) {
+			const other = e.from === hub ? e.to : e.to === hub ? e.from : null
+			if (!other) continue
+			const ot = targets.get(other)
+			if (!ot) continue
+			traffic += ot.x + byId.get(other).w / 2 > t.x + f.w / 2 ? 1 : -1
+		}
+		// traffic mostly to the right -> column on the left, and vice versa
+		const side = traffic > 0 ? -1 : 1
+		packSide.set(hub, side)
+		// the hub sits inside the reserved box: at its left edge when the
+		// column is right, at its right edge when the column is left
+		const hubX = side === 1 ? t.x : t.x + f.colW + gapX / 2
+		const colX = side === 1 ? t.x + hubShape.w + gapX / 2 : t.x
+		targets.set(hub, { x: Math.round(hubX), y: t.y })
 		let y = t.y
 		for (const leaf of leaves) {
-			targets.set(leaf, { x: Math.round(t.x + hubShape.w + gapX / 2), y: Math.round(y) })
+			targets.set(leaf, { x: Math.round(colX), y: Math.round(y) })
 			y += byId.get(leaf).h + PACK_GAP
 		}
 	}
@@ -433,6 +453,37 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		}
 		return null
 	}
+	/**
+	 * Same-side routes (user example: Discovery -> Settings as up, across,
+	 * down into Settings' top): both anchors on one side, path running
+	 * through the band just beyond the extreme edge. tldraw's elbow router
+	 * draws these natively once the anchors are on matching sides.
+	 */
+	const findClearSameSide = (fr, tr, skipA, skipB) => {
+		const sides = [
+			{ side: 'top', fa: { x: 0.38, y: 0 }, ta: { x: 0.62, y: 0 } },
+			{ side: 'bottom', fa: { x: 0.38, y: 1 }, ta: { x: 0.62, y: 1 } },
+			{ side: 'left', fa: { x: 0, y: 0.38 }, ta: { x: 0, y: 0.62 } },
+			{ side: 'right', fa: { x: 1, y: 0.38 }, ta: { x: 1, y: 0.62 } },
+		]
+		for (const cand of sides) {
+			const p0 = anchorPoint(fr, cand.fa)
+			const p3 = anchorPoint(tr, cand.ta)
+			for (const clearance of [80, 160, 260]) {
+				let band
+				if (cand.side === 'top') band = Math.min(p0.y, p3.y) - clearance
+				else if (cand.side === 'bottom') band = Math.max(p0.y, p3.y) + clearance
+				else if (cand.side === 'left') band = Math.min(p0.x, p3.x) - clearance
+				else band = Math.max(p0.x, p3.x) + clearance
+				const vertical = cand.side === 'left' || cand.side === 'right'
+				const path = vertical
+					? [p0, { x: band, y: p0.y }, { x: band, y: p3.y }, p3]
+					: [p0, { x: p0.x, y: band }, { x: p3.x, y: band }, p3]
+				if (!pathCrosses(path, skipA, skipB)) return cand
+			}
+		}
+		return null
+	}
 
 	/** normalized anchor on rect r for a route endpoint p leaving toward q */
 	const anchorFor = (r, p, q) => {
@@ -471,8 +522,12 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 			for (const end of ['from', 'to']) {
 				const a = anchors.get(`${e.id}:${end}`)
 				const side = a.x === 0 ? 'left' : a.x === 1 ? 'right' : a.y === 0 ? 'top' : 'bottom'
-				if (side === 'left' || side === 'right') a.y = 0.5
-				else a.x = 0.5
+				// direction split: outgoing arrows fuse at 0.38 of the side,
+				// incoming at 0.62 - an arrow must never START where another
+				// ENDS (it reads as ambiguous direction)
+				const frac = end === 'from' ? 0.38 : 0.62
+				if (side === 'left' || side === 'right') a.y = frac
+				else a.x = frac
 				if (end === 'from' && e.pts.length === 4) {
 					const midVertical = Math.abs(e.pts[1].x - e.pts[2].x) < 1
 					const key = `${e.from}:${side}:${midVertical ? 'v' : 'h'}`
@@ -538,36 +593,44 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		}
 	}
 
-	// ---- pack edges: one fused trunk out of the hub's right side, branching
-	// to each leaf's left-center (reference rules 5 and 8)
+	// ---- pack edges: fused trunks between hub and its column ------------------
+	// Direction split (user finding): an arrow must never START where another
+	// arrow ENDS, or directionality becomes unreadable. Outgoing and incoming
+	// trunks get separate anchor heights and separate lanes.
 	for (const [hub] of packs) {
 		const hubT = targets.get(hub)
 		if (!hubT) continue
 		const hubShape = byId.get(hub)
+		const side = packSide.get(hub) ?? 1
 		const packEdges = edges.filter(
 			(e) =>
 				e.routable &&
 				((e.from === hub && packOf.get(e.to) === hub) || (e.to === hub && packOf.get(e.from) === hub))
 		)
-		const laneX = hubT.x + hubShape.w + gapX / 4
+		const hubEdgeX = side === 1 ? hubT.x + hubShape.w : hubT.x
+		const laneOut = hubEdgeX + side * (gapX / 4)
+		const laneIn = hubEdgeX + side * (gapX / 4 + 36)
 		for (const e of packEdges) {
-			const hubEnd = e.from === hub ? 'from' : 'to'
-			const leafId = hubEnd === 'from' ? e.to : e.from
-			anchors.set(`${e.id}:${hubEnd}`, { x: 1, y: 0.5 })
-			anchors.set(`${e.id}:${hubEnd === 'from' ? 'to' : 'from'}`, { x: 0, y: 0.5 })
-			const exitX = hubT.x + hubShape.w
-			const entryX = targets.get(leafId).x
-			const span = entryX - exitX
+			const outgoing = e.from === hub
+			const hubEnd = outgoing ? 'from' : 'to'
+			const leafId = outgoing ? e.to : e.from
+			const frac = outgoing ? 0.38 : 0.62
+			anchors.set(`${e.id}:${hubEnd}`, { x: side === 1 ? 1 : 0, y: frac })
+			anchors.set(`${e.id}:${hubEnd === 'from' ? 'to' : 'from'}`, {
+				x: side === 1 ? 0 : 1,
+				y: frac,
+			})
+			const lane = outgoing ? laneOut : laneIn
+			const entryX = targets.get(leafId).x + (side === 1 ? 0 : byId.get(leafId).w)
+			const span = entryX - hubEdgeX
 			if (Math.abs(span) > 1) {
-				e.mid = Math.round(Math.max(0.05, Math.min(0.95, (laneX - exitX) / span)) * 100) / 100
+				e.mid = Math.round(Math.max(0.05, Math.min(0.95, (lane - hubEdgeX) / span)) * 100) / 100
 			}
 			e.midVertical = true
 			e.fused = true
-			e.laneAbs = laneX
+			e.laneAbs = lane
 			const leafShape = byId.get(leafId)
-			const dy = Math.abs(
-				targets.get(leafId).y + leafShape.h / 2 - (hubT.y + hubShape.h / 2)
-			)
+			const dy = Math.abs(targets.get(leafId).y + leafShape.h / 2 - (hubT.y + hubShape.h / 2))
 			const manhattan = Math.abs(span) + dy
 			if (manhattan > 1) {
 				e.labelAt =
@@ -588,12 +651,13 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		const fc = { x: fr.x + fr.w / 2, y: fr.y + fr.h / 2 }
 		const tc = { x: tr.x + tr.w / 2, y: tr.y + tr.h / 2 }
 		const horizontal = Math.abs(tc.x - fc.x) >= Math.abs(tc.y - fc.y)
+		// 0.38/0.62: outgoing and incoming never share a point (see fuse pass)
 		const fa = horizontal
-			? { x: tc.x > fc.x ? 1 : 0, y: 0.5 }
-			: { x: 0.5, y: tc.y > fc.y ? 1 : 0 }
+			? { x: tc.x > fc.x ? 1 : 0, y: 0.38 }
+			: { x: 0.38, y: tc.y > fc.y ? 1 : 0 }
 		const ta = horizontal
-			? { x: tc.x > fc.x ? 0 : 1, y: 0.5 }
-			: { x: 0.5, y: tc.y > fc.y ? 0 : 1 }
+			? { x: tc.x > fc.x ? 0 : 1, y: 0.62 }
+			: { x: 0.62, y: tc.y > fc.y ? 0 : 1 }
 		anchors.set(`${e.id}:from`, fa)
 		anchors.set(`${e.id}:to`, ta)
 		const p0 = anchorPoint(fr, fa)
@@ -602,6 +666,13 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		if (clear) {
 			e.mid = clear.mid
 			e.midVertical = clear.vertical
+		} else {
+			const pi = findClearSameSide(fr, tr, e.from, e.to)
+			if (pi) {
+				anchors.set(`${e.id}:from`, pi.fa)
+				anchors.set(`${e.id}:to`, pi.ta)
+				e.piSide = pi.side
+			}
 		}
 		if (Math.abs(p3.x - p0.x) + Math.abs(p3.y - p0.y) > 600) e.labelAt = 0.2
 	}
@@ -677,6 +748,20 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 			e.midVertical = clear.vertical
 			continue
 		}
+		// same-side route (up-across-down / around the side) before any chain
+		const pi = findClearSameSide(
+			endRect(e.fromShape, e.from),
+			endRect(e.toShape, e.to),
+			e.from,
+			e.to
+		)
+		if (pi) {
+			anchors.set(`${e.id}:from`, pi.fa)
+			anchors.set(`${e.id}:to`, pi.ta)
+			e.mid = undefined
+			e.piSide = pi.side
+			continue
+		}
 		if (e.elkRoute) {
 			e.chainPts = simplify(e.elkRoute)
 				.slice(1, -1)
@@ -712,7 +797,7 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 				return p.x + w / 2 > r.x && p.x - w / 2 < r.x + r.w && p.y + h / 2 > r.y && p.y - h / 2 < r.y + r.h
 			})
 		for (const e of edges) {
-			if (!e.routable || e.chainPts || !e.label || e.labelAt == null) continue
+			if (!e.routable || e.chainPts || e.piSide || !e.label || e.labelAt == null) continue
 			const fa = anchors.get(`${e.id}:from`)
 			const ta = anchors.get(`${e.id}:to`)
 			if (!fa || !ta) continue
