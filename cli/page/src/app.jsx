@@ -1430,6 +1430,34 @@ async function applyOps(editor, ops) {
 							binds.map((b) => frameIdOf(editor.getShape(b.toId))).filter(Boolean)
 						)
 						if (!crossings(a.id, endFrames).length) continue
+						// cheapest fix first: slide the elbow's middle segment and
+						// re-check the REAL geometry - most crossings clear this way
+						// and stay ordinary single arrows
+						{
+							const before = editor.getShape(a.id)
+							const orig = {
+								kind: before.props.kind,
+								elbowMidPoint: before.props.elbowMidPoint,
+							}
+							let cleared = false
+							for (const m of [0.5, 0.35, 0.65, 0.2, 0.8, 0.12, 0.88]) {
+								editor.updateShape({
+									id: a.id,
+									type: 'arrow',
+									props: { kind: 'elbow', elbowMidPoint: m },
+								})
+								if (!crossings(a.id, endFrames).length) {
+									cleared = true
+									break
+								}
+							}
+							if (cleared) {
+								fixed++
+								touched.updated.push(a.id)
+								continue
+							}
+							editor.updateShape({ id: a.id, type: 'arrow', props: orig })
+						}
 						// find the arrow's real terminals
 						let p0
 						let p3

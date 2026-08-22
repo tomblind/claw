@@ -54,6 +54,7 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 				routable: a.start.how === 'bound' && a.end.how === 'bound',
 				fromShape: a.start.id,
 				toShape: a.end.id,
+				label: a.label ?? null,
 			})
 		}
 	}
@@ -353,6 +354,86 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		out.push(pts[pts.length - 1])
 		return out
 	}
+	/**
+	 * Remove short perpendicular jogs from an orthogonal polyline: ELK's
+	 * staircase routes often differ from a clean elbow only by sub-gap
+	 * doglegs, and every removed jog is a chain that never gets created.
+	 * Endpoint-adjacent points stay put (they are anchored on screens).
+	 */
+	const dejog = (ptsIn, tol) => {
+		let out = ptsIn.map((p) => ({ ...p }))
+		for (let pass = 0; pass < 8; pass++) {
+			let idx = -1
+			for (let i = 1; i < out.length - 2; i++) {
+				if (i - 1 < 1 || i + 2 > out.length - 2) continue
+				const len = Math.abs(out[i].x - out[i + 1].x) + Math.abs(out[i].y - out[i + 1].y)
+				if (len < tol) {
+					idx = i
+					break
+				}
+			}
+			if (idx === -1) break
+			const a = out[idx]
+			const b = out[idx + 1]
+			if (Math.abs(a.x - b.x) < 1) {
+				const y = Math.round((a.y + b.y) / 2)
+				out[idx - 1].y = y
+				a.y = y
+				b.y = y
+				out[idx + 2].y = y
+			} else {
+				const x = Math.round((a.x + b.x) / 2)
+				out[idx - 1].x = x
+				a.x = x
+				b.x = x
+				out[idx + 2].x = x
+			}
+			out = simplify(out)
+		}
+		return out
+	}
+
+	/** does a horizontal/vertical segment pass through rect r */
+	const segHits = (a, b, r) => {
+		if (Math.abs(a.y - b.y) < 1) {
+			const [x0, x1] = [Math.min(a.x, b.x), Math.max(a.x, b.x)]
+			return a.y > r.y && a.y < r.y + r.h && x1 > r.x && x0 < r.x + r.w
+		}
+		const [y0, y1] = [Math.min(a.y, b.y), Math.max(a.y, b.y)]
+		return a.x > r.x && a.x < r.x + r.w && y1 > r.y && y0 < r.y + r.h
+	}
+	/** the polyline a tldraw elbow with this mid would draw */
+	const elbowPath = (p0, p3, mid, midVertical) => {
+		if (mid == null) return [p0, { x: p3.x, y: p0.y }, p3]
+		if (midVertical) {
+			const laneX = p0.x + mid * (p3.x - p0.x)
+			return [p0, { x: laneX, y: p0.y }, { x: laneX, y: p3.y }, p3]
+		}
+		const laneY = p0.y + mid * (p3.y - p0.y)
+		return [p0, { x: p0.x, y: laneY }, { x: p3.x, y: laneY }, p3]
+	}
+	const pathCrosses = (path, skipA, skipB) =>
+		screens.some((s) => {
+			if (s.id === skipA || s.id === skipB) return false
+			const r = rectOf(s.id)
+			const infl = { x: r.x - 4, y: r.y - 4, w: r.w + 8, h: r.h + 8 }
+			for (let i = 0; i < path.length - 1; i++) {
+				if (segHits(path[i], path[i + 1], infl)) return true
+			}
+			return false
+		})
+	/** scan lane positions (both orientations) for a screen-free elbow */
+	const findClearMid = (p0, p3, skipA, skipB, preferVertical) => {
+		for (const vertical of preferVertical ? [true, false] : [false, true]) {
+			for (const m of [0.5, 0.35, 0.65, 0.2, 0.8, 0.12, 0.88]) {
+				if (!pathCrosses(elbowPath(p0, p3, m, vertical), skipA, skipB)) {
+					return { mid: m, vertical }
+				}
+			}
+		}
+		return null
+	}
+
 	/** normalized anchor on rect r for a route endpoint p leaving toward q */
 	const anchorFor = (r, p, q) => {
 		const horizontal = Math.abs(q.x - p.x) >= Math.abs(q.y - p.y)
@@ -371,7 +452,7 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 	const flowRouted = []
 	for (const e of flowEdges) {
 		if (!e.routable || !e.elkRoute || e.elkRoute.length < 2) continue
-		e.pts = simplify(e.elkRoute)
+		e.pts = dejog(simplify(e.elkRoute), 48)
 		const fr = endRect(e.fromShape, e.from)
 		const tr = endRect(e.toShape, e.to)
 		anchors.set(`${e.id}:from`, anchorFor(fr, e.pts[0], e.pts[1]))
@@ -457,53 +538,6 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		}
 	}
 
-	// ---- verify translated elbows against every other screen ----------------
-	const segHits = (a, b, r) => {
-		if (Math.abs(a.y - b.y) < 1) {
-			const [x0, x1] = [Math.min(a.x, b.x), Math.max(a.x, b.x)]
-			return a.y > r.y && a.y < r.y + r.h && x1 > r.x && x0 < r.x + r.w
-		}
-		const [y0, y1] = [Math.min(a.y, b.y), Math.max(a.y, b.y)]
-		return a.x > r.x && a.x < r.x + r.w && y1 > r.y && y0 < r.y + r.h
-	}
-	let chained = 0
-	for (const e of flowRouted) {
-		if (e.chainPts) {
-			chained++
-			continue
-		}
-		const p0 = anchorPoint(endRect(e.fromShape, e.from), anchors.get(`${e.id}:from`))
-		const p3 = anchorPoint(endRect(e.toShape, e.to), anchors.get(`${e.id}:to`))
-		let path
-		if (e.mid == null) {
-			// L-shape or straight: elbow picks the single bend at the far corner
-			path = [p0, { x: p3.x, y: p0.y }, p3]
-		} else if (e.midVertical) {
-			const laneX = p0.x + e.mid * (p3.x - p0.x)
-			path = [p0, { x: laneX, y: p0.y }, { x: laneX, y: p3.y }, p3]
-		} else {
-			const laneY = p0.y + e.mid * (p3.y - p0.y)
-			path = [p0, { x: p0.x, y: laneY }, { x: p3.x, y: laneY }, p3]
-		}
-		const crossed = screens.some((s) => {
-			if (s.id === e.from || s.id === e.to) return false
-			const r = rectOf(s.id)
-			const infl = { x: r.x - 4, y: r.y - 4, w: r.w + 8, h: r.h + 8 }
-			for (let i = 0; i < path.length - 1; i++) {
-				if (segHits(path[i], path[i + 1], infl)) return true
-			}
-			return false
-		})
-		if (crossed) {
-			// the lossy elbow translation crosses something ELK's exact route
-			// avoided — render the exact route as a chain instead
-			e.chainPts = simplify(e.elkRoute)
-				.slice(1, -1)
-				.map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }))
-			chained++
-		}
-	}
-
 	// ---- pack edges: one fused trunk out of the hub's right side, branching
 	// to each leaf's left-center (reference rules 5 and 8)
 	for (const [hub] of packs) {
@@ -541,6 +575,35 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 			}
 			e.packRouted = true
 		}
+	}
+
+	// ---- stray edges: everything the flow/pack routers don't own -------------
+	// (satellite hops, pack leaf -> elsewhere). Route them as real elbows on
+	// facing side-centers, scanning lane positions for a screen-free path;
+	// an edge with no clear elbow is left for fix_crossings' corridor detours.
+	for (const e of edges) {
+		if (!e.routable || e.packRouted || anchors.has(`${e.id}:from`)) continue
+		const fr = endRect(e.fromShape, e.from)
+		const tr = endRect(e.toShape, e.to)
+		const fc = { x: fr.x + fr.w / 2, y: fr.y + fr.h / 2 }
+		const tc = { x: tr.x + tr.w / 2, y: tr.y + tr.h / 2 }
+		const horizontal = Math.abs(tc.x - fc.x) >= Math.abs(tc.y - fc.y)
+		const fa = horizontal
+			? { x: tc.x > fc.x ? 1 : 0, y: 0.5 }
+			: { x: 0.5, y: tc.y > fc.y ? 1 : 0 }
+		const ta = horizontal
+			? { x: tc.x > fc.x ? 0 : 1, y: 0.5 }
+			: { x: 0.5, y: tc.y > fc.y ? 0 : 1 }
+		anchors.set(`${e.id}:from`, fa)
+		anchors.set(`${e.id}:to`, ta)
+		const p0 = anchorPoint(fr, fa)
+		const p3 = anchorPoint(tr, ta)
+		const clear = findClearMid(p0, p3, e.from, e.to, horizontal)
+		if (clear) {
+			e.mid = clear.mid
+			e.midVertical = clear.vertical
+		}
+		if (Math.abs(p3.x - p0.x) + Math.abs(p3.y - p0.y) > 600) e.labelAt = 0.2
 	}
 
 	// ---- minimum lane separation (user rule: unrelated near-parallel runs
@@ -587,42 +650,83 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 				if (Math.abs(span) < 1) continue
 				const nm = (shifted - (vertical ? cur.exit.x : cur.exit.y)) / span
 				if (nm < 0.05 || nm > 0.95) continue
+				// never separate INTO a screen: keep the old lane if the shifted
+				// path would cross one
+				if (pathCrosses(elbowPath(cur.exit, cur.entry, nm, vertical), cur.e.from, cur.e.to)) continue
 				cur.e.mid = Math.round(nm * 100) / 100
 				cur.lane = shifted
 			}
 		}
 	}
 
-	// ---- stray edges: everything the flow/pack routers don't own ------------
-	// (pack leaf -> elsewhere, cross-pack hops). Left alone they keep stale
-	// geometry and cut across screens. Route them end-to-end on facing sides,
-	// and when the straight run would hit a screen, bow around it with an arc
-	// - the same fix the skill teaches agents, computed instead of eyeballed.
-	const strayRouted = new Set()
+	// ---- verify every elbow against every screen ------------------------------
+	// A crossing edge first tries nudged lanes in both orientations; a flow
+	// edge that still crosses falls back to its exact ELK route as a chain;
+	// pack/stray edges without a clear elbow are left for fix_crossings.
 	for (const e of edges) {
-		if (!e.routable || e.packRouted || anchors.has(`${e.id}:from`)) continue
-		const fr = endRect(e.fromShape, e.from)
-		const tr = endRect(e.toShape, e.to)
-		const fc = { x: fr.x + fr.w / 2, y: fr.y + fr.h / 2 }
-		const tc = { x: tr.x + tr.w / 2, y: tr.y + tr.h / 2 }
-		const sideAnchor = (from, to) => {
-			const dx = to.x - from.x
-			const dy = to.y - from.y
-			if (Math.abs(dx) >= Math.abs(dy)) return { x: dx > 0 ? 1 : 0, y: 0.5 }
-			return { x: 0.5, y: dy > 0 ? 1 : 0 }
+		if (!e.routable || e.chainPts) continue
+		const fa = anchors.get(`${e.id}:from`)
+		const ta = anchors.get(`${e.id}:to`)
+		if (!fa || !ta) continue
+		const p0 = anchorPoint(endRect(e.fromShape, e.from), fa)
+		const p3 = anchorPoint(endRect(e.toShape, e.to), ta)
+		if (!pathCrosses(elbowPath(p0, p3, e.mid ?? null, !!e.midVertical), e.from, e.to)) continue
+		const clear = findClearMid(p0, p3, e.from, e.to, !!e.midVertical)
+		if (clear) {
+			e.mid = clear.mid
+			e.midVertical = clear.vertical
+			continue
 		}
-		const fa = sideAnchor(fc, tc)
-		const ta = sideAnchor(tc, fc)
-		anchors.set(`${e.id}:from`, fa)
-		anchors.set(`${e.id}:to`, ta)
-		const p0 = anchorPoint(fr, fa)
-		const p3 = anchorPoint(tr, ta)
-		const len = Math.hypot(p3.x - p0.x, p3.y - p0.y) || 1
-		// collisions are handled by the fix_crossings pass (rectilinear
-		// corridor detours, editor-verified) - never arcs, which read wrong
-		// against an otherwise-orthogonal diagram
-		e.strayLabelAt = len > 600 ? 0.2 : null
-		strayRouted.add(e.id)
+		if (e.elkRoute) {
+			e.chainPts = simplify(e.elkRoute)
+				.slice(1, -1)
+				.map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }))
+		}
+	}
+	const chained = edges.filter((e) => e.chainPts?.length).length
+
+	// ---- keep labels off screens ----------------------------------------------
+	{
+		const pointAt = (path, frac) => {
+			let total = 0
+			for (let i = 0; i < path.length - 1; i++) {
+				total += Math.abs(path[i + 1].x - path[i].x) + Math.abs(path[i + 1].y - path[i].y)
+			}
+			let want = frac * total
+			for (let i = 0; i < path.length - 1; i++) {
+				const seg = Math.abs(path[i + 1].x - path[i].x) + Math.abs(path[i + 1].y - path[i].y)
+				if (want <= seg || i === path.length - 2) {
+					const t = seg ? want / seg : 0
+					return {
+						x: path[i].x + (path[i + 1].x - path[i].x) * t,
+						y: path[i].y + (path[i + 1].y - path[i].y) * t,
+					}
+				}
+				want -= seg
+			}
+			return path[path.length - 1]
+		}
+		const labelClear = (p, w, h) =>
+			!screens.some((s) => {
+				const r = rectOf(s.id)
+				return p.x + w / 2 > r.x && p.x - w / 2 < r.x + r.w && p.y + h / 2 > r.y && p.y - h / 2 < r.y + r.h
+			})
+		for (const e of edges) {
+			if (!e.routable || e.chainPts || !e.label || e.labelAt == null) continue
+			const fa = anchors.get(`${e.id}:from`)
+			const ta = anchors.get(`${e.id}:to`)
+			if (!fa || !ta) continue
+			const p0 = anchorPoint(endRect(e.fromShape, e.from), fa)
+			const p3 = anchorPoint(endRect(e.toShape, e.to), ta)
+			const path = elbowPath(p0, p3, e.mid ?? null, !!e.midVertical)
+			const w = Math.min(320, String(e.label).length * 8 + 20)
+			if (labelClear(pointAt(path, e.labelAt), w, 26)) continue
+			const cands = []
+			for (let f = 0.1; f <= 0.9; f += 0.05) cands.push(Math.round(f * 100) / 100)
+			cands.sort((a, b) => Math.abs(a - e.labelAt) - Math.abs(b - e.labelAt))
+			const found = cands.find((f) => labelClear(pointAt(path, f), w, 26))
+			if (found != null) e.labelAt = found
+		}
 	}
 
 	// ---- emit chain/route ops -------------------------------------------------
@@ -649,19 +753,6 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		// chain frozen at its old geometry. No-op for plain arrows, and it
 		// restores real bindings so a following route op works.
 		ops.push({ chain: { id: e.id, points: [] } })
-		if (strayRouted.has(e.id)) {
-			ops.push({
-				route: {
-					id: e.id,
-					kind: 'elbow',
-					...(fromAnchor ? { fromAnchor } : {}),
-					...(toAnchor ? { toAnchor } : {}),
-					...(e.strayLabelAt != null ? { labelAt: e.strayLabelAt } : {}),
-				},
-			})
-			routed++
-			continue
-		}
 		if (!fromAnchor && !toAnchor && e.mid == null) continue
 		ops.push({
 			route: {

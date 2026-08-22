@@ -59,6 +59,9 @@ needs to score comparably on the measures below and respect the rules.
   between their referencers; single-hub packs stack as one column beside
   the hub with a fused side trunk; unrelated near-parallel lanes keep a
   48px minimum separation.
-- Not yet captured: keeping labels off screens in every case, reducing
-  waypoint-chain count toward the reference's zero, and branch-point label
-  positioning for corridor-detour chains.
+- Captured in engine (v0.26.0): jog removal turns ELK staircase routes
+  into clean elbows; crossing elbows try nudged lanes (both in the planner
+  and against real geometry in fix_crossings) before any chain is created;
+  labels relocate along their arrow until they sit clear of every screen.
+- Not yet captured: the last few chains (dense corridors where no single
+  elbow clears), and branch-point labels for chained routes.
