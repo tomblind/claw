@@ -130,7 +130,13 @@ Write through `apply` (modify) and `new` (create) — **never edit .tldr JSON di
 
 **Flow diagrams: connect the screens themselves — don't build a separate node map.** Frame-to-frame `connect` produces elbow arrows that route orthogonally and stay legible even in dense graphs. The recipe for a graph of any size: `add_screen` everything (omit positions — they auto-grid), `connect` the transitions, then run `claw layout` to arrange screens into flow columns. Merge parallel transitions between the same two screens into one arrow with a combined label ("save / cancel") instead of stacking arrows.
 
-Three rules that keep a dense graph legible — each one learned from a real spaghetti canvas:
+Four rules that keep a dense graph legible — each one learned from a real canvas:
+
+- **Never label an arrow with its source button's name.** The arrow already
+  starts at that button; `flows` reports the control it leaves from. Label
+  only what the geometry cannot say: conditions ("3rd turn, no perfect"),
+  parameters ("?share=ID"), or a merged pair ("save / cancel"). An arrow
+  from a button named "Settings" carrying the label "settings" is noise.
 
 - **Every navigation arrow must be a `connect`.** A bound arrow follows its screens forever; a free-drawn arrow is frozen geometry that turns into a random line crossing the canvas the moment anything moves. If you can't express it with `connect`, it's annotation, not navigation — put it INSIDE a screen or next to a note.
 - **`claw layout` is the LAST step, and re-runnable.** Routes do not self-heal: every screen you add or grow after a layout invalidates the routing around it. Finish all screens and connects first, then layout once; if you must edit afterwards, just run layout again (it restores and re-routes every chain automatically).

@@ -289,35 +289,38 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		flowRouted.push(e)
 	}
 
-	// ---- fan out anchors sharing a screen side -------------------------------
-	// ELK often lands several edges on nearly the same spot of a screen edge;
-	// after translation to the real rect they visually merge into one line.
-	// Spread each side's fan evenly, ordered by where the other end goes so
-	// the fan stays uncrossed.
+	// ---- fuse anchors (reference rule: fuse, don't fan) ----------------------
+	// Every endpoint snaps to the CENTER of its side, so arrows sharing a
+	// source or destination coincide at the screen edge and read as one line.
+	// Same-source groups leaving one side also share a first lane, so their
+	// common run overlaps into a trunk that branches late.
 	{
-		const fans = new Map() // `${rootId}:${side}` -> [{e, end, side, away}]
+		const sourceGroups = new Map() // `${root}:${side}:${orientation}` -> edges
 		for (const e of flowRouted) {
 			for (const end of ['from', 'to']) {
 				const a = anchors.get(`${e.id}:${end}`)
 				const side = a.x === 0 ? 'left' : a.x === 1 ? 'right' : a.y === 0 ? 'top' : 'bottom'
-				const root = end === 'from' ? e.from : e.to
-				const other = end === 'from' ? e.pts[e.pts.length - 1] : e.pts[0]
-				const key = `${root}:${side}`
-				if (!fans.has(key)) fans.set(key, [])
-				fans.get(key).push({ e, end, side, away: side === 'left' || side === 'right' ? other.y : other.x })
+				if (side === 'left' || side === 'right') a.y = 0.5
+				else a.x = 0.5
+				if (end === 'from' && e.pts.length === 4) {
+					const midVertical = Math.abs(e.pts[1].x - e.pts[2].x) < 1
+					const key = `${e.from}:${side}:${midVertical ? 'v' : 'h'}`
+					if (!sourceGroups.has(key)) sourceGroups.set(key, [])
+					sourceGroups.get(key).push(e)
+				}
 			}
 		}
-		for (const fan of fans.values()) {
-			if (fan.length < 2) continue
-			fan.sort((a, b) => a.away - b.away || (a.e.id < b.e.id ? -1 : 1))
-			fan.forEach(({ e, end, side }, i) => {
-				const frac = Math.round((0.12 + (0.76 * i) / (fan.length - 1)) * 100) / 100
-				const a = anchors.get(`${e.id}:${end}`)
-				if (side === 'left' || side === 'right') a.y = frac
-				else a.x = frac
-				// remember fan position: source labels stagger by it below
-				if (end === 'from') e.labelStagger = i % 3
-			})
+		for (const group of sourceGroups.values()) {
+			if (group.length < 2) continue
+			// shared lane = median of the lanes ELK assigned to the group
+			const lanes = group
+				.map((e) => (Math.abs(e.pts[1].x - e.pts[2].x) < 1 ? e.pts[1].x : e.pts[1].y))
+				.sort((a, b) => a - b)
+			const lane = lanes[Math.floor(lanes.length / 2)]
+			for (const e of group) {
+				e.sharedLane = lane
+				e.fused = true
+			}
 		}
 	}
 
@@ -333,27 +336,34 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 			e.chainPts = pts.slice(1, -1).map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }))
 			continue
 		}
-		// long edges: park the label near the SOURCE screen instead of the
-		// tldraw default midpoint - on a cross-canvas run the midpoint floats
-		// in empty space with no visual owner. Staggered within a fan so the
-		// labels of edges leaving one side don't stack on each other.
-		{
-			const exit = anchorPoint(fr, fa)
-			const entry = anchorPoint(tr, ta)
-			const manhattan = Math.abs(entry.x - exit.x) + Math.abs(entry.y - exit.y)
-			if (manhattan > 600) e.labelAt = 0.18 + (e.labelStagger ?? 0) * 0.07
-		}
 		if (pts.length === 4) {
-			// H-V-H or V-H-V: position the middle segment where ELK put it
+			// H-V-H or V-H-V: position the middle segment where ELK put it,
+			// or on the group's shared lane when this edge is part of a fused
+			// trunk (all trunk members overlap until the lane, then branch)
 			const exit = anchorPoint(fr, fa)
 			const entry = anchorPoint(tr, ta)
 			const midVertical = Math.abs(pts[1].x - pts[2].x) < 1
 			const span = midVertical ? entry.x - exit.x : entry.y - exit.y
-			const at = midVertical ? pts[1].x - exit.x : pts[1].y - exit.y
+			const at =
+				(e.sharedLane ?? (midVertical ? pts[1].x : pts[1].y)) - (midVertical ? exit.x : exit.y)
 			if (Math.abs(span) > 1) {
 				e.mid = Math.round(Math.max(0.05, Math.min(0.95, at / span)) * 100) / 100
 			}
 			e.midVertical = midVertical
+			// labels: on a fused trunk, sit just after the branch point (where
+			// this edge becomes distinguishable); otherwise near the start
+			const manhattan = Math.abs(entry.x - exit.x) + Math.abs(entry.y - exit.y)
+			if (e.fused && manhattan > 1) {
+				e.labelAt = Math.round(Math.max(0.1, Math.min(0.7, (Math.abs(at) + 60) / manhattan)) * 100) / 100
+			} else if (manhattan > 600) {
+				e.labelAt = 0.2
+			}
+		} else {
+			// straight or single-bend route: label near the start when long
+			const exit = anchorPoint(fr, fa)
+			const entry = anchorPoint(tr, ta)
+			const manhattan = Math.abs(entry.x - exit.x) + Math.abs(entry.y - exit.y)
+			if (manhattan > 600) e.labelAt = 0.2
 		}
 	}
 
