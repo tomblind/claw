@@ -429,8 +429,50 @@ function lintDocument(editor) {
 		}
 		return false
 	}
+	const arrowPagePts = (arrowId) => {
+		try {
+			const geo = editor.getShapeGeometry(arrowId)
+			const xf = editor.getShapePageTransform(arrowId)
+			return geo.vertices.map((v) => xf.applyToPoint(v))
+		} catch {
+			return null
+		}
+	}
+	const ptsInsideLen = (pts, r) => {
+		let inside = 0
+		for (let i = 0; i < pts.length - 1; i++) {
+			const a = pts[i]
+			const b = pts[i + 1]
+			const segLen = Math.hypot(b.x - a.x, b.y - a.y)
+			const steps = 20
+			for (let t = 0; t < steps; t++) {
+				const x = a.x + ((b.x - a.x) * t) / steps
+				const y = a.y + ((b.y - a.y) * t) / steps
+				if (x > r.minX && x < r.maxX && y > r.minY && y < r.maxY) inside += segLen / steps
+			}
+		}
+		return inside
+	}
+	// logical arrows: plain bound arrows, PLUS whole chains (head meta carries
+	// from/to; the chain's segments live beside the head in its group)
+	const logicalArrows = []
 	for (const s of shapes) {
 		if (s.type !== 'arrow') continue
+		if (s.meta?.claw === 'chainseg') continue
+		if (s.meta?.claw === 'chainhead') {
+			const members = shapes.filter(
+				(m) => m.parentId === s.parentId && m.type === 'arrow'
+			)
+			const pts = members.flatMap((m) => arrowPagePts(m.id) ?? [])
+			const ends = [s.meta.from, s.meta.to]
+				.map((id) => {
+					const t = editor.getShape(id)
+					return t ? (t.type === 'frame' ? t.id : (containingFrame(editor, t)?.id ?? null)) : null
+				})
+				.filter(Boolean)
+			if (pts.length) logicalArrows.push({ s, pts, endFrames: new Set(ends), segmented: true })
+			continue
+		}
 		let endFrames
 		try {
 			endFrames = new Set(
@@ -445,19 +487,33 @@ function lintDocument(editor) {
 			continue
 		}
 		if (!endFrames.size) continue
-		let pts
-		try {
-			const geo = editor.getShapeGeometry(s.id)
-			const xf = editor.getShapePageTransform(s.id)
-			pts = geo.vertices.map((v) => xf.applyToPoint(v))
-		} catch {
-			continue
-		}
+		const pts = arrowPagePts(s.id)
+		if (pts) logicalArrows.push({ s, pts, endFrames, segmented: false })
+	}
+	for (const { s, pts, endFrames, segmented } of logicalArrows) {
 		for (const { f, b } of frameRects) {
 			if (endFrames.has(f.id)) continue
 			let hit = false
-			for (let i = 0; i < pts.length - 1 && !hit; i++) hit = segHitsRect(pts[i], pts[i + 1], b)
+			// segmented chains: check pairs within, tolerate the jumps between
+			// member polylines by skipping pairs far apart
+			for (let i = 0; i < pts.length - 1 && !hit; i++) {
+				if (segmented && Math.abs(pts[i].x - pts[i + 1].x) > 2 && Math.abs(pts[i].y - pts[i + 1].y) > 2) continue
+				hit = segHitsRect(pts[i], pts[i + 1], b)
+			}
 			if (hit) add('arrow-through', `arrow ${describe(s)} cuts through frame "${frameName(f)}"`)
+		}
+		// own-frame traversal: crossing the strip between a control and its
+		// frame edge is fine; sailing through the frame is not
+		for (const fid of endFrames) {
+			const b = pb(fid)
+			if (!b) continue
+			const inside = ptsInsideLen(pts, b)
+			if (inside > 260) {
+				add(
+					'through-own-frame',
+					`arrow ${describe(s)} travels ${Math.round(inside)}px inside its own frame "${frameName(editor.getShape(fid))}" - reroute it out the nearest edge`
+				)
+			}
 		}
 	}
 
@@ -902,7 +958,10 @@ async function applyOps(editor, ops) {
 		for (const [k, v] of Object.entries(obj)) {
 			if (typeof v === 'number') {
 				if (!Number.isFinite(v)) throw new Error(`op ${opIdx}: "${k}" is not a finite number`)
-				const r = Math.round(v * 100) / 100
+				// 3 decimals: an elbow mid rounded to 2 shifts its lane by up to
+				// ~1% of the arrow span (6px on a 600px run), which breaks exact
+				// lane fusion between arrows meant to overlap
+				const r = Math.round(v * 1000) / 1000
 				if (k === 'x' || k === 'y') obj[k] = Math.max(-100000, Math.min(100000, r))
 				else if (k === 'w' || k === 'h') obj[k] = Math.max(0.01, Math.min(20000, r))
 				else obj[k] = r
@@ -1402,6 +1461,26 @@ async function applyOps(editor, ops) {
 							}
 							if (hit) hits.push(f.id)
 						}
+						// own-frame traversal beyond the exit allowance is a defect
+						// too: an arrow may cross the strip between its control and
+						// the frame edge, not sail through the whole frame
+						for (const fid of endFrames) {
+							const r = editor.getShapePageBounds(fid)
+							if (!r) continue
+							let inside = 0
+							for (let i = 0; i < pts.length - 1; i++) {
+								const a = pts[i]
+								const b = pts[i + 1]
+								const steps = 20
+								const segLen = Math.hypot(b.x - a.x, b.y - a.y)
+								for (let s = 0; s < steps; s++) {
+									const x = a.x + ((b.x - a.x) * s) / steps
+									const y = a.y + ((b.y - a.y) * s) / steps
+									if (x > r.minX && x < r.maxX && y > r.minY && y < r.maxY) inside += segLen / steps
+								}
+							}
+							if (inside > 220) hits.push(fid)
+						}
 						return hits
 					}
 					// straight H/V segment vs all frames except the skip set
@@ -1481,13 +1560,27 @@ async function applyOps(editor, ops) {
 									})
 								}
 								const pairs = [
-									[{ x: 0.38, y: 0 }, { x: 0.62, y: 0 }],
-									[{ x: 0.38, y: 1 }, { x: 0.62, y: 1 }],
-									[{ x: 0, y: 0.38 }, { x: 0, y: 0.62 }],
-									[{ x: 1, y: 0.38 }, { x: 1, y: 0.62 }],
+									['top', { x: 0.38, y: 0 }, { x: 0.62, y: 0 }],
+									['bottom', { x: 0.38, y: 1 }, { x: 0.62, y: 1 }],
+									['left', { x: 0, y: 0.38 }, { x: 0, y: 0.62 }],
+									['right', { x: 1, y: 0.38 }, { x: 1, y: 0.62 }],
 								]
+								// a side is only usable when the bound control sits near
+								// that edge of its own frame (else the first leg drags
+								// through the frame interior)
+								const nearEdge = (bind, side) => {
+									const ctl = editor.getShapePageBounds(bind.toId)
+									const fid = frameIdOf(editor.getShape(bind.toId))
+									const fr = fid ? editor.getShapePageBounds(fid) : null
+									if (!ctl || !fr) return true
+									if (side === 'top') return ctl.minY - fr.minY <= 180
+									if (side === 'bottom') return fr.maxY - ctl.maxY <= 180
+									if (side === 'left') return ctl.minX - fr.minX <= 180
+									return fr.maxX - ctl.maxX <= 180
+								}
 								let cleared = false
-								for (const [sa, ea] of pairs) {
+								for (const [side, sa, ea] of pairs) {
+									if (!nearEdge(startBind, side) || !nearEdge(endBind, side)) continue
 									setAnchors(sa, ea)
 									editor.updateShape({ id: a.id, type: 'arrow', props: { kind: 'elbow' } })
 									if (!crossings(a.id, endFrames).length) {
@@ -1539,6 +1632,37 @@ async function applyOps(editor, ops) {
 								xCands.add(r.maxX + 60)
 							}
 						}
+						// own-frame traversal budget: the leg from a terminal to the
+						// corridor may cross at most 180px of that terminal's own
+						// frame (a bottom-edge control must not drop through the
+						// whole frame to reach a corridor above it)
+						const endFrameRects = [...endFrames]
+							.map((id) => editor.getShapePageBounds(id))
+							.filter(Boolean)
+						const legInsideOwn = (from, to) => {
+							let worst = 0
+							for (const r of endFrameRects) {
+								let inside = 0
+								if (Math.abs(from.x - to.x) < 1) {
+									if (from.x > r.minX && from.x < r.maxX) {
+										inside =
+											Math.max(
+												0,
+												Math.min(Math.max(from.y, to.y), r.maxY) -
+													Math.max(Math.min(from.y, to.y), r.minY)
+											)
+									}
+								} else if (from.y > r.minY && from.y < r.maxY) {
+									inside = Math.max(
+										0,
+										Math.min(Math.max(from.x, to.x), r.maxX) -
+											Math.max(Math.min(from.x, to.x), r.minX)
+									)
+								}
+								worst = Math.max(worst, inside)
+							}
+							return worst
+						}
 						let best = null
 						for (const y of yCands) {
 							const via = [
@@ -1548,6 +1672,7 @@ async function applyOps(editor, ops) {
 							if (segBlocked(p0, via[0], endFrames)) continue
 							if (segBlocked(via[0], via[1], endFrames)) continue
 							if (segBlocked(via[1], p3, endFrames)) continue
+							if (legInsideOwn(p0, via[0]) > 180 || legInsideOwn(via[1], p3) > 180) continue
 							const cost = Math.abs(p0.y - y) + Math.abs(p3.y - y) + Math.abs(p3.x - p0.x)
 							if (!best || cost < best.cost) best = { via, cost }
 						}
@@ -1559,6 +1684,7 @@ async function applyOps(editor, ops) {
 							if (segBlocked(p0, via[0], endFrames)) continue
 							if (segBlocked(via[0], via[1], endFrames)) continue
 							if (segBlocked(via[1], p3, endFrames)) continue
+							if (legInsideOwn(p0, via[0]) > 180 || legInsideOwn(via[1], p3) > 180) continue
 							const cost = Math.abs(p0.x - x) + Math.abs(p3.x - x) + Math.abs(p3.y - p0.y)
 							if (!best || cost < best.cost) best = { via, cost }
 						}

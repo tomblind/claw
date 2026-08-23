@@ -432,16 +432,46 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		const laneY = p0.y + mid * (p3.y - p0.y)
 		return [p0, { x: p0.x, y: laneY }, { x: p3.x, y: laneY }, p3]
 	}
-	const pathCrosses = (path, skipA, skipB) =>
-		screens.some((s) => {
-			if (s.id === skipA || s.id === skipB) return false
+	/** total length of a path's orthogonal segments inside rect r */
+	const insideLen = (path, r) => {
+		let total = 0
+		for (let i = 0; i < path.length - 1; i++) {
+			const a = path[i]
+			const b = path[i + 1]
+			if (Math.abs(a.x - b.x) < 1) {
+				if (a.x > r.x && a.x < r.x + r.w) {
+					total += Math.max(
+						0,
+						Math.min(Math.max(a.y, b.y), r.y + r.h) - Math.max(Math.min(a.y, b.y), r.y)
+					)
+				}
+			} else if (a.y > r.y && a.y < r.y + r.h) {
+				total += Math.max(
+					0,
+					Math.min(Math.max(a.x, b.x), r.x + r.w) - Math.max(Math.min(a.x, b.x), r.x)
+				)
+			}
+		}
+		return total
+	}
+	// a route is bad if it cuts an unrelated screen, OR if it travels more
+	// than the exit allowance inside its OWN screens (a control-bound arrow
+	// may cross the strip between the control and the frame edge, no more)
+	const pathCrosses = (path, skipA, skipB) => {
+		for (const s of screens) {
+			if (s.id === skipA || s.id === skipB) continue
 			const r = rectOf(s.id)
 			const infl = { x: r.x - 4, y: r.y - 4, w: r.w + 8, h: r.h + 8 }
 			for (let i = 0; i < path.length - 1; i++) {
 				if (segHits(path[i], path[i + 1], infl)) return true
 			}
-			return false
-		})
+		}
+		for (const own of [skipA, skipB]) {
+			if (!own || !targets.has(own)) continue
+			if (insideLen(path, rectOf(own)) > 200) return true
+		}
+		return false
+	}
 	/** scan lane positions (both orientations) for a screen-free elbow */
 	const findClearMid = (p0, p3, skipA, skipB, preferVertical) => {
 		for (const vertical of preferVertical ? [true, false] : [false, true]) {
@@ -466,7 +496,20 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 			{ side: 'left', fa: { x: 0, y: 0.38 }, ta: { x: 0, y: 0.62 } },
 			{ side: 'right', fa: { x: 1, y: 0.38 }, ta: { x: 1, y: 0.62 } },
 		]
+		// a side is only usable when the bound endpoint sits NEAR that edge of
+		// its own frame - otherwise the route's first leg drags through the
+		// frame interior (a control at the bottom must not take a top route)
+		const frameA = rectOf(skipA)
+		const frameB = rectOf(skipB)
+		const nearEdge = (ctl, frame, side) => {
+			if (!frame) return true
+			if (side === 'top') return ctl.y - frame.y <= 180
+			if (side === 'bottom') return frame.y + frame.h - (ctl.y + ctl.h) <= 180
+			if (side === 'left') return ctl.x - frame.x <= 180
+			return frame.x + frame.w - (ctl.x + ctl.w) <= 180
+		}
 		for (const cand of sides) {
+			if (!nearEdge(fr, frameA, cand.side) || !nearEdge(tr, frameB, cand.side)) continue
 			const p0 = anchorPoint(fr, cand.fa)
 			const p3 = anchorPoint(tr, cand.ta)
 			for (const clearance of [80, 160, 260]) {
@@ -527,13 +570,42 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		if (horizontal) {
 			return {
 				x: q.x > p.x ? 1 : 0,
-				y: Math.round(Math.max(0.1, Math.min(0.9, (p.y - r.y) / r.h)) * 100) / 100,
+				y: Math.round(Math.max(0.1, Math.min(0.9, (p.y - r.y) / r.h)) * 1000) / 1000,
 			}
 		}
 		return {
-			x: Math.round(Math.max(0.1, Math.min(0.9, (p.x - r.x) / r.w)) * 100) / 100,
+			x: Math.round(Math.max(0.1, Math.min(0.9, (p.x - r.x) / r.w)) * 1000) / 1000,
 			y: q.y > p.y ? 1 : 0,
 		}
+	}
+
+	/**
+	 * Chain waypoints with explicit exit stubs: the chain op bridges from the
+	 * anchor straight to the first waypoint, which can drag the bridge across
+	 * the frame interior when the anchor sits on a control deep inside. A
+	 * stub 48px outside the frame on the anchor's side forces a clean exit.
+	 */
+	const chainPtsWithExits = (e, corePts) => {
+		const pts = [...corePts]
+		const fa = anchors.get(`${e.id}:from`)
+		const ta = anchors.get(`${e.id}:to`)
+		const stub = (a, p, frame) => {
+			if (!a || !frame) return null
+			if (a.x === 0) return { x: Math.round(frame.x - 48), y: Math.round(p.y) }
+			if (a.x === 1) return { x: Math.round(frame.x + frame.w + 48), y: Math.round(p.y) }
+			if (a.y === 0) return { x: Math.round(p.x), y: Math.round(frame.y - 48) }
+			if (a.y === 1) return { x: Math.round(p.x), y: Math.round(frame.y + frame.h + 48) }
+			return null
+		}
+		if (e.fromShape !== e.from && fa) {
+			const s = stub(fa, anchorPoint(endRect(e.fromShape, e.from), fa), rectOf(e.from))
+			if (s) pts.unshift(s)
+		}
+		if (e.toShape !== e.to && ta) {
+			const s = stub(ta, anchorPoint(endRect(e.toShape, e.to), ta), rectOf(e.to))
+			if (s) pts.push(s)
+		}
+		return pts
 	}
 
 	const flowRouted = []
@@ -605,9 +677,14 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		const tr = endRect(e.toShape, e.to)
 		const fa = anchors.get(`${e.id}:from`)
 		const ta = anchors.get(`${e.id}:to`)
-		if (pts.length > 4) {
-			// too bendy for one elbow: render ELK's exact route as a waypoint chain
-			e.chainPts = pts.slice(1, -1).map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }))
+		if (pts.length > 4 && packSide.get(e.from) !== -1 && packSide.get(e.to) !== -1) {
+			// too bendy for one elbow: render ELK's exact route as a waypoint
+			// chain (except around left-column hubs, whose shifted geometry
+			// invalidates ELK waypoints - those edges go to fix_crossings)
+			e.chainPts = chainPtsWithExits(
+				e,
+				pts.slice(1, -1).map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }))
+			)
 			continue
 		}
 		if (pts.length === 4) {
@@ -621,14 +698,14 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 			const at =
 				(e.sharedLane ?? (midVertical ? pts[1].x : pts[1].y)) - (midVertical ? exit.x : exit.y)
 			if (Math.abs(span) > 1) {
-				e.mid = Math.round(Math.max(0.05, Math.min(0.95, at / span)) * 100) / 100
+				e.mid = Math.round(Math.max(0.05, Math.min(0.95, at / span)) * 1000) / 1000
 			}
 			e.midVertical = midVertical
 			// labels: on a fused trunk, sit just after the branch point (where
 			// this edge becomes distinguishable); otherwise near the start
 			const manhattan = Math.abs(entry.x - exit.x) + Math.abs(entry.y - exit.y)
 			if (e.fused && manhattan > 1) {
-				e.labelAt = Math.round(Math.max(0.1, Math.min(0.7, (Math.abs(at) + 60) / manhattan)) * 100) / 100
+				e.labelAt = Math.round(Math.max(0.1, Math.min(0.7, (Math.abs(at) + 60) / manhattan)) * 1000) / 1000
 			} else if (manhattan > 600) {
 				e.labelAt = 0.2
 			}
@@ -672,10 +749,18 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 				y: frac,
 			})
 			const lane = outgoing ? laneOut : laneIn
-			const entryX = targets.get(leafId).x + (side === 1 ? 0 : byId.get(leafId).w)
-			const span = entryX - hubEdgeX
+			// solve the mid against the BOUND terminals (controls), not the
+			// frame edges - tldraw positions the lane between the terminals, so
+			// frame-edge math lands each edge on a slightly different lane and
+			// the trunk stops overlapping
+			const p0 = anchorPoint(
+				endRect(e.fromShape, e.from),
+				anchors.get(`${e.id}:from`)
+			)
+			const p3 = anchorPoint(endRect(e.toShape, e.to), anchors.get(`${e.id}:to`))
+			const span = p3.x - p0.x
 			if (Math.abs(span) > 1) {
-				e.mid = Math.round(Math.max(0.05, Math.min(0.95, (lane - hubEdgeX) / span)) * 100) / 100
+				e.mid = Math.round(Math.max(0.05, Math.min(0.95, (lane - p0.x) / span)) * 1000) / 1000
 			}
 			e.midVertical = true
 			e.fused = true
@@ -685,7 +770,7 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 			const manhattan = Math.abs(span) + dy
 			if (manhattan > 1) {
 				e.labelAt =
-					Math.round(Math.max(0.1, Math.min(0.7, (gapX / 4 + 60) / manhattan)) * 100) / 100
+					Math.round(Math.max(0.1, Math.min(0.7, (gapX / 4 + 60) / manhattan)) * 1000) / 1000
 			}
 			e.packRouted = true
 		}
@@ -755,7 +840,7 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 			const nm = (lane - p0.x) / span
 			if (nm < 0.05 || nm > 0.95) continue
 			if (pathCrosses(elbowPath(p0, p3, nm, true), e.from, e.to)) continue
-			e.mid = Math.round(nm * 100) / 100
+			e.mid = Math.round(nm * 1000) / 1000
 			e.laneAbs = lane // joins the trunk's separation group
 			e.fused = true
 			break
@@ -822,7 +907,7 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 				// never separate INTO a screen: keep the old lane if the shifted
 				// path would cross one
 				if (pathCrosses(elbowPath(move.exit, move.entry, nm, move.vertical), move.e.from, move.e.to)) continue
-				move.e.mid = Math.round(nm * 100) / 100
+				move.e.mid = Math.round(nm * 1000) / 1000
 				move.lane = shifted
 			}
 		}
@@ -860,10 +945,19 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 			e.piSide = pi.side
 			continue
 		}
-		if (e.elkRoute) {
-			e.chainPts = simplify(e.elkRoute)
-				.slice(1, -1)
-				.map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }))
+		// no ELK-chain fallback for edges touching a LEFT-column hub: the hub
+		// shifted inside its ELK footprint, so ELK's waypoints thread the
+		// hub's real rectangle. fix_crossings reroutes these against real
+		// geometry instead.
+		const touchesShiftedHub =
+			packSide.get(e.from) === -1 || packSide.get(e.to) === -1
+		if (e.elkRoute && !touchesShiftedHub) {
+			e.chainPts = chainPtsWithExits(
+				e,
+				simplify(e.elkRoute)
+					.slice(1, -1)
+					.map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }))
+			)
 		}
 	}
 	const chained = edges.filter((e) => e.chainPts?.length).length
@@ -905,7 +999,7 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 			const w = Math.min(320, String(e.label).length * 8 + 20)
 			if (labelClear(pointAt(path, e.labelAt), w, 26)) continue
 			const cands = []
-			for (let f = 0.1; f <= 0.9; f += 0.05) cands.push(Math.round(f * 100) / 100)
+			for (let f = 0.1; f <= 0.9; f += 0.05) cands.push(Math.round(f * 1000) / 1000)
 			cands.sort((a, b) => Math.abs(a - e.labelAt) - Math.abs(b - e.labelAt))
 			const found = cands.find((f) => labelClear(pointAt(path, f), w, 26))
 			if (found != null) e.labelAt = found
