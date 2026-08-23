@@ -641,6 +641,8 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		}
 	}
 
+	const hubTrunk = new Map() // hubId -> {laneOut, laneIn, side}
+
 	// ---- pack edges: fused trunks between hub and its column ------------------
 	// Direction split (user finding): an arrow must never START where another
 	// arrow ENDS, or directionality becomes unreadable. Outgoing and incoming
@@ -658,6 +660,7 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		const hubEdgeX = side === 1 ? hubT.x + hubShape.w : hubT.x
 		const laneOut = hubEdgeX + side * (gapX / 4)
 		const laneIn = hubEdgeX + side * (gapX / 4 + 56)
+		hubTrunk.set(hub, { laneOut, laneIn, side })
 		for (const e of packEdges) {
 			const outgoing = e.from === hub
 			const hubEnd = outgoing ? 'from' : 'to'
@@ -732,6 +735,33 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		if (Math.abs(p3.x - p0.x) + Math.abs(p3.y - p0.y) > 600) e.labelAt = 0.2
 	}
 
+	// ---- trunk adoption: a stray leaving (or entering) a hub on its column
+	// side joins the pack trunk lane instead of running parallel next to it -
+	// same source, same direction, so the fuse rule applies across routers
+	for (const e of edges) {
+		if (!e.routable || e.packRouted || e.chainPts || e.mid == null || !e.midVertical) continue
+		for (const end of ['from', 'to']) {
+			const hubId = end === 'from' ? e.from : e.to
+			const trunk = hubTrunk.get(hubId)
+			if (!trunk) continue
+			const a = anchors.get(`${e.id}:${end}`)
+			if (!a) continue
+			if ((trunk.side === 1 && a.x !== 1) || (trunk.side === -1 && a.x !== 0)) continue
+			const lane = end === 'from' ? trunk.laneOut : trunk.laneIn
+			const p0 = anchorPoint(endRect(e.fromShape, e.from), anchors.get(`${e.id}:from`))
+			const p3 = anchorPoint(endRect(e.toShape, e.to), anchors.get(`${e.id}:to`))
+			const span = p3.x - p0.x
+			if (Math.abs(span) < 1) continue
+			const nm = (lane - p0.x) / span
+			if (nm < 0.05 || nm > 0.95) continue
+			if (pathCrosses(elbowPath(p0, p3, nm, true), e.from, e.to)) continue
+			e.mid = Math.round(nm * 100) / 100
+			e.laneAbs = lane // joins the trunk's separation group
+			e.fused = true
+			break
+		}
+	}
+
 	// ---- minimum lane separation (user rule: unrelated near-parallel runs
 	// keep their distance; a fused trunk is one line and exempt within itself)
 	{
@@ -745,7 +775,10 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 			const exit = anchorPoint(endRect(e.fromShape, e.from), fa)
 			const entry = anchorPoint(endRect(e.toShape, e.to), ta)
 			const vertical = !!e.midVertical
-			const lane = vertical ? exit.x + e.mid * (entry.x - exit.x) : exit.y + e.mid * (entry.y - exit.y)
+			// pack trunks know their absolute lane; computed lanes for other
+			// edges follow the bound terminals
+			const lane =
+				e.laneAbs ?? (vertical ? exit.x + e.mid * (entry.x - exit.x) : exit.y + e.mid * (entry.y - exit.y))
 			laneEntries.push({
 				e,
 				exit,
@@ -771,16 +804,26 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 				const overlap = Math.min(prev.hi, cur.hi) - Math.max(prev.lo, cur.lo)
 				if (overlap < 40) continue
 				if (cur.lane - prev.lane >= MIN_SEP) continue
-				const shifted = prev.lane + MIN_SEP
-				const span = vertical ? cur.entry.x - cur.exit.x : cur.entry.y - cur.exit.y
+				// a pack trunk's lane is fixed by construction: when one side of
+				// the conflict is a trunk, the OTHER edge moves
+				let move = cur
+				let anchor = prev
+				if (cur.e.laneAbs != null && prev.e.laneAbs == null) {
+					move = prev
+					anchor = cur
+				} else if (cur.e.laneAbs != null && prev.e.laneAbs != null) {
+					continue // two trunks: their spacing is set where they are built
+				}
+				const shifted = move.lane >= anchor.lane ? anchor.lane + MIN_SEP : anchor.lane - MIN_SEP
+				const span = move.vertical ? move.entry.x - move.exit.x : move.entry.y - move.exit.y
 				if (Math.abs(span) < 1) continue
-				const nm = (shifted - (vertical ? cur.exit.x : cur.exit.y)) / span
+				const nm = (shifted - (move.vertical ? move.exit.x : move.exit.y)) / span
 				if (nm < 0.05 || nm > 0.95) continue
 				// never separate INTO a screen: keep the old lane if the shifted
 				// path would cross one
-				if (pathCrosses(elbowPath(cur.exit, cur.entry, nm, vertical), cur.e.from, cur.e.to)) continue
-				cur.e.mid = Math.round(nm * 100) / 100
-				cur.lane = shifted
+				if (pathCrosses(elbowPath(move.exit, move.entry, nm, move.vertical), move.e.from, move.e.to)) continue
+				move.e.mid = Math.round(nm * 100) / 100
+				move.lane = shifted
 			}
 		}
 	}
