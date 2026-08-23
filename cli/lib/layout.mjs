@@ -117,8 +117,13 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 			if (hub != null) packEdgeCount.set(hub, (packEdgeCount.get(hub) ?? 0) + 1)
 		}
 	}
+	// every distinct terminal point gets its own lane at 56px steps, so the
+	// channel reserves room for the worst case (one lane per edge) plus air
 	const chanOf = (hub) =>
-		Math.min(gapX * 1.5, gapX * 0.75 + 36 * Math.max(0, (packEdgeCount.get(hub) ?? 0) - 2))
+		Math.max(
+			gapX * 0.75,
+			Math.round(gapX * 0.3 + 56 * Math.max(0, (packEdgeCount.get(hub) ?? 1) - 1) + 104)
+		)
 	const footprint = new Map() // hubId -> {w, h, colW, colH}
 	for (const [hub, leaves] of packs) {
 		leaves.sort((a, b) => (byId.get(a).name ?? a).localeCompare(byId.get(b).name ?? b))
@@ -749,26 +754,28 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		flowRouted.push(e)
 	}
 
-	// ---- fuse anchors (reference rule: fuse, don't fan) ----------------------
-	// Every endpoint snaps to the CENTER of its side, so arrows sharing a
-	// source or destination coincide at the screen edge and read as one line.
-	// Same-source groups leaving one side also share a first lane, so their
-	// common run overlaps into a trunk that branches late.
+	// ---- fuse anchors (reference rule, corrected) ------------------------------
+	// Routes may overlap ONLY when the overlap is forced by a truly shared
+	// terminal point. Frame-bound endpoints snap to a standard spot on their
+	// side (0.38 outgoing / 0.62 incoming, so a start never sits on an end),
+	// which makes same-frame-side edges genuinely share that point - those
+	// fuse into a trunk that branches late. Edges starting at DIFFERENT
+	// controls have different start points and never share a lane.
 	{
-		const sourceGroups = new Map() // `${root}:${side}:${orientation}` -> edges
+		const sourceGroups = new Map() // `${startPoint}:${orientation}` -> edges
 		for (const e of flowRouted) {
 			for (const end of ['from', 'to']) {
 				const a = anchors.get(`${e.id}:${end}`)
 				const side = a.x === 0 ? 'left' : a.x === 1 ? 'right' : a.y === 0 ? 'top' : 'bottom'
-				// direction split: outgoing arrows fuse at 0.38 of the side,
-				// incoming at 0.62 - an arrow must never START where another
-				// ENDS (it reads as ambiguous direction)
 				const frac = end === 'from' ? 0.38 : 0.62
 				if (side === 'left' || side === 'right') a.y = frac
 				else a.x = frac
 				if (end === 'from' && e.pts.length === 4) {
 					const midVertical = Math.abs(e.pts[1].x - e.pts[2].x) < 1
-					const key = `${e.from}:${side}:${midVertical ? 'v' : 'h'}`
+					// key by the actual page-space start point: only edges leaving
+					// the exact same spot may share a lane
+					const p = anchorPoint(endRect(e.fromShape, e.from), a)
+					const key = `${Math.round(p.x)},${Math.round(p.y)}:${midVertical ? 'v' : 'h'}`
 					if (!sourceGroups.has(key)) sourceGroups.set(key, [])
 					sourceGroups.get(key).push(e)
 				}
@@ -828,12 +835,16 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		}
 	}
 
-	const hubTrunk = new Map() // hubId -> {laneOut, laneIn, side}
+	const hubTrunk = new Map() // hubId -> {side, groups: [{point, lane, outgoing}]}
 
-	// ---- pack edges: fused trunks between hub and its column ------------------
-	// Direction split (user finding): an arrow must never START where another
-	// arrow ENDS, or directionality becomes unreadable. Outgoing and incoming
-	// trunks get separate anchor heights and separate lanes.
+	// ---- pack edges: one lane per shared terminal point ------------------------
+	// Fusion rule (user correction): two routes may overlap ONLY when the
+	// overlap is forced by a shared terminal point - same start point (a
+	// trunk that branches) or same end point (runs converging into one
+	// anchor). Pack edges from DIFFERENT controls to DIFFERENT leaves share
+	// nothing, so each group keyed by its hub-side terminal point gets its
+	// own lane, stacked outward at 56px steps. The 0.38/0.62 direction split
+	// keeps a start point from ever also being an end point.
 	for (const [hub] of packs) {
 		const hubT = targets.get(hub)
 		if (!hubT) continue
@@ -845,67 +856,59 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 				((e.from === hub && packOf.get(e.to) === hub) || (e.to === hub && packOf.get(e.from) === hub))
 		)
 		const hubEdgeX = side === 1 ? hubT.x + hubShape.w : hubT.x
-		const laneOut = hubEdgeX + side * (gapX * 0.3)
-		const laneIn = hubEdgeX + side * (gapX * 0.3 + 64)
-		hubTrunk.set(hub, { laneOut, laneIn, side })
-		// leaves on the opposite vertical side of the trunk's main run get a
-		// lane one step further out: one lane carrying both directions reads
-		// as a single line with arrowheads fighting (user finding: FindPopin
-		// sits above the hub anchor while the trunk runs down)
-		const trunkSign = new Map() // 'out'|'in' -> majority direction sign
-		for (const group of ['out', 'in']) {
-			let sum = 0
-			for (const e of packEdges) {
-				const outgoing = e.from === hub
-				if ((group === 'out') !== outgoing) continue
-				const leafId = outgoing ? e.to : e.from
-				const frac = outgoing ? 0.38 : 0.62
-				const leafShape = byId.get(leafId)
-				const leafY = targets.get(leafId).y + frac * leafShape.h
-				sum += leafY >= hubT.y + frac * hubShape.h ? 1 : -1
-			}
-			trunkSign.set(group, sum >= 0 ? 1 : -1)
-		}
+		const entries = []
 		for (const e of packEdges) {
 			const outgoing = e.from === hub
 			const hubEnd = outgoing ? 'from' : 'to'
-			const leafId = outgoing ? e.to : e.from
 			const frac = outgoing ? 0.38 : 0.62
 			anchors.set(`${e.id}:${hubEnd}`, { x: side === 1 ? 1 : 0, y: frac })
 			anchors.set(`${e.id}:${hubEnd === 'from' ? 'to' : 'from'}`, {
 				x: side === 1 ? 0 : 1,
 				y: frac,
 			})
-			const leafShapeD = byId.get(leafId)
-			const leafDirY = targets.get(leafId).y + frac * leafShapeD.h
-			const sign = leafDirY >= hubT.y + frac * hubShape.h ? 1 : -1
-			const counterTrunk = sign !== trunkSign.get(outgoing ? 'out' : 'in')
-			const lane = (outgoing ? laneOut : laneIn) + (counterTrunk ? side * 56 : 0)
-			// solve the mid against the BOUND terminals (controls), not the
-			// frame edges - tldraw positions the lane between the terminals, so
-			// frame-edge math lands each edge on a slightly different lane and
-			// the trunk stops overlapping
-			const p0 = anchorPoint(
-				endRect(e.fromShape, e.from),
-				anchors.get(`${e.id}:from`)
-			)
+			// terminal points solved against the BOUND shapes (controls), the
+			// same geometry tldraw will draw between
+			const p0 = anchorPoint(endRect(e.fromShape, e.from), anchors.get(`${e.id}:from`))
 			const p3 = anchorPoint(endRect(e.toShape, e.to), anchors.get(`${e.id}:to`))
-			const span = p3.x - p0.x
-			if (Math.abs(span) > 1) {
-				e.mid = Math.round(Math.max(0.05, Math.min(0.95, (lane - p0.x) / span)) * 1000) / 1000
-			}
-			e.midVertical = true
-			e.fused = true
-			e.laneAbs = lane
-			const leafShape = byId.get(leafId)
-			const dy = Math.abs(targets.get(leafId).y + leafShape.h / 2 - (hubT.y + hubShape.h / 2))
-			const manhattan = Math.abs(span) + dy
-			if (manhattan > 1) {
-				e.labelAt =
-					Math.round(Math.max(0.1, Math.min(0.7, (gapX / 4 + 60) / manhattan)) * 1000) / 1000
-			}
-			e.packRouted = true
+			entries.push({ e, outgoing, p0, p3, hubP: outgoing ? p0 : p3, leafP: outgoing ? p3 : p0 })
 		}
+		const groups = []
+		for (const en of entries) {
+			const g = groups.find(
+				(g) =>
+					g.outgoing === en.outgoing &&
+					Math.hypot(g.hubP.x - en.hubP.x, g.hubP.y - en.hubP.y) < 4
+			)
+			if (g) g.members.push(en)
+			else groups.push({ outgoing: en.outgoing, hubP: en.hubP, members: [en] })
+		}
+		// shortest vertical runs take the inner lanes; long hauls go outside
+		for (const g of groups) {
+			g.span = Math.max(...g.members.map((m) => Math.abs(m.leafP.y - g.hubP.y)))
+		}
+		groups.sort((a, b) => a.span - b.span)
+		const trunkGroups = []
+		groups.forEach((g, i) => {
+			const lane = hubEdgeX + side * (gapX * 0.3 + 56 * i)
+			trunkGroups.push({ point: g.hubP, lane, outgoing: g.outgoing })
+			for (const m of g.members) {
+				const e = m.e
+				const span = m.p3.x - m.p0.x
+				if (Math.abs(span) > 1) {
+					e.mid = Math.round(Math.max(0.05, Math.min(0.95, (lane - m.p0.x) / span)) * 1000) / 1000
+				}
+				e.midVertical = true
+				e.fused = true
+				e.laneAbs = lane
+				const manhattan = Math.abs(span) + Math.abs(m.leafP.y - g.hubP.y)
+				if (manhattan > 1) {
+					e.labelAt =
+						Math.round(Math.max(0.1, Math.min(0.7, (gapX / 4 + 60) / manhattan)) * 1000) / 1000
+				}
+				e.packRouted = true
+			}
+		})
+		hubTrunk.set(hub, { side, groups: trunkGroups })
 	}
 
 	// ---- stray edges: everything the flow/pack routers don't own -------------
@@ -955,9 +958,10 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		if (Math.abs(p3.x - p0.x) + Math.abs(p3.y - p0.y) > 600) e.labelAt = 0.2
 	}
 
-	// ---- trunk adoption: a stray leaving (or entering) a hub on its column
-	// side joins the pack trunk lane instead of running parallel next to it -
-	// same source, same direction, so the fuse rule applies across routers
+	// ---- trunk adoption: a stray may join a pack lane ONLY when it truly
+	// shares that lane's terminal point (the fusion rule) - a stray from a
+	// different control runs its own course and the minimum-separation pass
+	// keeps it clear of the lanes
 	for (const e of edges) {
 		if (!e.routable || e.packRouted || e.chainPts || e.mid == null || !e.midVertical) continue
 		for (const end of ['from', 'to']) {
@@ -967,16 +971,21 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 			const a = anchors.get(`${e.id}:${end}`)
 			if (!a) continue
 			if ((trunk.side === 1 && a.x !== 1) || (trunk.side === -1 && a.x !== 0)) continue
-			const lane = end === 'from' ? trunk.laneOut : trunk.laneIn
+			const shape = end === 'from' ? e.fromShape : e.toShape
+			const p = anchorPoint(endRect(shape, hubId), a)
+			const g = trunk.groups.find(
+				(g) => g.outgoing === (end === 'from') && Math.hypot(g.point.x - p.x, g.point.y - p.y) < 4
+			)
+			if (!g) continue
 			const p0 = anchorPoint(endRect(e.fromShape, e.from), anchors.get(`${e.id}:from`))
 			const p3 = anchorPoint(endRect(e.toShape, e.to), anchors.get(`${e.id}:to`))
 			const span = p3.x - p0.x
 			if (Math.abs(span) < 1) continue
-			const nm = (lane - p0.x) / span
+			const nm = (g.lane - p0.x) / span
 			if (nm < 0.05 || nm > 0.95) continue
 			if (pathCrosses(elbowPath(p0, p3, nm, true), e.from, e.to)) continue
 			e.mid = Math.round(nm * 1000) / 1000
-			e.laneAbs = lane // joins the trunk's separation group
+			e.laneAbs = g.lane // joins the lane's separation group
 			e.fused = true
 			break
 		}

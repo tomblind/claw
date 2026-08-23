@@ -26,11 +26,13 @@ needs to score comparably on the measures below and respect the rules.
    (and the reworked arrows in test/fixtures/reference-arrows.tldr) proves
    this always suffices. A route that cannot be cleared stays put and lint
    reports it - visible failure beats hidden complexity.
-5. **Fuse, don't fan.** Arrows from the same source, or into the same
-   destination, share the same anchor point (a side's center) and overlap
-   along their common run, so several transitions read as one trunk that
-   branches. This is the opposite of spreading anchors along a side; visual
-   noise goes down when lines coincide.
+5. **Fuse only at truly shared points.** Two routes may overlap only while
+   the overlap is forced by a shared terminal point: arrows leaving the
+   SAME point (one control, or a frame side's standard spot) form a trunk
+   that branches late, and arrows converging into the same entry point
+   share their final run. Arrows with different start and end points never
+   coincide - each gets its own lane, 56px from the next. (Corrected from
+   an earlier reading that fused everything sharing a source SCREEN.)
 6. **Anchor sides and positions are a joint decision.** Starts exit at the
    center of a control side that is close to the frame edge AND points
    toward the destination. Ends enter on the side that avoids crossings,
@@ -77,6 +79,12 @@ needs to score comparably on the measures below and respect the rules.
 - Captured in engine (v0.30.0): chains retired — every route is a plain
   elbow solved by a joint search over exit sides near the frame edge and
   entry positions aligned with the arriving line.
+- Captured in engine (v0.35.0): fusion requires a truly shared terminal
+  point. Pack edges group by their hub-side terminal point and each group
+  gets its own lane at 56px steps (shortest runs innermost); flow-edge
+  lane sharing keys on the actual page-space start point, not the source
+  screen; trunk adoption requires a matching terminal point; channels
+  reserve one lane per edge.
 - Captured in engine (v0.34.0): trunk arrows land on their shared lane
   EXACTLY in real geometry - the route op carries the absolute lane x and
   the executor calibrates each arrow's midpoint by measuring the rendered
