@@ -77,6 +77,15 @@ needs to score comparably on the measures below and respect the rules.
 - Captured in engine (v0.30.0): chains retired — every route is a plain
   elbow solved by a joint search over exit sides near the frame edge and
   entry positions aligned with the arriving line.
+- Captured in engine (v0.33.0): the planner's path model is faithful to
+  tldraw's elbow semantics - routes leave perpendicular-outward from the
+  start side and arrive perpendicular-inward at the end side; candidates
+  that contradict a side are rejected (tldraw would wrap them with
+  unscored segments), current routes that contradict are modeled as the
+  wrap; mids are emitted only between facing sides (0.5 otherwise, which
+  also clears stale handles); a pack leaf on the opposite vertical side of
+  its trunk's main run gets a lane one step further out instead of riding
+  the trunk against its direction.
 - Captured in engine (v0.32.0): routes keep a 56px clearance margin from
   unrelated screens (near-passes are penalized in scoring, re-solved, and
   can trigger a screen nudge — a line 5px above a frame reads as touching

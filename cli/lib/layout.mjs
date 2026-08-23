@@ -541,6 +541,27 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 			(pathCrosses(path, from, to) ? 10000 : 0)
 		)
 	}
+	// tldraw elbows LEAVE perpendicular-outward from the start side and ARRIVE
+	// perpendicular-inward at the end side. A candidate whose first or last leg
+	// contradicts that is not a route tldraw can draw - it would wrap with
+	// extra segments the planner never scored (this exact gap once sent a
+	// planner-approved route through Settings in real geometry).
+	const exitLegOk = (side, from, to) =>
+		side === 'right'
+			? to.x > from.x
+			: side === 'left'
+				? to.x < from.x
+				: side === 'top'
+					? to.y < from.y
+					: to.y > from.y
+	const entryLegOk = (side, prev, end) =>
+		side === 'right'
+			? prev.x > end.x
+			: side === 'left'
+				? prev.x < end.x
+				: side === 'top'
+					? prev.y < end.y
+					: prev.y > end.y
 	/**
 	 * Joint elbow search (chains are retired - the reference proves every
 	 * route can be an elbow). Candidate exit sides: the sides of the bound
@@ -620,6 +641,8 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 					})
 				}
 				for (const c of cands) {
+					if (!exitLegOk(fd.side, c.path[0], c.path[1])) continue
+					if (!entryLegOk(td.side, c.path[c.path.length - 2], c.path[c.path.length - 1])) continue
 					if (pathCrosses(c.path, e.from, e.to)) continue
 					const score = pathScore(c.path, e.from, e.to)
 					if (!best || score < best.score) {
@@ -631,10 +654,13 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		return best
 	}
 
-	/** scan lane positions (both orientations) for an elbow that is both
-	 * screen-free AND keeps clearance from every screen */
-	const findClearMid = (p0, p3, skipA, skipB, preferVertical) => {
-		for (const vertical of preferVertical ? [true, false] : [false, true]) {
+	/** scan lane positions for an elbow that is both screen-free AND keeps
+	 * clearance from every screen; lockVertical restricts to the one lane
+	 * orientation the anchor sides can express */
+	const findClearMid = (p0, p3, skipA, skipB, preferVertical, lockVertical = null) => {
+		const orients =
+			lockVertical != null ? [lockVertical] : preferVertical ? [true, false] : [false, true]
+		for (const vertical of orients) {
 			for (const m of [0.5, 0.35, 0.65, 0.2, 0.8, 0.12, 0.88]) {
 				const path = elbowPath(p0, p3, m, vertical)
 				if (!pathCrosses(path, skipA, skipB) && !nearPassers(path, skipA, skipB).length) {
@@ -822,6 +848,24 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		const laneOut = hubEdgeX + side * (gapX * 0.3)
 		const laneIn = hubEdgeX + side * (gapX * 0.3 + 64)
 		hubTrunk.set(hub, { laneOut, laneIn, side })
+		// leaves on the opposite vertical side of the trunk's main run get a
+		// lane one step further out: one lane carrying both directions reads
+		// as a single line with arrowheads fighting (user finding: FindPopin
+		// sits above the hub anchor while the trunk runs down)
+		const trunkSign = new Map() // 'out'|'in' -> majority direction sign
+		for (const group of ['out', 'in']) {
+			let sum = 0
+			for (const e of packEdges) {
+				const outgoing = e.from === hub
+				if ((group === 'out') !== outgoing) continue
+				const leafId = outgoing ? e.to : e.from
+				const frac = outgoing ? 0.38 : 0.62
+				const leafShape = byId.get(leafId)
+				const leafY = targets.get(leafId).y + frac * leafShape.h
+				sum += leafY >= hubT.y + frac * hubShape.h ? 1 : -1
+			}
+			trunkSign.set(group, sum >= 0 ? 1 : -1)
+		}
 		for (const e of packEdges) {
 			const outgoing = e.from === hub
 			const hubEnd = outgoing ? 'from' : 'to'
@@ -832,7 +876,11 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 				x: side === 1 ? 0 : 1,
 				y: frac,
 			})
-			const lane = outgoing ? laneOut : laneIn
+			const leafShapeD = byId.get(leafId)
+			const leafDirY = targets.get(leafId).y + frac * leafShapeD.h
+			const sign = leafDirY >= hubT.y + frac * hubShape.h ? 1 : -1
+			const counterTrunk = sign !== trunkSign.get(outgoing ? 'out' : 'in')
+			const lane = (outgoing ? laneOut : laneIn) + (counterTrunk ? side * 56 : 0)
 			// solve the mid against the BOUND terminals (controls), not the
 			// frame edges - tldraw positions the lane between the terminals, so
 			// frame-edge math lands each edge on a slightly different lane and
@@ -1004,14 +1052,82 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 	// A crossing edge first tries a nudged lane, then a full joint re-solve.
 	// Runs again after placement repair moves a screen, because a moved screen
 	// changes what every nearby route crosses.
-	const currentPath = (e) => {
-		const fa = anchors.get(`${e.id}:from`)
-		const ta = anchors.get(`${e.id}:to`)
+	// ---- anchor-side-aware path model ------------------------------------------
+	// tldraw's elbow leaves PERPENDICULAR to the start side and arrives
+	// perpendicular to the end side. Modeling routes as bare mid-lane elbows
+	// ignored that: a route entering a BOTTOM anchor really ends with a
+	// vertical leg at the anchor's x, and that leg can hug a screen the
+	// mid-lane model never saw (user finding: DailyChallenge -> DCWin rode
+	// DCSubmit's right edge while the planner scored a clear imaginary lane).
+	const sideOfAnchor = (a) =>
+		a.x === 0 ? 'L' : a.x === 1 ? 'R' : a.y === 0 ? 'T' : a.y === 1 ? 'B' : null
+	// a mid fraction only means something to tldraw between FACING sides
+	// (left-right or top-bottom); for same-side and mixed pairs tldraw shapes
+	// the route itself
+	const midMeaningful = (fa, ta) => {
+		const fs = sideOfAnchor(fa)
+		const ts = sideOfAnchor(ta)
+		if (!fs || !ts) return true
+		const fH = fs === 'L' || fs === 'R'
+		const tH = ts === 'L' || ts === 'R'
+		return fH === tH && fs !== ts
+	}
+	const routePath = (e, ov = {}) => {
+		const fa = ov.fa ?? anchors.get(`${e.id}:from`)
+		const ta = ov.ta ?? anchors.get(`${e.id}:to`)
 		if (!fa || !ta) return null
 		const p0 = anchorPoint(endRect(e.fromShape, e.from), fa)
 		const p3 = anchorPoint(endRect(e.toShape, e.to), ta)
-		return elbowPath(p0, p3, e.mid ?? null, !!e.midVertical)
+		const mid = 'mid' in ov ? ov.mid : (e.mid ?? null)
+		const fs = sideOfAnchor(fa)
+		const ts = sideOfAnchor(ta)
+		if (!fs || !ts) return elbowPath(p0, p3, mid, !!e.midVertical)
+		const fH = fs === 'L' || fs === 'R'
+		const tH = ts === 'L' || ts === 'R'
+		if (fs === ts) {
+			// same side: the route loops OUTSIDE that side, never between the ends
+			const off = 80
+			if (fs === 'L') {
+				const bx = Math.min(p0.x, p3.x) - off
+				return [p0, { x: bx, y: p0.y }, { x: bx, y: p3.y }, p3]
+			}
+			if (fs === 'R') {
+				const bx = Math.max(p0.x, p3.x) + off
+				return [p0, { x: bx, y: p0.y }, { x: bx, y: p3.y }, p3]
+			}
+			if (fs === 'T') {
+				const by = Math.min(p0.y, p3.y) - off
+				return [p0, { x: p0.x, y: by }, { x: p3.x, y: by }, p3]
+			}
+			const by = Math.max(p0.y, p3.y) + off
+			return [p0, { x: p0.x, y: by }, { x: p3.x, y: by }, p3]
+		}
+		const simple =
+			fH && tH
+				? elbowPath(p0, p3, mid ?? 0.5, true)
+				: !fH && !tH
+					? elbowPath(p0, p3, mid ?? 0.5, false)
+					: // mixed orientations: L along the exit axis, then the entry axis
+						fH
+						? [p0, { x: p3.x, y: p0.y }, p3]
+						: [p0, { x: p0.x, y: p3.y }, p3]
+		const longSide = { L: 'left', R: 'right', T: 'top', B: 'bottom' }
+		if (
+			exitLegOk(longSide[fs], simple[0], simple[1]) &&
+			entryLegOk(longSide[ts], simple[simple.length - 2], simple[simple.length - 1])
+		) {
+			return simple
+		}
+		// the simple shape contradicts an anchor side: tldraw wraps instead -
+		// out from the exit side, around, and in against the entry side
+		const dir = (s) =>
+			s === 'L' ? { x: -1, y: 0 } : s === 'R' ? { x: 1, y: 0 } : s === 'T' ? { x: 0, y: -1 } : { x: 0, y: 1 }
+		const o0 = { x: p0.x + dir(fs).x * 40, y: p0.y + dir(fs).y * 40 }
+		const o3 = { x: p3.x + dir(ts).x * 40, y: p3.y + dir(ts).y * 40 }
+		const corner = fH ? { x: o0.x, y: o3.y } : { x: o3.x, y: o0.y }
+		return [p0, o0, corner, o3, p3]
 	}
+	const currentPath = (e) => routePath(e)
 	const verifyRoutes = () => {
 		for (const e of edges) {
 			if (!e.routable || e.chainPts) continue
@@ -1022,8 +1138,38 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 			// cross something; everything else also re-solves when it passes
 			// inside the clearance margin of an unrelated screen
 			const airless = e.laneAbs == null && nearPassers(path, e.from, e.to).length > 0
-			if (!crossing && !airless) continue
-			const clear = findClearMid(path[0], path[path.length - 1], e.from, e.to, !!e.midVertical)
+			const fa = anchors.get(`${e.id}:from`)
+			const ta = anchors.get(`${e.id}:to`)
+			// an entry side pointing AWAY from the source also re-solves (user
+			// finding: a route wrapped to a screen's far side when the facing
+			// side was open). Checked every verify round, because screen nudges
+			// keep changing which routes are possible.
+			let awayFacing = false
+			if (!crossing && !airless && e.laneAbs == null && e.sharedLane == null && ta) {
+				const ts = sideOfAnchor(ta)
+				if (ts) {
+					const n =
+						ts === 'L'
+							? { x: -1, y: 0 }
+							: ts === 'R'
+								? { x: 1, y: 0 }
+								: ts === 'T'
+									? { x: 0, y: -1 }
+									: { x: 0, y: 1 }
+					const p0 = path[0]
+					const p3 = path[path.length - 1]
+					awayFacing = n.x * (p0.x - p3.x) + n.y * (p0.y - p3.y) <= 0
+				}
+			}
+			if (!crossing && !airless && !awayFacing) continue
+			// mid-lane tuning only helps between facing sides (and cannot fix a
+			// wrong-side entry); the lane must run in the one orientation those
+			// sides can express
+			const tunable = (crossing || airless) && fa && ta && midMeaningful(fa, ta)
+			const lockV = tunable ? sideOfAnchor(fa) === 'L' || sideOfAnchor(fa) === 'R' : null
+			const clear = tunable
+				? findClearMid(path[0], path[path.length - 1], e.from, e.to, !!e.midVertical, lockV)
+				: null
 			if (clear) {
 				e.mid = clear.mid
 				e.midVertical = clear.vertical
@@ -1044,37 +1190,8 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 	}
 	verifyRoutes()
 
-	// ---- entries must face their source -----------------------------------------
-	// (user finding: PuzzleSelect -> Discovery entered Discovery's LEFT side,
-	// far from the start, when the bottom faces the source directly). An edge
-	// whose entry side points away from its start gets a full joint re-solve.
-	for (const e of edges) {
-		if (!e.routable || e.chainPts || e.laneAbs != null || e.sharedLane != null) continue
-		const ta = anchors.get(`${e.id}:to`)
-		const path = currentPath(e)
-		if (!ta || !path) continue
-		const normal =
-			ta.x === 0
-				? { x: -1, y: 0 }
-				: ta.x === 1
-					? { x: 1, y: 0 }
-					: ta.y === 0
-						? { x: 0, y: -1 }
-						: ta.y === 1
-							? { x: 0, y: 1 }
-							: null
-		if (!normal) continue
-		const p0 = path[0]
-		const p3 = path[path.length - 1]
-		if (normal.x * (p0.x - p3.x) + normal.y * (p0.y - p3.y) > 0) continue
-		const solved = bestElbow(e)
-		if (solved && solved.score < pathScore(path, e.from, e.to)) {
-			anchors.set(`${e.id}:from`, solved.fa)
-			anchors.set(`${e.id}:to`, solved.ta)
-			e.mid = solved.mid ?? undefined
-			if (solved.mid != null) e.midVertical = solved.midVertical
-		}
-	}
+	// (entries that point away from their source re-solve inside verifyRoutes,
+	// so the rule keeps holding as placement repair moves screens around)
 
 	// ---- placement repair: open a channel by moving a blocked screen -----------
 	// When a route still crosses exactly ONE screen and that screen is a small
@@ -1263,19 +1380,19 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 				const mover = lenOf(pa) <= lenOf(pb) ? a : b
 				const other = mover === a ? b : a
 				const fa = anchors.get(`${mover.id}:from`)
-				if (!fa) continue
+				const ta = anchors.get(`${mover.id}:to`)
+				if (!fa || !ta) continue
 				const onVertSide = fa.x === 0 || fa.x === 1
 				const fracs = [0.28, 0.72, 0.2, 0.8]
 				let fixed = false
 				for (const f of fracs) {
 					const cand = onVertSide ? { x: fa.x, y: f } : { x: f, y: fa.y }
-					for (const m of [mover.mid ?? null, null, 0.5, 0.35, 0.65, 0.25, 0.75]) {
-						const p0 = anchorPoint(endRect(mover.fromShape, mover.from), cand)
-						const ta = anchors.get(`${mover.id}:to`)
-						if (!ta) break
-						const p3 = anchorPoint(endRect(mover.toShape, mover.to), ta)
-						const np = elbowPath(p0, p3, m, !!mover.midVertical)
-						if (pathCrosses(np, mover.from, mover.to)) continue
+					const mids = midMeaningful(cand, ta)
+						? [mover.mid ?? null, null, 0.5, 0.35, 0.65, 0.25, 0.75]
+						: [null]
+					for (const m of mids) {
+						const np = routePath(mover, { fa: cand, mid: m })
+						if (!np || pathCrosses(np, mover.from, mover.to)) continue
 						if (confusion(np, currentPath(other)) >= 80) continue
 						anchors.set(`${mover.id}:from`, cand)
 						mover.mid = m ?? undefined
@@ -1320,12 +1437,8 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 			})
 		for (const e of edges) {
 			if (!e.routable || e.chainPts || e.piSide || !e.label || e.labelAt == null) continue
-			const fa = anchors.get(`${e.id}:from`)
-			const ta = anchors.get(`${e.id}:to`)
-			if (!fa || !ta) continue
-			const p0 = anchorPoint(endRect(e.fromShape, e.from), fa)
-			const p3 = anchorPoint(endRect(e.toShape, e.to), ta)
-			const path = elbowPath(p0, p3, e.mid ?? null, !!e.midVertical)
+			const path = currentPath(e)
+			if (!path) continue
 			const w = Math.min(320, String(e.label).length * 8 + 20)
 			if (labelClear(pointAt(path, e.labelAt), w, 26)) continue
 			const cands = []
@@ -1361,13 +1474,19 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		// restores real bindings so a following route op works.
 		ops.push({ chain: { id: e.id, points: [] } })
 		if (!fromAnchor && !toAnchor && e.mid == null) continue
+		// tldraw's elbowMidPoint only positions a lane between FACING sides; on
+		// same-side or mixed pairs it would misplace the route, so those emit
+		// the neutral 0.5 - which also clears any stale handle the arrow
+		// carried in from the source file
+		const emitMid =
+			e.mid != null && (!fromAnchor || !toAnchor || midMeaningful(fromAnchor, toAnchor))
 		ops.push({
 			route: {
 				id: e.id,
 				kind: 'elbow', // normalize: a prior layout may have left this an arc
 				...(fromAnchor ? { fromAnchor } : {}),
 				...(toAnchor ? { toAnchor } : {}),
-				...(e.mid != null ? { mid: e.mid } : {}),
+				mid: emitMid ? e.mid : 0.5,
 				...(e.labelAt != null ? { labelAt: e.labelAt } : {}),
 			},
 		})
