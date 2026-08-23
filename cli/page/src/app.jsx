@@ -1859,6 +1859,54 @@ async function applyOps(editor, ops) {
 					if (Object.keys(patch).length) {
 						editor.updateShape({ id: target.id, type: 'arrow', props: patch })
 					}
+					// laneX: calibrate the midpoint against REAL geometry so the lane
+					// lands on the exact requested x. tldraw normalizes elbowMidPoint
+					// over its own span, so a planner-solved mid drifts a few px -
+					// differently per arrow - and trunk arrows meant to overlap end
+					// up as separate near-parallel lines. Lane position is linear in
+					// the midpoint, so two measurements give the exact value.
+					if (args.laneX != null) {
+						const laneOf = (id) => {
+							try {
+								const g = editor.getShapeGeometry(id)
+								const xf = editor.getShapePageTransform(id)
+								const pts = g.vertices.map((v) => xf.applyToPoint(v))
+								let best = null
+								for (let i = 0; i < pts.length - 1; i++) {
+									const p = pts[i]
+									const q = pts[i + 1]
+									const len = Math.abs(p.y - q.y)
+									if (Math.abs(p.x - q.x) < 2 && (!best || len > best.len)) {
+										best = { x: (p.x + q.x) / 2, len }
+									}
+								}
+								return best ? best.x : null
+							} catch {
+								return null
+							}
+						}
+						const setMid = (m) =>
+							editor.updateShape({
+								id: target.id,
+								type: 'arrow',
+								props: { elbowMidPoint: Math.max(0.05, Math.min(0.95, Math.round(m * 10000) / 10000)) },
+							})
+						const m0 = editor.getShape(target.id).props.elbowMidPoint ?? 0.5
+						const x0 = laneOf(target.id)
+						if (x0 != null && Math.abs(x0 - args.laneX) > 1) {
+							const m1 = m0 > 0.5 ? m0 - 0.15 : m0 + 0.15
+							setMid(m1)
+							const x1 = laneOf(target.id)
+							if (x1 != null && Math.abs(x1 - x0) > 0.5) {
+								setMid(m0 + ((args.laneX - x0) * (m1 - m0)) / (x1 - x0))
+								const xf = laneOf(target.id)
+								// keep the calibrated value only if it actually improved
+								if (xf == null || Math.abs(xf - args.laneX) >= Math.abs(x0 - args.laneX)) setMid(m0)
+							} else {
+								setMid(m0)
+							}
+						}
+					}
 					touched.updated.push(target.id)
 					report.push(
 						`route ${short(target.id)}${args.mid != null ? ` mid=${args.mid}` : ''}${args.fromAnchor ? ` from@${args.fromAnchor.x},${args.fromAnchor.y}` : ''}${args.toAnchor ? ` to@${args.toAnchor.x},${args.toAnchor.y}` : ''}`

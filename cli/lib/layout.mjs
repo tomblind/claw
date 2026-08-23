@@ -1487,6 +1487,12 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 				...(fromAnchor ? { fromAnchor } : {}),
 				...(toAnchor ? { toAnchor } : {}),
 				mid: emitMid ? e.mid : 0.5,
+				// trunk edges carry their absolute lane so the executor can
+				// calibrate the midpoint against REAL geometry - tldraw measures
+				// the fraction over its own span, so a model-solved mid lands each
+				// edge a few px off the lane, differently per edge, and the trunk
+				// stops overlapping exactly
+				...(emitMid && e.laneAbs != null ? { laneX: e.laneAbs } : {}),
 				...(e.labelAt != null ? { labelAt: e.labelAt } : {}),
 			},
 		})

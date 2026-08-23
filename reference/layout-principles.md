@@ -77,6 +77,12 @@ needs to score comparably on the measures below and respect the rules.
 - Captured in engine (v0.30.0): chains retired — every route is a plain
   elbow solved by a joint search over exit sides near the frame edge and
   entry positions aligned with the arriving line.
+- Captured in engine (v0.34.0): trunk arrows land on their shared lane
+  EXACTLY in real geometry - the route op carries the absolute lane x and
+  the executor calibrates each arrow's midpoint by measuring the rendered
+  segment (tldraw normalizes the midpoint over its own span, so a
+  model-solved value drifts a few px differently per arrow, unfusing the
+  trunk into near-parallel lines).
 - Captured in engine (v0.33.0): the planner's path model is faithful to
   tldraw's elbow semantics - routes leave perpendicular-outward from the
   start side and arrive perpendicular-inward at the end side; candidates

@@ -30,7 +30,7 @@ const OPS = {
 	fix_crossings: { required: [], optional: [] },
 	resize: { required: ['id'], optional: ['w', 'h'] },
 	connect: { required: ['from', 'to'], optional: ['label', 'color', 'kind'] },
-	route: { required: ['id'], optional: ['fromAnchor', 'toAnchor', 'mid', 'kind', 'bend', 'labelAt'] },
+	route: { required: ['id'], optional: ['fromAnchor', 'toAnchor', 'mid', 'kind', 'bend', 'labelAt', 'laneX'] },
 	chain: { required: ['id'], optional: ['points', 'fromAnchor', 'toAnchor'] },
 	delete: { required: ['id'], optional: [] },
 	rename: { required: ['id', 'name'], optional: [] },
