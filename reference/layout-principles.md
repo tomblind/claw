@@ -77,6 +77,15 @@ needs to score comparably on the measures below and respect the rules.
 - Captured in engine (v0.30.0): chains retired — every route is a plain
   elbow solved by a joint search over exit sides near the frame edge and
   entry positions aligned with the arriving line.
+- Captured in engine (v0.32.0): routes keep a 56px clearance margin from
+  unrelated screens (near-passes are penalized in scoring, re-solved, and
+  can trigger a screen nudge — a line 5px above a frame reads as touching
+  it); entry sides must FACE the source (an away-facing entry gets a joint
+  re-solve); a start point never sits on an end point (coincident pairs
+  split 0.38/0.62 along the side); pack columns sit on the side nearest
+  their linking controls (weighed against flow traffic), and the
+  hub-to-column channel grows with the number of arrows living in it;
+  pack leaves may slide along their column to open a channel.
 - Captured in engine (v0.31.0): exit-side scoring prefers the side nearest
   the frame edge over the side pointing at the destination (own-frame
   pixels cost triple in the route score); same-source routes to DIFFERENT
