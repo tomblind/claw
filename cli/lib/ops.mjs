@@ -218,7 +218,8 @@ label text, or the "name" given to an earlier op in the same batch.
       invisible waypoint dots + bound segments render the exact polyline;
       queries still see ONE transition. "points" are page-space interior
       bends; empty points unchains back to a plain arrow. \`claw layout\`
-      emits these automatically - hand-write only for fine-tuning.
+      never emits these anymore (every route is a plain elbow) - the op
+      remains for manual fine-tuning only.
   {"unchain_all": {}}
       Restore every chain to a plain bound arrow and sweep debris from
       broken ones. \`claw layout\` runs this first automatically; hand-run

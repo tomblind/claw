@@ -472,6 +472,100 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		}
 		return false
 	}
+	/**
+	 * Joint elbow search (chains are retired - the reference proves every
+	 * route can be an elbow). Candidate exit sides: the sides of the bound
+	 * control near its frame's edge. Candidate entries: each target side,
+	 * with the entry POSITION aligned to where the line arrives (the
+	 * reference reworks enter at aligned fractions, collapsing routes to 1-2
+	 * segments). Score: crossings and own-frame budget reject, then fewest
+	 * bends, then shortest.
+	 */
+	const bestElbow = (e) => {
+		const fr = endRect(e.fromShape, e.from)
+		const tr = endRect(e.toShape, e.to)
+		const sideDefs = (rect, frame) => {
+			const defs = []
+			const near = (d) => d <= 220
+			if (near(rect.x - frame.x)) defs.push({ side: 'left', a: { x: 0, y: 0.5 } })
+			if (near(frame.x + frame.w - (rect.x + rect.w))) defs.push({ side: 'right', a: { x: 1, y: 0.5 } })
+			if (near(rect.y - frame.y)) defs.push({ side: 'top', a: { x: 0.5, y: 0 } })
+			if (near(frame.y + frame.h - (rect.y + rect.h))) defs.push({ side: 'bottom', a: { x: 0.5, y: 1 } })
+			return defs.length
+				? defs
+				: [
+						{ side: 'left', a: { x: 0, y: 0.5 } },
+						{ side: 'right', a: { x: 1, y: 0.5 } },
+						{ side: 'top', a: { x: 0.5, y: 0 } },
+						{ side: 'bottom', a: { x: 0.5, y: 1 } },
+					]
+		}
+		const fromDefs = sideDefs(fr, rectOf(e.from))
+		const toDefs = sideDefs(tr, rectOf(e.to))
+		let best = null
+		for (const fd of fromDefs) {
+			const p0 = anchorPoint(fr, fd.a)
+			for (const td of toDefs) {
+				// align the entry with the arriving line where geometry allows
+				let ta = { ...td.a }
+				if (td.side === 'top' || td.side === 'bottom') {
+					const fracX = (p0.x - tr.x) / tr.w
+					if (fracX > 0.06 && fracX < 0.94) ta = { x: Math.round(fracX * 1000) / 1000, y: td.a.y }
+				} else {
+					const fracY = (p0.y - tr.y) / tr.h
+					if (fracY > 0.06 && fracY < 0.94) ta = { x: td.a.x, y: Math.round(fracY * 1000) / 1000 }
+				}
+				const p3 = anchorPoint(tr, ta)
+				const fromVert = fd.side === 'top' || fd.side === 'bottom'
+				const toVert = td.side === 'top' || td.side === 'bottom'
+				const cands = []
+				if (fromVert && toVert) {
+					if (Math.abs(p0.x - p3.x) < 2) cands.push({ path: [p0, p3], mid: null, mv: false })
+					const sameSide = fd.side === td.side
+					const bandY = sameSide
+						? fd.side === 'top'
+							? Math.min(p0.y, p3.y) - 80
+							: Math.max(p0.y, p3.y) + 80
+						: (p0.y + p3.y) / 2
+					cands.push({
+						path: [p0, { x: p0.x, y: bandY }, { x: p3.x, y: bandY }, p3],
+						mid: sameSide ? null : 0.5,
+						mv: false,
+					})
+				} else if (fromVert) {
+					cands.push({ path: [p0, { x: p0.x, y: p3.y }, p3], mid: null, mv: false })
+				} else if (toVert) {
+					cands.push({ path: [p0, { x: p3.x, y: p0.y }, p3], mid: null, mv: true })
+				} else {
+					if (Math.abs(p0.y - p3.y) < 2) cands.push({ path: [p0, p3], mid: null, mv: true })
+					const sameSide = fd.side === td.side
+					const bandX = sameSide
+						? fd.side === 'left'
+							? Math.min(p0.x, p3.x) - 80
+							: Math.max(p0.x, p3.x) + 80
+						: (p0.x + p3.x) / 2
+					cands.push({
+						path: [p0, { x: bandX, y: p0.y }, { x: bandX, y: p3.y }, p3],
+						mid: sameSide ? null : 0.5,
+						mv: true,
+					})
+				}
+				for (const c of cands) {
+					if (pathCrosses(c.path, e.from, e.to)) continue
+					let len = 0
+					for (let i = 0; i < c.path.length - 1; i++) {
+						len += Math.abs(c.path[i + 1].x - c.path[i].x) + Math.abs(c.path[i + 1].y - c.path[i].y)
+					}
+					const score = (c.path.length - 2) * 320 + len
+					if (!best || score < best.score) {
+						best = { score, fa: fd.a, ta, mid: c.mid, midVertical: c.mv }
+					}
+				}
+			}
+		}
+		return best
+	}
+
 	/** scan lane positions (both orientations) for a screen-free elbow */
 	const findClearMid = (p0, p3, skipA, skipB, preferVertical) => {
 		for (const vertical of preferVertical ? [true, false] : [false, true]) {
@@ -479,50 +573,6 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 				if (!pathCrosses(elbowPath(p0, p3, m, vertical), skipA, skipB)) {
 					return { mid: m, vertical }
 				}
-			}
-		}
-		return null
-	}
-	/**
-	 * Same-side routes (user example: Discovery -> Settings as up, across,
-	 * down into Settings' top): both anchors on one side, path running
-	 * through the band just beyond the extreme edge. tldraw's elbow router
-	 * draws these natively once the anchors are on matching sides.
-	 */
-	const findClearSameSide = (fr, tr, skipA, skipB) => {
-		const sides = [
-			{ side: 'top', fa: { x: 0.38, y: 0 }, ta: { x: 0.62, y: 0 } },
-			{ side: 'bottom', fa: { x: 0.38, y: 1 }, ta: { x: 0.62, y: 1 } },
-			{ side: 'left', fa: { x: 0, y: 0.38 }, ta: { x: 0, y: 0.62 } },
-			{ side: 'right', fa: { x: 1, y: 0.38 }, ta: { x: 1, y: 0.62 } },
-		]
-		// a side is only usable when the bound endpoint sits NEAR that edge of
-		// its own frame - otherwise the route's first leg drags through the
-		// frame interior (a control at the bottom must not take a top route)
-		const frameA = rectOf(skipA)
-		const frameB = rectOf(skipB)
-		const nearEdge = (ctl, frame, side) => {
-			if (!frame) return true
-			if (side === 'top') return ctl.y - frame.y <= 180
-			if (side === 'bottom') return frame.y + frame.h - (ctl.y + ctl.h) <= 180
-			if (side === 'left') return ctl.x - frame.x <= 180
-			return frame.x + frame.w - (ctl.x + ctl.w) <= 180
-		}
-		for (const cand of sides) {
-			if (!nearEdge(fr, frameA, cand.side) || !nearEdge(tr, frameB, cand.side)) continue
-			const p0 = anchorPoint(fr, cand.fa)
-			const p3 = anchorPoint(tr, cand.ta)
-			for (const clearance of [80, 160, 260]) {
-				let band
-				if (cand.side === 'top') band = Math.min(p0.y, p3.y) - clearance
-				else if (cand.side === 'bottom') band = Math.max(p0.y, p3.y) + clearance
-				else if (cand.side === 'left') band = Math.min(p0.x, p3.x) - clearance
-				else band = Math.max(p0.x, p3.x) + clearance
-				const vertical = cand.side === 'left' || cand.side === 'right'
-				const path = vertical
-					? [p0, { x: band, y: p0.y }, { x: band, y: p3.y }, p3]
-					: [p0, { x: p0.x, y: band }, { x: p3.x, y: band }, p3]
-				if (!pathCrosses(path, skipA, skipB)) return cand
 			}
 		}
 		return null
@@ -579,34 +629,6 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		}
 	}
 
-	/**
-	 * Chain waypoints with explicit exit stubs: the chain op bridges from the
-	 * anchor straight to the first waypoint, which can drag the bridge across
-	 * the frame interior when the anchor sits on a control deep inside. A
-	 * stub 48px outside the frame on the anchor's side forces a clean exit.
-	 */
-	const chainPtsWithExits = (e, corePts) => {
-		const pts = [...corePts]
-		const fa = anchors.get(`${e.id}:from`)
-		const ta = anchors.get(`${e.id}:to`)
-		const stub = (a, p, frame) => {
-			if (!a || !frame) return null
-			if (a.x === 0) return { x: Math.round(frame.x - 48), y: Math.round(p.y) }
-			if (a.x === 1) return { x: Math.round(frame.x + frame.w + 48), y: Math.round(p.y) }
-			if (a.y === 0) return { x: Math.round(p.x), y: Math.round(frame.y - 48) }
-			if (a.y === 1) return { x: Math.round(p.x), y: Math.round(frame.y + frame.h + 48) }
-			return null
-		}
-		if (e.fromShape !== e.from && fa) {
-			const s = stub(fa, anchorPoint(endRect(e.fromShape, e.from), fa), rectOf(e.from))
-			if (s) pts.unshift(s)
-		}
-		if (e.toShape !== e.to && ta) {
-			const s = stub(ta, anchorPoint(endRect(e.toShape, e.to), ta), rectOf(e.to))
-			if (s) pts.push(s)
-		}
-		return pts
-	}
 
 	const flowRouted = []
 	for (const e of flowEdges) {
@@ -677,16 +699,8 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		const tr = endRect(e.toShape, e.to)
 		const fa = anchors.get(`${e.id}:from`)
 		const ta = anchors.get(`${e.id}:to`)
-		if (pts.length > 4 && packSide.get(e.from) !== -1 && packSide.get(e.to) !== -1) {
-			// too bendy for one elbow: render ELK's exact route as a waypoint
-			// chain (except around left-column hubs, whose shifted geometry
-			// invalidates ELK waypoints - those edges go to fix_crossings)
-			e.chainPts = chainPtsWithExits(
-				e,
-				pts.slice(1, -1).map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }))
-			)
-			continue
-		}
+		// chains are retired: routes ELK drew with more bends than one elbow
+		// holds get re-solved by bestElbow in the verify pass instead
 		if (pts.length === 4) {
 			// H-V-H or V-H-V: position the middle segment where ELK put it,
 			// or on the group's shared lane when this edge is part of a fused
@@ -805,16 +819,19 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		anchors.set(`${e.id}:to`, ta)
 		const p0 = anchorPoint(fr, fa)
 		const p3 = anchorPoint(tr, ta)
-		const clear = findClearMid(p0, p3, e.from, e.to, horizontal)
-		if (clear) {
-			e.mid = clear.mid
-			e.midVertical = clear.vertical
+		const solved = bestElbow(e)
+		if (solved) {
+			anchors.set(`${e.id}:from`, solved.fa)
+			anchors.set(`${e.id}:to`, solved.ta)
+			if (solved.mid != null) {
+				e.mid = solved.mid
+				e.midVertical = solved.midVertical
+			}
 		} else {
-			const pi = findClearSameSide(fr, tr, e.from, e.to)
-			if (pi) {
-				anchors.set(`${e.id}:from`, pi.fa)
-				anchors.set(`${e.id}:to`, pi.ta)
-				e.piSide = pi.side
+			const clear = findClearMid(p0, p3, e.from, e.to, horizontal)
+			if (clear) {
+				e.mid = clear.mid
+				e.midVertical = clear.vertical
 			}
 		}
 		if (Math.abs(p3.x - p0.x) + Math.abs(p3.y - p0.y) > 600) e.labelAt = 0.2
@@ -931,36 +948,17 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 			e.midVertical = clear.vertical
 			continue
 		}
-		// same-side route (up-across-down / around the side) before any chain
-		const pi = findClearSameSide(
-			endRect(e.fromShape, e.from),
-			endRect(e.toShape, e.to),
-			e.from,
-			e.to
-		)
-		if (pi) {
-			anchors.set(`${e.id}:from`, pi.fa)
-			anchors.set(`${e.id}:to`, pi.ta)
-			e.mid = undefined
-			e.piSide = pi.side
-			continue
-		}
-		// no ELK-chain fallback for edges touching a LEFT-column hub: the hub
-		// shifted inside its ELK footprint, so ELK's waypoints thread the
-		// hub's real rectangle. fix_crossings reroutes these against real
-		// geometry instead.
-		const touchesShiftedHub =
-			packSide.get(e.from) === -1 || packSide.get(e.to) === -1
-		if (e.elkRoute && !touchesShiftedHub) {
-			e.chainPts = chainPtsWithExits(
-				e,
-				simplify(e.elkRoute)
-					.slice(1, -1)
-					.map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }))
-			)
+		// full joint re-solve (sides + aligned entries); edges it can't clear
+		// go to fix_crossings, which searches the same space against REAL
+		// geometry. No chains, ever - lint reports whatever survives both.
+		const solved = bestElbow(e)
+		if (solved) {
+			anchors.set(`${e.id}:from`, solved.fa)
+			anchors.set(`${e.id}:to`, solved.ta)
+			e.mid = solved.mid ?? undefined
+			if (solved.mid != null) e.midVertical = solved.midVertical
 		}
 	}
-	const chained = edges.filter((e) => e.chainPts?.length).length
 
 	// ---- keep labels off screens ----------------------------------------------
 	{
@@ -1060,11 +1058,6 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 	)
 	if (routed) {
 		report.push(`${routed} transition arrows routed along ELK's reserved channels`)
-	}
-	if (chained) {
-		report.push(
-			`${chained} route(s) needed more bends than one arrow can hold - rendered as waypoint chains (queries still see single transitions)`
-		)
 	}
 	if (unmovableArrows) {
 		report.push(

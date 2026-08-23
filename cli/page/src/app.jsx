@@ -1483,22 +1483,6 @@ async function applyOps(editor, ops) {
 						}
 						return hits
 					}
-					// straight H/V segment vs all frames except the skip set
-					const segBlocked = (a, b, skip) => {
-						for (const f of frames) {
-							if (skip.has(f.id)) continue
-							const r = editor.getShapePageBounds(f.id)
-							if (!r) continue
-							const xmin = Math.min(a.x, b.x)
-							const xmax = Math.max(a.x, b.x)
-							const ymin = Math.min(a.y, b.y)
-							const ymax = Math.max(a.y, b.y)
-							if (xmax > r.minX + 2 && xmin < r.maxX - 2 && ymax > r.minY + 2 && ymin < r.maxY - 2) {
-								return true
-							}
-						}
-						return false
-					}
 					let fixed = 0
 					const stuck = []
 					for (const a of editor.getCurrentPageShapes()) {
@@ -1597,134 +1581,98 @@ async function applyOps(editor, ops) {
 								editor.updateBinding({ id: endBind.id, type: 'arrow', props: origEnd })
 							}
 						}
-						// find the arrow's real terminals
-						let p0
-						let p3
-						try {
-							const g = editor.getShapeGeometry(a.id)
-							const xf = editor.getShapePageTransform(a.id)
-							const pts = g.vertices.map((v) => xf.applyToPoint(v))
-							p0 = pts[0]
-							p3 = pts[pts.length - 1]
-						} catch {
-							stuck.push(short(a.id))
-							continue
-						}
-						// rectilinear detour: route p0 -> band -> p3 through a clear
-						// horizontal or vertical corridor (frame-gap edges plus the
-						// outside of everything). Same straight-line language as the
-						// rest of the diagram - never an arc.
-						const rects = frames
-							.filter((f) => !endFrames.has(f.id))
-							.map((f) => editor.getShapePageBounds(f.id))
-							.filter(Boolean)
-						const yCands = new Set()
-						const xCands = new Set()
-						if (rects.length) {
-							yCands.add(Math.min(...rects.map((r) => r.minY)) - 100)
-							yCands.add(Math.max(...rects.map((r) => r.maxY)) + 100)
-							xCands.add(Math.min(...rects.map((r) => r.minX)) - 100)
-							xCands.add(Math.max(...rects.map((r) => r.maxX)) + 100)
-							for (const r of rects) {
-								yCands.add(r.minY - 60)
-								yCands.add(r.maxY + 60)
-								xCands.add(r.minX - 60)
-								xCands.add(r.maxX + 60)
+						// last resort (chains are retired): joint re-anchor search on
+						// REAL geometry - every near-edge exit side of the start
+						// control x every side of the end target, with the entry
+						// POSITION aligned to the exit point, plus a mid sweep per
+						// combination. Whatever this can't clear stays put and lint
+						// reports it.
+						{
+							const startBind = binds.find((b) => b.props?.terminal === 'start')
+							const endBind = binds.find((b) => b.props?.terminal !== 'start')
+							if (!startBind || !endBind) {
+								stuck.push(short(a.id))
+								continue
 							}
-						}
-						// own-frame traversal budget: the leg from a terminal to the
-						// corridor may cross at most 180px of that terminal's own
-						// frame (a bottom-edge control must not drop through the
-						// whole frame to reach a corridor above it)
-						const endFrameRects = [...endFrames]
-							.map((id) => editor.getShapePageBounds(id))
-							.filter(Boolean)
-						const legInsideOwn = (from, to) => {
-							let worst = 0
-							for (const r of endFrameRects) {
-								let inside = 0
-								if (Math.abs(from.x - to.x) < 1) {
-									if (from.x > r.minX && from.x < r.maxX) {
-										inside =
-											Math.max(
-												0,
-												Math.min(Math.max(from.y, to.y), r.maxY) -
-													Math.max(Math.min(from.y, to.y), r.minY)
-											)
+							const origStart = { ...startBind.props }
+							const origEnd = { ...endBind.props }
+							const origProps = {
+								kind: editor.getShape(a.id).props.kind,
+								elbowMidPoint: editor.getShape(a.id).props.elbowMidPoint,
+							}
+							const sidesOf = (bind) => {
+								const ctl = editor.getShapePageBounds(bind.toId)
+								const fid = frameIdOf(editor.getShape(bind.toId))
+								const fr = fid ? editor.getShapePageBounds(fid) : ctl
+								if (!ctl || !fr) return []
+								const out = []
+								if (ctl.minX - fr.minX <= 220) out.push({ side: 'left', a: { x: 0, y: 0.5 } })
+								if (fr.maxX - ctl.maxX <= 220) out.push({ side: 'right', a: { x: 1, y: 0.5 } })
+								if (ctl.minY - fr.minY <= 220) out.push({ side: 'top', a: { x: 0.5, y: 0 } })
+								if (fr.maxY - ctl.maxY <= 220) out.push({ side: 'bottom', a: { x: 0.5, y: 1 } })
+								return out
+							}
+							const setAnchor = (bind, anchor) =>
+								editor.updateBinding({
+									id: bind.id,
+									type: 'arrow',
+									props: { ...bind.props, normalizedAnchor: anchor, snap: 'edge-point', isPrecise: true },
+								})
+							const startBounds = editor.getShapePageBounds(startBind.toId)
+							const endBounds = editor.getShapePageBounds(endBind.toId)
+							const posVariants = (sideDef, pos) =>
+								sideDef.side === 'top' || sideDef.side === 'bottom'
+									? { x: pos, y: sideDef.a.y }
+									: { x: sideDef.a.x, y: pos }
+							let cleared = false
+							search: for (const fs of sidesOf(startBind)) {
+								for (const fpos of [0.5, 0.28, 0.72]) {
+									const fa = posVariants(fs, fpos)
+									const p0 = {
+										x: startBounds.minX + fa.x * startBounds.width,
+										y: startBounds.minY + fa.y * startBounds.height,
 									}
-								} else if (from.y > r.minY && from.y < r.maxY) {
-									inside = Math.max(
-										0,
-										Math.min(Math.max(from.x, to.x), r.maxX) -
-											Math.max(Math.min(from.x, to.x), r.minX)
-									)
+									for (const ts of sidesOf(endBind)) {
+										const entries = []
+										if (ts.side === 'top' || ts.side === 'bottom') {
+											const fx = (p0.x - endBounds.minX) / endBounds.width
+											if (fx > 0.06 && fx < 0.94) entries.push({ x: Math.round(fx * 1000) / 1000, y: ts.a.y })
+										} else {
+											const fy = (p0.y - endBounds.minY) / endBounds.height
+											if (fy > 0.06 && fy < 0.94) entries.push({ x: ts.a.x, y: Math.round(fy * 1000) / 1000 })
+										}
+										for (const epos of [0.5, 0.28, 0.72]) entries.push(posVariants(ts, epos))
+										for (const ea of entries) {
+											setAnchor(startBind, fa)
+											setAnchor(endBind, ea)
+											for (const m of [null, 0.5, 0.3, 0.7, 0.15, 0.85]) {
+												editor.updateShape({
+													id: a.id,
+													type: 'arrow',
+													props: { kind: 'elbow', ...(m != null ? { elbowMidPoint: m } : {}) },
+												})
+												if (!crossings(a.id, endFrames).length) {
+													cleared = true
+													break search
+												}
+											}
+										}
+									}
 								}
-								worst = Math.max(worst, inside)
 							}
-							return worst
-						}
-						let best = null
-						for (const y of yCands) {
-							const via = [
-								{ x: Math.round(p0.x), y: Math.round(y) },
-								{ x: Math.round(p3.x), y: Math.round(y) },
-							]
-							if (segBlocked(p0, via[0], endFrames)) continue
-							if (segBlocked(via[0], via[1], endFrames)) continue
-							if (segBlocked(via[1], p3, endFrames)) continue
-							if (legInsideOwn(p0, via[0]) > 180 || legInsideOwn(via[1], p3) > 180) continue
-							const cost = Math.abs(p0.y - y) + Math.abs(p3.y - y) + Math.abs(p3.x - p0.x)
-							if (!best || cost < best.cost) best = { via, cost }
-						}
-						for (const x of xCands) {
-							const via = [
-								{ x: Math.round(x), y: Math.round(p0.y) },
-								{ x: Math.round(x), y: Math.round(p3.y) },
-							]
-							if (segBlocked(p0, via[0], endFrames)) continue
-							if (segBlocked(via[0], via[1], endFrames)) continue
-							if (segBlocked(via[1], p3, endFrames)) continue
-							if (legInsideOwn(p0, via[0]) > 180 || legInsideOwn(via[1], p3) > 180) continue
-							const cost = Math.abs(p0.x - x) + Math.abs(p3.x - x) + Math.abs(p3.y - p0.y)
-							if (!best || cost < best.cost) best = { via, cost }
-						}
-						if (!best) {
-							stuck.push(short(a.id))
-							continue
-						}
-						// anchors: pin each terminal where it already sits, so the
-						// chain's bridge segments leave from the real endpoints
-						const anchorOn = (bind, p) => {
-							const bb = editor.getShapePageBounds(bind.toId)
-							if (!bb || !bb.w || !bb.h) return undefined
-							return {
-								x: Math.round(Math.max(0, Math.min(1, (p.x - bb.minX) / bb.w)) * 100) / 100,
-								y: Math.round(Math.max(0, Math.min(1, (p.y - bb.minY) / bb.h)) * 100) / 100,
+							if (cleared) {
+								fixed++
+								touched.updated.push(a.id)
+							} else {
+								editor.updateBinding({ id: startBind.id, type: 'arrow', props: origStart })
+								editor.updateBinding({ id: endBind.id, type: 'arrow', props: origEnd })
+								editor.updateShape({ id: a.id, type: 'arrow', props: origProps })
+								stuck.push(short(a.id))
 							}
-						}
-						const startBind = binds.find((b) => b.props?.terminal === 'start')
-						const endBind = binds.find((b) => b.props?.terminal !== 'start')
-						const fromAnchor = startBind ? anchorOn(startBind, p0) : undefined
-						const toAnchor = endBind ? anchorOn(endBind, p3) : undefined
-						try {
-							await applyOps(editor, [
-								{
-									chain: {
-										id: a.id,
-										points: best.via,
-										...(fromAnchor ? { fromAnchor } : {}),
-										...(toAnchor ? { toAnchor } : {}),
-									},
-								},
-							])
-							fixed++
-							touched.updated.push(a.id)
-						} catch {
-							stuck.push(short(a.id))
 						}
 					}
 					report.push(
-						`fix_crossings -> ${fixed} arrow(s) rerouted around frames via clear corridors${stuck.length ? `; ${stuck.length} could not be cleared: ${stuck.join(', ')}` : ''}`
+						`fix_crossings -> ${fixed} arrow(s) rerouted as plain elbows${stuck.length ? `; ${stuck.length} could not be cleared (left for lint): ${stuck.join(', ')}` : ''}`
 					)
 					break
 				}

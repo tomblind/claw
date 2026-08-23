@@ -22,15 +22,21 @@ needs to score comparably on the measures below and respect the rules.
 
 ## Routing rules
 
-4. **Never exceed what one tldraw elbow can express.** The reference uses
-   zero waypoint chains. Chains are a last resort, not a routing tool.
+4. **Chains are retired.** Every route is a plain elbow; the reference
+   (and the reworked arrows in test/fixtures/reference-arrows.tldr) proves
+   this always suffices. A route that cannot be cleared stays put and lint
+   reports it - visible failure beats hidden complexity.
 5. **Fuse, don't fan.** Arrows from the same source, or into the same
    destination, share the same anchor point (a side's center) and overlap
    along their common run, so several transitions read as one trunk that
    branches. This is the opposite of spreading anchors along a side; visual
    noise goes down when lines coincide.
-6. **Pick each arrow's side to minimize bends and overlap with screens.**
-   The side facing the other endpoint's region, not a fixed convention.
+6. **Anchor sides and positions are a joint decision.** Starts exit at the
+   center of a control side that is close to the frame edge AND points
+   toward the destination. Ends enter on the side that avoids crossings,
+   at a POSITION along that side aligned with where the line arrives, so
+   routes collapse to one or two segments. Fewest bends wins, then
+   shortest.
 
 ## Label rules
 
