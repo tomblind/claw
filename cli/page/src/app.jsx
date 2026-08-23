@@ -976,6 +976,9 @@ async function applyOps(editor, ops) {
 	const stackY = new Map() // screenId -> next y offset for at:"top" stacking
 	// full record ids the batch touched, by category (informational)
 	const touched = { created: [], updated: [], deleted: [] }
+	// shapes deleted by unchain_all in THIS batch: a layout batch computed
+	// against the pre-unchain document may still carry moves for them
+	const swept = new Set()
 
 	/** Resolve an op reference: batch alias, id, short id, frame name, label text. */
 	const ref = (q) => {
@@ -1247,6 +1250,10 @@ async function applyOps(editor, ops) {
 				}
 
 				case 'move': {
+					if (swept.has(String(args.id))) {
+						report.push(`move ${args.id} skipped (swept by unchain_all)`)
+						break
+					}
 					const target = ref(args.id)
 					let nx = target.x
 					let ny = target.y
@@ -1692,6 +1699,10 @@ async function applyOps(editor, ops) {
 								s.meta?.claw === 'chainseg' || (s.type === 'group' && s.meta?.claw === 'chain')
 						)
 					if (debris.length) editor.deleteShapes(debris.map((s) => s.id))
+					for (const s of debris) {
+						swept.add(s.id)
+						swept.add(short(s.id))
+					}
 					touched.updated.push(...heads.map((h) => h.id))
 					report.push(
 						`unchain_all -> ${heads.length} chain(s) restored to plain arrows${debris.length ? `, ${debris.length} orphan fragment(s) swept` : ''}`
@@ -1700,6 +1711,10 @@ async function applyOps(editor, ops) {
 				}
 
 				case 'chain': {
+					if (swept.has(String(args.id))) {
+						report.push(`chain ${args.id} skipped (swept by unchain_all)`)
+						break
+					}
 					const target = ref(args.id)
 					if (target.type !== 'arrow') throw new Error('chain only applies to arrows')
 					unchainArrow(editor, target)
@@ -1805,6 +1820,10 @@ async function applyOps(editor, ops) {
 				}
 
 				case 'route': {
+					if (swept.has(String(args.id))) {
+						report.push(`route ${args.id} skipped (swept by unchain_all)`)
+						break
+					}
 					const target = ref(args.id)
 					if (target.type !== 'arrow') throw new Error('route only applies to arrows')
 					const bindings = { start: null, end: null }

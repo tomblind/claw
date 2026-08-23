@@ -74,5 +74,15 @@ needs to score comparably on the measures below and respect the rules.
   incoming at 0.62 so a start point is never also an end point; same-side
   anchor routes (up-across-down and mirrors) are tried before any chain,
   both in the planner and against real geometry in fix_crossings.
-- Not yet captured: branch-point labels for chained routes, and the final
-  chain (one dense corridor with no single-elbow route).
+- Captured in engine (v0.30.0): chains retired — every route is a plain
+  elbow solved by a joint search over exit sides near the frame edge and
+  entry positions aligned with the arriving line.
+- Captured in engine (v0.31.0): exit-side scoring prefers the side nearest
+  the frame edge over the side pointing at the destination (own-frame
+  pixels cost triple in the route score); same-source routes to DIFFERENT
+  destinations are pulled apart when they run near-but-not-exactly together
+  (exact overlap stays — that is deliberate fusion); a route blocked by a
+  single small leaf screen moves THE SCREEN to open a channel instead of
+  accepting the crossing; single-leaf packs (a lone toast) get a column on
+  the hub's quiet side; hub-to-satellite channels widened to 0.75 of the
+  spacing unit.

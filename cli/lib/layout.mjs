@@ -7,13 +7,15 @@
  * WITH the placement — long edges get dummy vertices that reserve physical
  * channels through intermediate columns, and inter-layer spacing grows with
  * lane count. We consume those routes and translate them into what a tldraw
- * elbow can express (two anchors + one adjustable middle segment). Routes
- * too bendy to translate become waypoint chains. Every translated route is
- * geometrically verified against the screens; anything still crossing a
- * frame is rerouted through a clear corridor by the final fix_crossings
- * pass (rectilinear detours, never arcs). Satellite screens (dead-end modals
- * of a single hub) skip the flow entirely and grid under their hub with
- * hand-built band routing.
+ * elbow can express (two anchors + one adjustable middle segment). Every
+ * route IS a plain elbow — no waypoint chains. A route that crosses a screen
+ * gets a joint re-solve (exit sides near the frame edge x entry positions
+ * aligned with the arriving line); if no clear elbow exists and the blocking
+ * screen is a small leaf, the SCREEN moves to open a channel. Whatever still
+ * crosses after the final fix_crossings pass (same search against real
+ * editor geometry) is left in place for lint to report. Satellite screens
+ * (dead-end modals of a single hub) skip the flow entirely and stack in a
+ * column on the hub's quiet side with fused trunk routing.
  *
  * Results are emitted as ordinary `move` + `route`/`style` ops for the apply
  * pipeline, so layout streams onto the live canvas like any other edit.
@@ -83,12 +85,8 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		if (!packs.has(hub)) packs.set(hub, [])
 		packs.get(hub).push(s.id)
 	}
-	for (const [hub, leaves] of [...packs]) {
-		if (leaves.length < 2) {
-			for (const l of leaves) packOf.delete(l)
-			packs.delete(hub)
-		}
-	}
+	// single-leaf packs are fine: a lone dead-end (a toast off a share sheet)
+	// still belongs in a column on its hub's quiet side, not in the flow
 
 	// ---- shared satellites (reference rule 1) --------------------------------
 	// A low-degree screen referenced by two or more hub-like screens (Settings
@@ -117,7 +115,8 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		const colH =
 			leaves.reduce((acc, l) => acc + byId.get(l).h, 0) + PACK_GAP * (leaves.length - 1)
 		const h = byId.get(hub)
-		footprint.set(hub, { w: h.w + gapX / 2 + colW, h: Math.max(h.h, colH), colW, colH })
+		// 0.75 gap: satellite channels need room for two trunks plus label air
+		footprint.set(hub, { w: h.w + gapX * 0.75 + colW, h: Math.max(h.h, colH), colW, colH })
 	}
 
 	const flowScreens = screens.filter((s) => !packOf.has(s.id) && !satellites.has(s.id))
@@ -206,8 +205,8 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		packSide.set(hub, side)
 		// the hub sits inside the reserved box: at its left edge when the
 		// column is right, at its right edge when the column is left
-		const hubX = side === 1 ? t.x : t.x + f.colW + gapX / 2
-		const colX = side === 1 ? t.x + hubShape.w + gapX / 2 : t.x
+		const hubX = side === 1 ? t.x : t.x + f.colW + gapX * 0.75
+		const colX = side === 1 ? t.x + hubShape.w + gapX * 0.75 : t.x
 		targets.set(hub, { x: Math.round(hubX), y: t.y })
 		let y = t.y
 		for (const leaf of leaves) {
@@ -556,7 +555,11 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 					for (let i = 0; i < c.path.length - 1; i++) {
 						len += Math.abs(c.path[i + 1].x - c.path[i].x) + Math.abs(c.path[i + 1].y - c.path[i].y)
 					}
-					const score = (c.path.length - 2) * 320 + len
+					// every pixel spent inside an own frame costs triple: exiting
+					// through the near edge beats a shorter route through the frame
+					const ownCost =
+						(insideLen(c.path, rectOf(e.from)) + insideLen(c.path, rectOf(e.to))) * 3
+					const score = (c.path.length - 2) * 320 + len + ownCost
 					if (!best || score < best.score) {
 						best = { score, fa: fd.a, ta, mid: c.mid, midVertical: c.mv }
 					}
@@ -608,7 +611,10 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		let best = null
 		for (const c of cands) {
 			const dot = (c.dir.x * tx + c.dir.y * ty) / len
-			const score = c.exitDist + (dot < 0 ? 500 : 0) - dot * 100
+			// not crossing the frame outranks pointing at the destination
+			// (user finding: a bottom button should exit the bottom even when
+			// the destination is up-left)
+			const score = c.exitDist * 3 + (dot < 0 ? 400 : 0) - dot * 60
 			if (!best || score < best.score) best = { score, a: c.a }
 		}
 		return best.a
@@ -749,8 +755,8 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 				((e.from === hub && packOf.get(e.to) === hub) || (e.to === hub && packOf.get(e.from) === hub))
 		)
 		const hubEdgeX = side === 1 ? hubT.x + hubShape.w : hubT.x
-		const laneOut = hubEdgeX + side * (gapX / 4)
-		const laneIn = hubEdgeX + side * (gapX / 4 + 56)
+		const laneOut = hubEdgeX + side * (gapX * 0.3)
+		const laneIn = hubEdgeX + side * (gapX * 0.3 + 64)
 		hubTrunk.set(hub, { laneOut, laneIn, side })
 		for (const e of packEdges) {
 			const outgoing = e.from === hub
@@ -931,32 +937,220 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 	}
 
 	// ---- verify every elbow against every screen ------------------------------
-	// A crossing edge first tries nudged lanes in both orientations; a flow
-	// edge that still crosses falls back to its exact ELK route as a chain;
-	// pack/stray edges without a clear elbow are left for fix_crossings.
-	for (const e of edges) {
-		if (!e.routable || e.chainPts) continue
+	// A crossing edge first tries a nudged lane, then a full joint re-solve.
+	// Runs again after placement repair moves a screen, because a moved screen
+	// changes what every nearby route crosses.
+	const currentPath = (e) => {
 		const fa = anchors.get(`${e.id}:from`)
 		const ta = anchors.get(`${e.id}:to`)
-		if (!fa || !ta) continue
+		if (!fa || !ta) return null
 		const p0 = anchorPoint(endRect(e.fromShape, e.from), fa)
 		const p3 = anchorPoint(endRect(e.toShape, e.to), ta)
-		if (!pathCrosses(elbowPath(p0, p3, e.mid ?? null, !!e.midVertical), e.from, e.to)) continue
-		const clear = findClearMid(p0, p3, e.from, e.to, !!e.midVertical)
-		if (clear) {
-			e.mid = clear.mid
-			e.midVertical = clear.vertical
-			continue
+		return elbowPath(p0, p3, e.mid ?? null, !!e.midVertical)
+	}
+	const verifyRoutes = () => {
+		for (const e of edges) {
+			if (!e.routable || e.chainPts) continue
+			const path = currentPath(e)
+			if (!path) continue
+			if (!pathCrosses(path, e.from, e.to)) continue
+			const clear = findClearMid(path[0], path[path.length - 1], e.from, e.to, !!e.midVertical)
+			if (clear) {
+				e.mid = clear.mid
+				e.midVertical = clear.vertical
+				continue
+			}
+			// full joint re-solve (sides + aligned entries); edges it can't clear
+			// go to fix_crossings, which searches the same space against REAL
+			// geometry. No chains, ever - lint reports whatever survives both.
+			const solved = bestElbow(e)
+			if (solved) {
+				anchors.set(`${e.id}:from`, solved.fa)
+				anchors.set(`${e.id}:to`, solved.ta)
+				e.mid = solved.mid ?? undefined
+				if (solved.mid != null) e.midVertical = solved.midVertical
+			}
 		}
-		// full joint re-solve (sides + aligned entries); edges it can't clear
-		// go to fix_crossings, which searches the same space against REAL
-		// geometry. No chains, ever - lint reports whatever survives both.
-		const solved = bestElbow(e)
-		if (solved) {
-			anchors.set(`${e.id}:from`, solved.fa)
-			anchors.set(`${e.id}:to`, solved.ta)
-			e.mid = solved.mid ?? undefined
-			if (solved.mid != null) e.midVertical = solved.midVertical
+	}
+	verifyRoutes()
+
+	// ---- placement repair: open a channel by moving a blocked screen -----------
+	// When a route still crosses exactly ONE screen and that screen is a small
+	// leaf (a modal, a toast), the screen moves out of the way instead of the
+	// route accepting the crossing. This is how a person fixes it: slide
+	// InviteView down a bit and the AuthGate -> DailyChallenge line has a
+	// channel. Hubs, pack columns, and busy screens never move.
+	{
+		const degree = new Map()
+		for (const e of edges) {
+			if (!e.routable) continue
+			degree.set(e.from, (degree.get(e.from) ?? 0) + 1)
+			degree.set(e.to, (degree.get(e.to) ?? 0) + 1)
+		}
+		const movable = (id) =>
+			!packs.has(id) && !packOf.has(id) && (degree.get(id) ?? 0) <= 3
+		const rectsClash = (r1, r2, m) =>
+			r1.x < r2.x + r2.w + m && r1.x + r1.w + m > r2.x && r1.y < r2.y + r2.h + m && r1.y + r1.h + m > r2.y
+		const crossedScreens = (path, skipA, skipB) => {
+			const out = []
+			for (const s of screens) {
+				if (s.id === skipA || s.id === skipB) continue
+				const r = rectOf(s.id)
+				const infl = { x: r.x - 4, y: r.y - 4, w: r.w + 8, h: r.h + 8 }
+				for (let i = 0; i < path.length - 1; i++) {
+					if (segHits(path[i], path[i + 1], infl)) {
+						out.push(s.id)
+						break
+					}
+				}
+			}
+			return out
+		}
+		let nudged = 0
+		for (let round = 0; round < 3; round++) {
+			let moved = false
+			for (const e of edges) {
+				if (!e.routable || e.chainPts) continue
+				const path = currentPath(e)
+				if (!path) continue
+				const hit = crossedScreens(path, e.from, e.to)
+				if (hit.length !== 1 || !movable(hit[0])) continue
+				const sid = hit[0]
+				const r = rectOf(sid)
+				// candidate shifts: slide the screen fully past each offending
+				// segment (plus 80px of air), smallest move first
+				const cands = []
+				for (let i = 0; i < path.length - 1; i++) {
+					const a = path[i]
+					const b = path[i + 1]
+					if (!segHits(a, b, { x: r.x - 4, y: r.y - 4, w: r.w + 8, h: r.h + 8 })) continue
+					if (Math.abs(a.y - b.y) < 1) {
+						cands.push({ dx: 0, dy: a.y + 80 - r.y })
+						cands.push({ dx: 0, dy: a.y - 80 - (r.y + r.h) })
+					} else {
+						cands.push({ dx: a.x + 80 - r.x, dy: 0 })
+						cands.push({ dx: a.x - 80 - (r.x + r.w), dy: 0 })
+					}
+				}
+				cands.sort((c1, c2) => Math.hypot(c1.dx, c1.dy) - Math.hypot(c2.dx, c2.dy))
+				for (const c of cands) {
+					if (Math.hypot(c.dx, c.dy) > gapY * 1.5) continue
+					const nr = { x: r.x + c.dx, y: r.y + c.dy, w: r.w, h: r.h }
+					if (screens.some((o) => o.id !== sid && rectsClash(nr, rectOf(o.id), 48))) continue
+					const t = targets.get(sid)
+					targets.set(sid, { x: Math.round(t.x + c.dx), y: Math.round(t.y + c.dy) })
+					const d = deltas.get(sid) ?? { dx: 0, dy: 0 }
+					deltas.set(sid, { dx: d.dx + c.dx, dy: d.dy + c.dy })
+					// a follow-up move op wins over the one already emitted; the
+					// screen's inferred children and loose arrows ride along too
+					const nt = targets.get(sid)
+					ops.push({ move: { id: sid, to: { x: nt.x, y: nt.y } } })
+					for (const child of page.shapes) {
+						if (!child.parentInferred || rootOf(child.id) !== sid) continue
+						ops.push({ move: { id: child.id, by: { dx: c.dx, dy: c.dy } } })
+					}
+					for (const a of page.arrows) {
+						const bound = a.start?.how === 'bound' && a.end?.how === 'bound'
+						if (bound || !a.start || !a.end) continue
+						if (a.rootStart === sid && a.rootEnd === sid) {
+							ops.push({ move: { id: a.id, by: { dx: c.dx, dy: c.dy } } })
+						}
+					}
+					nudged++
+					moved = true
+					break
+				}
+			}
+			if (!moved) break
+			verifyRoutes()
+		}
+		if (nudged) report.push(`moved ${nudged} screen${nudged === 1 ? '' : 's'} to open route channels`)
+	}
+
+	// ---- separate same-source routes to different destinations -----------------
+	// Fusion is for arrows that share a destination or a trunk on purpose. Two
+	// arrows leaving the same frame for DIFFERENT screens must stay readable as
+	// two lines: when their paths run together (coincident or closer than 28px
+	// for a long stretch), one start anchor slides along its side until the
+	// pair separates.
+	{
+		const proximityLen = (pa, pb, near) => {
+			let total = 0
+			for (let i = 0; i < pa.length - 1; i++) {
+				const a0 = pa[i]
+				const a1 = pa[i + 1]
+				const aVert = Math.abs(a0.x - a1.x) < 1
+				for (let j = 0; j < pb.length - 1; j++) {
+					const b0 = pb[j]
+					const b1 = pb[j + 1]
+					const bVert = Math.abs(b0.x - b1.x) < 1
+					if (aVert !== bVert) continue
+					if (aVert) {
+						if (Math.abs(a0.x - b0.x) > near) continue
+						const lo = Math.max(Math.min(a0.y, a1.y), Math.min(b0.y, b1.y))
+						const hi = Math.min(Math.max(a0.y, a1.y), Math.max(b0.y, b1.y))
+						if (hi > lo) total += hi - lo
+					} else {
+						if (Math.abs(a0.y - b0.y) > near) continue
+						const lo = Math.max(Math.min(a0.x, a1.x), Math.min(b0.x, b1.x))
+						const hi = Math.min(Math.max(a0.x, a1.x), Math.max(b0.x, b1.x))
+						if (hi > lo) total += hi - lo
+					}
+				}
+			}
+			return total
+		}
+		let separated = 0
+		const routables = edges.filter((e) => e.routable && !e.chainPts && !e.laneAbs)
+		for (let i = 0; i < routables.length; i++) {
+			for (let j = i + 1; j < routables.length; j++) {
+				const a = routables[i]
+				const b = routables[j]
+				if (a.from !== b.from || a.to === b.to) continue
+				const pa = currentPath(a)
+				const pb = currentPath(b)
+				if (!pa || !pb) continue
+				// exactly-shared runs are deliberate fusion (rule 5) and don't
+				// count; NEAR-but-not-exact parallel runs are what reads as a
+				// confusing accidental overlap
+				const confusion = (p1, p2) => proximityLen(p1, p2, 28) - proximityLen(p1, p2, 2)
+				if (confusion(pa, pb) < 80) continue
+				// slide the shorter route's start along its side, then sweep its
+				// lane; keep the first variant that pulls the pair apart cleanly
+				const lenOf = (p) => {
+					let l = 0
+					for (let k = 0; k < p.length - 1; k++) l += Math.abs(p[k + 1].x - p[k].x) + Math.abs(p[k + 1].y - p[k].y)
+					return l
+				}
+				const mover = lenOf(pa) <= lenOf(pb) ? a : b
+				const other = mover === a ? b : a
+				const fa = anchors.get(`${mover.id}:from`)
+				if (!fa) continue
+				const onVertSide = fa.x === 0 || fa.x === 1
+				const fracs = [0.28, 0.72, 0.2, 0.8]
+				let fixed = false
+				for (const f of fracs) {
+					const cand = onVertSide ? { x: fa.x, y: f } : { x: f, y: fa.y }
+					for (const m of [mover.mid ?? null, null, 0.5, 0.35, 0.65, 0.25, 0.75]) {
+						const p0 = anchorPoint(endRect(mover.fromShape, mover.from), cand)
+						const ta = anchors.get(`${mover.id}:to`)
+						if (!ta) break
+						const p3 = anchorPoint(endRect(mover.toShape, mover.to), ta)
+						const np = elbowPath(p0, p3, m, !!mover.midVertical)
+						if (pathCrosses(np, mover.from, mover.to)) continue
+						if (confusion(np, currentPath(other)) >= 80) continue
+						anchors.set(`${mover.id}:from`, cand)
+						mover.mid = m ?? undefined
+						fixed = true
+						separated++
+						break
+					}
+					if (fixed) break
+				}
+			}
+		}
+		if (separated) {
+			report.push(`separated ${separated} same-source route${separated === 1 ? '' : 's'} to different screens`)
 		}
 	}
 
