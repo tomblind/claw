@@ -8,6 +8,7 @@ import React from 'react'
 import { createRoot } from 'react-dom/client'
 import * as TL from 'tldraw'
 import { useSync } from '@tldraw/sync'
+import lz from 'lz-string'
 import 'tldraw/tldraw.css'
 import {
 	CUSTOM_COLOR_SLOTS,
@@ -2238,10 +2239,69 @@ function neutralizeArrowZClamp(editor) {
 	}
 }
 
+/**
+ * Insecure-context clipboard shim. navigator.clipboard exists only on secure
+ * origins (https, localhost), so a canvas opened over the LAN
+ * (http://192.168...) has no async clipboard API at all. tldraw's copy
+ * handler suppresses the native copy event and then finds no API to write
+ * with, so Ctrl+C silently writes NOTHING - and the context menu hides
+ * Paste, which genuinely cannot work without the API. The native copy/cut
+ * events can still write the real clipboard synchronously, so this
+ * capture-phase handler runs before tldraw's and writes the exact payload
+ * tldraw would have written; tldraw's own paste handler already falls back
+ * to the event data when the async API is missing, so Ctrl+V then works.
+ */
+function installInsecureClipboardShim(editor) {
+	if (navigator.clipboard) return
+	const doc = editor.getContainerDocument?.() ?? document
+	const write = (e, cut) => {
+		try {
+			if (!e.clipboardData) return
+			if (editor.getSelectedShapeIds().length === 0) return
+			if (editor.getEditingShapeId() !== null) return
+			const content = editor.getContentFromCurrentPage(editor.getSelectedShapeIds())
+			if (!content) return
+			const { assets, ...otherData } = content
+			// the same wire format tldraw's own copy produces, so any tldraw
+			// (including a secure-context tab) can paste it
+			const payload = JSON.stringify({
+				type: 'application/tldraw',
+				kind: 'content',
+				version: 3,
+				data: {
+					assets: assets || [],
+					otherCompressed: lz.compressToBase64(JSON.stringify(otherData)),
+				},
+			})
+			const text =
+				content.shapes
+					.map((s) => {
+						try {
+							return editor.getShapeUtil(s).getText(s)
+						} catch {
+							return null
+						}
+					})
+					.filter(Boolean)
+					.join(' ') || ' '
+			e.clipboardData.setData('text/html', `<div data-tldraw>${payload}</div>`)
+			e.clipboardData.setData('text/plain', text)
+			e.preventDefault()
+			e.stopImmediatePropagation()
+			if (cut) editor.deleteShapes(editor.getSelectedShapeIds())
+		} catch {
+			// fall through to tldraw's handler (which will no-op, but never break)
+		}
+	}
+	doc.addEventListener('copy', (e) => write(e, false), { capture: true })
+	doc.addEventListener('cut', (e) => write(e, true), { capture: true })
+}
+
 function onMount(editor) {
 	try {
 		window.__editor = editor
 		setupHost(editor)
+		installInsecureClipboardShim(editor)
 		applyClawTheme(editor)
 		// live retheme: a `theme` op lands in document meta and every connected
 		// tab restyles without reloading

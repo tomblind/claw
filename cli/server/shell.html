@@ -434,8 +434,22 @@
 	$('globe').onclick = async () => {
 		if (!activeId) return
 		const base = shellState.lan[0] ?? location.origin
+		const url = `${base}/f/${activeId}`
 		try {
-			await navigator.clipboard.writeText(`${base}/f/${activeId}`)
+			if (navigator.clipboard) {
+				await navigator.clipboard.writeText(url)
+			} else {
+				// no async clipboard on insecure origins (LAN http) — the
+				// selection-based path still works everywhere
+				const ta = document.createElement('textarea')
+				ta.value = url
+				ta.style.position = 'fixed'
+				ta.style.opacity = '0'
+				document.body.appendChild(ta)
+				ta.select()
+				document.execCommand('copy')
+				ta.remove()
+			}
 			toast('Link copied — open it in any browser on your network')
 		} catch {
 			toast('Could not access the clipboard')
