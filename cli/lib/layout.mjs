@@ -485,6 +485,42 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		return null
 	}
 
+	/**
+	 * Anchor side for an endpoint bound to a control INSIDE a frame: exit
+	 * through the frame edge that is close to the control AND points roughly
+	 * toward the other end. A button at the frame's bottom must not exit
+	 * through the top and drag its arrow across the whole frame (user
+	 * finding, the DiscoveryIntro "Let's Play" case).
+	 */
+	const chooseControlAnchor = (ctl, frame, toward, frac) => {
+		const cands = [
+			{ exitDist: Math.max(0, ctl.x - frame.x), dir: { x: -1, y: 0 }, a: { x: 0, y: frac } },
+			{
+				exitDist: Math.max(0, frame.x + frame.w - (ctl.x + ctl.w)),
+				dir: { x: 1, y: 0 },
+				a: { x: 1, y: frac },
+			},
+			{ exitDist: Math.max(0, ctl.y - frame.y), dir: { x: 0, y: -1 }, a: { x: frac, y: 0 } },
+			{
+				exitDist: Math.max(0, frame.y + frame.h - (ctl.y + ctl.h)),
+				dir: { x: 0, y: 1 },
+				a: { x: frac, y: 1 },
+			},
+		]
+		const cx = ctl.x + ctl.w / 2
+		const cy = ctl.y + ctl.h / 2
+		const tx = toward.x - cx
+		const ty = toward.y - cy
+		const len = Math.hypot(tx, ty) || 1
+		let best = null
+		for (const c of cands) {
+			const dot = (c.dir.x * tx + c.dir.y * ty) / len
+			const score = c.exitDist + (dot < 0 ? 500 : 0) - dot * 100
+			if (!best || score < best.score) best = { score, a: c.a }
+		}
+		return best.a
+	}
+
 	/** normalized anchor on rect r for a route endpoint p leaving toward q */
 	const anchorFor = (r, p, q) => {
 		const horizontal = Math.abs(q.x - p.x) >= Math.abs(q.y - p.y)
@@ -506,8 +542,20 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		e.pts = dejog(simplify(e.elkRoute), 48)
 		const fr = endRect(e.fromShape, e.from)
 		const tr = endRect(e.toShape, e.to)
-		anchors.set(`${e.id}:from`, anchorFor(fr, e.pts[0], e.pts[1]))
-		anchors.set(`${e.id}:to`, anchorFor(tr, e.pts[e.pts.length - 1], e.pts[e.pts.length - 2]))
+		// control-bound endpoints pick their own exit side (nearest frame edge
+		// toward the other end); frame-bound endpoints follow ELK's route
+		anchors.set(
+			`${e.id}:from`,
+			e.fromShape !== e.from
+				? chooseControlAnchor(fr, rectOf(e.from), e.pts[e.pts.length - 1], 0.38)
+				: anchorFor(fr, e.pts[0], e.pts[1])
+		)
+		anchors.set(
+			`${e.id}:to`,
+			e.toShape !== e.to
+				? chooseControlAnchor(tr, rectOf(e.to), e.pts[0], 0.62)
+				: anchorFor(tr, e.pts[e.pts.length - 1], e.pts[e.pts.length - 2])
+		)
 		flowRouted.push(e)
 	}
 
@@ -609,7 +657,7 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		)
 		const hubEdgeX = side === 1 ? hubT.x + hubShape.w : hubT.x
 		const laneOut = hubEdgeX + side * (gapX / 4)
-		const laneIn = hubEdgeX + side * (gapX / 4 + 36)
+		const laneIn = hubEdgeX + side * (gapX / 4 + 56)
 		for (const e of packEdges) {
 			const outgoing = e.from === hub
 			const hubEnd = outgoing ? 'from' : 'to'
@@ -651,13 +699,20 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		const fc = { x: fr.x + fr.w / 2, y: fr.y + fr.h / 2 }
 		const tc = { x: tr.x + tr.w / 2, y: tr.y + tr.h / 2 }
 		const horizontal = Math.abs(tc.x - fc.x) >= Math.abs(tc.y - fc.y)
-		// 0.38/0.62: outgoing and incoming never share a point (see fuse pass)
-		const fa = horizontal
-			? { x: tc.x > fc.x ? 1 : 0, y: 0.38 }
-			: { x: 0.38, y: tc.y > fc.y ? 1 : 0 }
-		const ta = horizontal
-			? { x: tc.x > fc.x ? 0 : 1, y: 0.62 }
-			: { x: 0.62, y: tc.y > fc.y ? 0 : 1 }
+		// 0.38/0.62: outgoing and incoming never share a point (see fuse pass);
+		// control-bound endpoints exit through their nearest sensible frame edge
+		const fa =
+			e.fromShape !== e.from
+				? chooseControlAnchor(fr, rectOf(e.from), tc, 0.38)
+				: horizontal
+					? { x: tc.x > fc.x ? 1 : 0, y: 0.38 }
+					: { x: 0.38, y: tc.y > fc.y ? 1 : 0 }
+		const ta =
+			e.toShape !== e.to
+				? chooseControlAnchor(tr, rectOf(e.to), fc, 0.62)
+				: horizontal
+					? { x: tc.x > fc.x ? 0 : 1, y: 0.62 }
+					: { x: 0.62, y: tc.y > fc.y ? 0 : 1 }
 		anchors.set(`${e.id}:from`, fa)
 		anchors.set(`${e.id}:to`, ta)
 		const p0 = anchorPoint(fr, fa)
@@ -680,7 +735,7 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 	// ---- minimum lane separation (user rule: unrelated near-parallel runs
 	// keep their distance; a fused trunk is one line and exempt within itself)
 	{
-		const MIN_SEP = 48
+		const MIN_SEP = 56
 		const laneEntries = []
 		for (const e of edges) {
 			if (!e.routable || e.mid == null || e.chainPts) continue
