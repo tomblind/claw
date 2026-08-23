@@ -79,6 +79,15 @@ needs to score comparably on the measures below and respect the rules.
 - Captured in engine (v0.30.0): chains retired — every route is a plain
   elbow solved by a joint search over exit sides near the frame edge and
   entry positions aligned with the arriving line.
+- Cleanup (v0.36.0): the planner is the single author of anchors. The
+  joint search gained 0.28/0.72 position variants on both ends (they used
+  to live only in the executor's repair search) and penalizes same-side
+  loops, the shape tldraw draws least predictably; the executor's
+  fix_crossings is a verifier again (detect + mid nudge, everything else
+  left for lint); ONE separation pass enforces the whole fusion rule;
+  every emitted lane is calibrated against real geometry (laneX/laneY);
+  dead chain machinery deleted; placement repair caps at two moves per
+  screen so rounds cannot oscillate.
 - Captured in engine (v0.35.0): fusion requires a truly shared terminal
   point. Pack edges group by their hub-side terminal point and each group
   gets its own lane at 56px steps (shortest runs innermost); flow-edge

@@ -1438,9 +1438,10 @@ async function applyOps(editor, ops) {
 				case 'fix_crossings': {
 					// editor-verified collision repair: for every bound arrow whose
 					// REAL rendered path cuts through a frame it isn't connected to,
-					// try arc bends (small to large, both sides) until the geometry
-					// actually clears. Runs as layout's last op; the guesswork-free
-					// counterpart to route translation.
+					// sweep the elbow's middle segment until the geometry actually
+					// clears; anything a mid nudge can't fix stays put for lint.
+					// Runs as layout's last op - a verifier, not a second router:
+					// the planner is the single author of anchors.
 					const frames = editor.getCurrentPageShapes().filter((s) => s.type === 'frame')
 					const frameIdOf = (t) =>
 						t == null ? null : t.type === 'frame' ? t.id : (containingFrame(editor, t)?.id ?? null)
@@ -1528,158 +1529,15 @@ async function applyOps(editor, ops) {
 							}
 							editor.updateShape({ id: a.id, type: 'arrow', props: orig })
 						}
-						// next: same-side anchor pairs (up-across-down and mirror
-						// routes) - tldraw's elbow router draws these natively once
-						// both terminals sit on matching sides. Verified against the
-						// real geometry like everything else here.
-						{
-							const startBind = binds.find((b) => b.props?.terminal === 'start')
-							const endBind = binds.find((b) => b.props?.terminal !== 'start')
-							if (startBind && endBind) {
-								const origStart = { ...startBind.props }
-								const origEnd = { ...endBind.props }
-								const setAnchors = (sa, ea) => {
-									editor.updateBinding({
-										id: startBind.id,
-										type: 'arrow',
-										props: { ...startBind.props, normalizedAnchor: sa, snap: 'edge-point', isPrecise: true },
-									})
-									editor.updateBinding({
-										id: endBind.id,
-										type: 'arrow',
-										props: { ...endBind.props, normalizedAnchor: ea, snap: 'edge-point', isPrecise: true },
-									})
-								}
-								const pairs = [
-									['top', { x: 0.38, y: 0 }, { x: 0.62, y: 0 }],
-									['bottom', { x: 0.38, y: 1 }, { x: 0.62, y: 1 }],
-									['left', { x: 0, y: 0.38 }, { x: 0, y: 0.62 }],
-									['right', { x: 1, y: 0.38 }, { x: 1, y: 0.62 }],
-								]
-								// a side is only usable when the bound control sits near
-								// that edge of its own frame (else the first leg drags
-								// through the frame interior)
-								const nearEdge = (bind, side) => {
-									const ctl = editor.getShapePageBounds(bind.toId)
-									const fid = frameIdOf(editor.getShape(bind.toId))
-									const fr = fid ? editor.getShapePageBounds(fid) : null
-									if (!ctl || !fr) return true
-									if (side === 'top') return ctl.minY - fr.minY <= 180
-									if (side === 'bottom') return fr.maxY - ctl.maxY <= 180
-									if (side === 'left') return ctl.minX - fr.minX <= 180
-									return fr.maxX - ctl.maxX <= 180
-								}
-								let cleared = false
-								for (const [side, sa, ea] of pairs) {
-									if (!nearEdge(startBind, side) || !nearEdge(endBind, side)) continue
-									setAnchors(sa, ea)
-									editor.updateShape({ id: a.id, type: 'arrow', props: { kind: 'elbow' } })
-									if (!crossings(a.id, endFrames).length) {
-										cleared = true
-										break
-									}
-								}
-								if (cleared) {
-									fixed++
-									touched.updated.push(a.id)
-									continue
-								}
-								editor.updateBinding({ id: startBind.id, type: 'arrow', props: origStart })
-								editor.updateBinding({ id: endBind.id, type: 'arrow', props: origEnd })
-							}
-						}
-						// last resort (chains are retired): joint re-anchor search on
-						// REAL geometry - every near-edge exit side of the start
-						// control x every side of the end target, with the entry
-						// POSITION aligned to the exit point, plus a mid sweep per
-						// combination. Whatever this can't clear stays put and lint
-						// reports it.
-						{
-							const startBind = binds.find((b) => b.props?.terminal === 'start')
-							const endBind = binds.find((b) => b.props?.terminal !== 'start')
-							if (!startBind || !endBind) {
-								stuck.push(short(a.id))
-								continue
-							}
-							const origStart = { ...startBind.props }
-							const origEnd = { ...endBind.props }
-							const origProps = {
-								kind: editor.getShape(a.id).props.kind,
-								elbowMidPoint: editor.getShape(a.id).props.elbowMidPoint,
-							}
-							const sidesOf = (bind) => {
-								const ctl = editor.getShapePageBounds(bind.toId)
-								const fid = frameIdOf(editor.getShape(bind.toId))
-								const fr = fid ? editor.getShapePageBounds(fid) : ctl
-								if (!ctl || !fr) return []
-								const out = []
-								if (ctl.minX - fr.minX <= 220) out.push({ side: 'left', a: { x: 0, y: 0.5 } })
-								if (fr.maxX - ctl.maxX <= 220) out.push({ side: 'right', a: { x: 1, y: 0.5 } })
-								if (ctl.minY - fr.minY <= 220) out.push({ side: 'top', a: { x: 0.5, y: 0 } })
-								if (fr.maxY - ctl.maxY <= 220) out.push({ side: 'bottom', a: { x: 0.5, y: 1 } })
-								return out
-							}
-							const setAnchor = (bind, anchor) =>
-								editor.updateBinding({
-									id: bind.id,
-									type: 'arrow',
-									props: { ...bind.props, normalizedAnchor: anchor, snap: 'edge-point', isPrecise: true },
-								})
-							const startBounds = editor.getShapePageBounds(startBind.toId)
-							const endBounds = editor.getShapePageBounds(endBind.toId)
-							const posVariants = (sideDef, pos) =>
-								sideDef.side === 'top' || sideDef.side === 'bottom'
-									? { x: pos, y: sideDef.a.y }
-									: { x: sideDef.a.x, y: pos }
-							let cleared = false
-							search: for (const fs of sidesOf(startBind)) {
-								for (const fpos of [0.5, 0.28, 0.72]) {
-									const fa = posVariants(fs, fpos)
-									const p0 = {
-										x: startBounds.minX + fa.x * startBounds.width,
-										y: startBounds.minY + fa.y * startBounds.height,
-									}
-									for (const ts of sidesOf(endBind)) {
-										const entries = []
-										if (ts.side === 'top' || ts.side === 'bottom') {
-											const fx = (p0.x - endBounds.minX) / endBounds.width
-											if (fx > 0.06 && fx < 0.94) entries.push({ x: Math.round(fx * 1000) / 1000, y: ts.a.y })
-										} else {
-											const fy = (p0.y - endBounds.minY) / endBounds.height
-											if (fy > 0.06 && fy < 0.94) entries.push({ x: ts.a.x, y: Math.round(fy * 1000) / 1000 })
-										}
-										for (const epos of [0.5, 0.28, 0.72]) entries.push(posVariants(ts, epos))
-										for (const ea of entries) {
-											setAnchor(startBind, fa)
-											setAnchor(endBind, ea)
-											for (const m of [null, 0.5, 0.3, 0.7, 0.15, 0.85]) {
-												editor.updateShape({
-													id: a.id,
-													type: 'arrow',
-													props: { kind: 'elbow', ...(m != null ? { elbowMidPoint: m } : {}) },
-												})
-												if (!crossings(a.id, endFrames).length) {
-													cleared = true
-													break search
-												}
-											}
-										}
-									}
-								}
-							}
-							if (cleared) {
-								fixed++
-								touched.updated.push(a.id)
-							} else {
-								editor.updateBinding({ id: startBind.id, type: 'arrow', props: origStart })
-								editor.updateBinding({ id: endBind.id, type: 'arrow', props: origEnd })
-								editor.updateShape({ id: a.id, type: 'arrow', props: origProps })
-								stuck.push(short(a.id))
-							}
-						}
+						// the planner's side-faithful model and lane calibration make the
+						// planner the single author of anchors; when a mid sweep can't
+						// clear a crossing here, the arrow stays put and lint reports it
+						// (an earlier repair vocabulary here once rewrote a correct
+						// route into a far-side loop)
+						stuck.push(short(a.id))
 					}
 					report.push(
-						`fix_crossings -> ${fixed} arrow(s) rerouted as plain elbows${stuck.length ? `; ${stuck.length} could not be cleared (left for lint): ${stuck.join(', ')}` : ''}`
+						`fix_crossings -> ${fixed} arrow(s) cleared by a mid nudge${stuck.length ? `; ${stuck.length} left for lint: ${stuck.join(', ')}` : ''}`
 					)
 					break
 				}
@@ -1859,13 +1717,15 @@ async function applyOps(editor, ops) {
 					if (Object.keys(patch).length) {
 						editor.updateShape({ id: target.id, type: 'arrow', props: patch })
 					}
-					// laneX: calibrate the midpoint against REAL geometry so the lane
-					// lands on the exact requested x. tldraw normalizes elbowMidPoint
-					// over its own span, so a planner-solved mid drifts a few px -
-					// differently per arrow - and trunk arrows meant to overlap end
-					// up as separate near-parallel lines. Lane position is linear in
-					// the midpoint, so two measurements give the exact value.
-					if (args.laneX != null) {
+					// laneX/laneY: calibrate the midpoint against REAL geometry so the
+					// lane lands on the exact requested position. tldraw normalizes
+					// elbowMidPoint over its own span, so a planner-solved mid drifts
+					// a few px - differently per arrow - and runs meant to coincide
+					// (or stay apart) drift. Lane position is linear in the midpoint,
+					// so two measurements give the exact value.
+					if (args.laneX != null || args.laneY != null) {
+						const wantVertical = args.laneX != null
+						const wantPos = wantVertical ? args.laneX : args.laneY
 						const laneOf = (id) => {
 							try {
 								const g = editor.getShapeGeometry(id)
@@ -1875,12 +1735,13 @@ async function applyOps(editor, ops) {
 								for (let i = 0; i < pts.length - 1; i++) {
 									const p = pts[i]
 									const q = pts[i + 1]
-									const len = Math.abs(p.y - q.y)
-									if (Math.abs(p.x - q.x) < 2 && (!best || len > best.len)) {
-										best = { x: (p.x + q.x) / 2, len }
-									}
+									const isV = Math.abs(p.x - q.x) < 2
+									if (isV !== wantVertical) continue
+									const len = wantVertical ? Math.abs(p.y - q.y) : Math.abs(p.x - q.x)
+									const pos = wantVertical ? (p.x + q.x) / 2 : (p.y + q.y) / 2
+									if (!best || len > best.len) best = { pos, len }
 								}
-								return best ? best.x : null
+								return best ? best.pos : null
 							} catch {
 								return null
 							}
@@ -1893,15 +1754,15 @@ async function applyOps(editor, ops) {
 							})
 						const m0 = editor.getShape(target.id).props.elbowMidPoint ?? 0.5
 						const x0 = laneOf(target.id)
-						if (x0 != null && Math.abs(x0 - args.laneX) > 1) {
+						if (x0 != null && Math.abs(x0 - wantPos) > 1) {
 							const m1 = m0 > 0.5 ? m0 - 0.15 : m0 + 0.15
 							setMid(m1)
 							const x1 = laneOf(target.id)
 							if (x1 != null && Math.abs(x1 - x0) > 0.5) {
-								setMid(m0 + ((args.laneX - x0) * (m1 - m0)) / (x1 - x0))
+								setMid(m0 + ((wantPos - x0) * (m1 - m0)) / (x1 - x0))
 								const xf = laneOf(target.id)
 								// keep the calibrated value only if it actually improved
-								if (xf == null || Math.abs(xf - args.laneX) >= Math.abs(x0 - args.laneX)) setMid(m0)
+								if (xf == null || Math.abs(xf - wantPos) >= Math.abs(x0 - wantPos)) setMid(m0)
 							} else {
 								setMid(m0)
 							}

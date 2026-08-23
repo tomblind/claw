@@ -416,7 +416,7 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 	/**
 	 * Remove short perpendicular jogs from an orthogonal polyline: ELK's
 	 * staircase routes often differ from a clean elbow only by sub-gap
-	 * doglegs, and every removed jog is a chain that never gets created.
+	 * doglegs, and every removed jog is a bend the final elbow never needs.
 	 * Endpoint-adjacent points stay put (they are anchored on screens).
 	 */
 	const dejog = (ptsIn, tol) => {
@@ -597,61 +597,79 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		}
 		const fromDefs = sideDefs(fr, rectOf(e.from))
 		const toDefs = sideDefs(tr, rectOf(e.to))
+		// positions along a side: the center, plus 0.28/0.72 variants - the
+		// variants are what thread a route through a narrow corridor the side
+		// center cannot reach (they used to live only in the executor's
+		// repair search; the planner is the single author of anchors now)
+		const posVariant = (def, pos) =>
+			def.side === 'top' || def.side === 'bottom' ? { x: pos, y: def.a.y } : { x: def.a.x, y: pos }
 		let best = null
 		for (const fd of fromDefs) {
-			const p0 = anchorPoint(fr, fd.a)
-			for (const td of toDefs) {
-				// align the entry with the arriving line where geometry allows
-				let ta = { ...td.a }
-				if (td.side === 'top' || td.side === 'bottom') {
-					const fracX = (p0.x - tr.x) / tr.w
-					if (fracX > 0.06 && fracX < 0.94) ta = { x: Math.round(fracX * 1000) / 1000, y: td.a.y }
-				} else {
-					const fracY = (p0.y - tr.y) / tr.h
-					if (fracY > 0.06 && fracY < 0.94) ta = { x: td.a.x, y: Math.round(fracY * 1000) / 1000 }
-				}
-				const p3 = anchorPoint(tr, ta)
-				const fromVert = fd.side === 'top' || fd.side === 'bottom'
-				const toVert = td.side === 'top' || td.side === 'bottom'
-				const cands = []
-				if (fromVert && toVert) {
-					if (Math.abs(p0.x - p3.x) < 2) cands.push({ path: [p0, p3], mid: null, mv: false })
+			for (const fpos of [0.5, 0.28, 0.72]) {
+				const fa = posVariant(fd, fpos)
+				const p0 = anchorPoint(fr, fa)
+				for (const td of toDefs) {
+					// entries: aligned with the arriving line where geometry allows,
+					// plus the position variants
+					const tas = []
+					if (td.side === 'top' || td.side === 'bottom') {
+						const fracX = (p0.x - tr.x) / tr.w
+						if (fracX > 0.06 && fracX < 0.94) {
+							tas.push({ x: Math.round(fracX * 1000) / 1000, y: td.a.y })
+						}
+					} else {
+						const fracY = (p0.y - tr.y) / tr.h
+						if (fracY > 0.06 && fracY < 0.94) {
+							tas.push({ x: td.a.x, y: Math.round(fracY * 1000) / 1000 })
+						}
+					}
+					for (const tpos of [0.5, 0.28, 0.72]) tas.push(posVariant(td, tpos))
+					const fromVert = fd.side === 'top' || fd.side === 'bottom'
+					const toVert = td.side === 'top' || td.side === 'bottom'
 					const sameSide = fd.side === td.side
-					const bandY = sameSide
-						? fd.side === 'top'
-							? Math.min(p0.y, p3.y) - 80
-							: Math.max(p0.y, p3.y) + 80
-						: (p0.y + p3.y) / 2
-					cands.push({
-						path: [p0, { x: p0.x, y: bandY }, { x: p3.x, y: bandY }, p3],
-						mid: sameSide ? null : 0.5,
-						mv: false,
-					})
-				} else if (fromVert) {
-					cands.push({ path: [p0, { x: p0.x, y: p3.y }, p3], mid: null, mv: false })
-				} else if (toVert) {
-					cands.push({ path: [p0, { x: p3.x, y: p0.y }, p3], mid: null, mv: true })
-				} else {
-					if (Math.abs(p0.y - p3.y) < 2) cands.push({ path: [p0, p3], mid: null, mv: true })
-					const sameSide = fd.side === td.side
-					const bandX = sameSide
-						? fd.side === 'left'
-							? Math.min(p0.x, p3.x) - 80
-							: Math.max(p0.x, p3.x) + 80
-						: (p0.x + p3.x) / 2
-					cands.push({
-						path: [p0, { x: bandX, y: p0.y }, { x: bandX, y: p3.y }, p3],
-						mid: sameSide ? null : 0.5,
-						mv: true,
-					})
-				}
-				for (const c of cands) {
-					if (!exitLegOk(fd.side, c.path[0], c.path[1])) continue
-					if (!entryLegOk(td.side, c.path[c.path.length - 2], c.path[c.path.length - 1])) continue
-					if (pathCrosses(c.path, e.from, e.to)) continue
-					const score = pathScore(c.path, e.from, e.to)
-					if (!best || score < best.score) {
-						best = { score, fa: fd.a, ta, mid: c.mid, midVertical: c.mv }
+					for (const ta of tas) {
+						const p3 = anchorPoint(tr, ta)
+						const cands = []
+						if (fromVert && toVert) {
+							if (Math.abs(p0.x - p3.x) < 2) cands.push({ path: [p0, p3], mid: null, mv: false })
+							const bandY = sameSide
+								? fd.side === 'top'
+									? Math.min(p0.y, p3.y) - 80
+									: Math.max(p0.y, p3.y) + 80
+								: (p0.y + p3.y) / 2
+							cands.push({
+								path: [p0, { x: p0.x, y: bandY }, { x: p3.x, y: bandY }, p3],
+								mid: sameSide ? null : 0.5,
+								mv: false,
+							})
+						} else if (fromVert) {
+							cands.push({ path: [p0, { x: p0.x, y: p3.y }, p3], mid: null, mv: false })
+						} else if (toVert) {
+							cands.push({ path: [p0, { x: p3.x, y: p0.y }, p3], mid: null, mv: true })
+						} else {
+							if (Math.abs(p0.y - p3.y) < 2) cands.push({ path: [p0, p3], mid: null, mv: true })
+							const bandX = sameSide
+								? fd.side === 'left'
+									? Math.min(p0.x, p3.x) - 80
+									: Math.max(p0.x, p3.x) + 80
+								: (p0.x + p3.x) / 2
+							cands.push({
+								path: [p0, { x: bandX, y: p0.y }, { x: bandX, y: p3.y }, p3],
+								mid: sameSide ? null : 0.5,
+								mv: true,
+							})
+						}
+						for (const c of cands) {
+							if (!exitLegOk(fd.side, c.path[0], c.path[1])) continue
+							if (!entryLegOk(td.side, c.path[c.path.length - 2], c.path[c.path.length - 1])) continue
+							if (pathCrosses(c.path, e.from, e.to)) continue
+							// same-side loops are the one shape tldraw draws least
+							// predictably; prefer any drawable alternative
+							const score = pathScore(c.path, e.from, e.to) + (sameSide ? 400 : 0)
+							if (!best || score < best.score) {
+								best = { score, fa, ta, mid: c.mid, midVertical: c.mv }
+							}
+						}
 					}
 				}
 			}
@@ -675,6 +693,80 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		}
 		return null
 	}
+
+	// ---- anchor-side-aware path model ------------------------------------------
+	// tldraw's elbow leaves PERPENDICULAR to the start side and arrives
+	// perpendicular to the end side; this model is what every pass scores and
+	// verifies against, so it must match what tldraw actually draws.
+	const sideOfAnchor = (a) =>
+		a.x === 0 ? 'L' : a.x === 1 ? 'R' : a.y === 0 ? 'T' : a.y === 1 ? 'B' : null
+	// a mid fraction only means something to tldraw between FACING sides
+	// (left-right or top-bottom); for same-side and mixed pairs tldraw shapes
+	// the route itself
+	const midMeaningful = (fa, ta) => {
+		const fs = sideOfAnchor(fa)
+		const ts = sideOfAnchor(ta)
+		if (!fs || !ts) return true
+		const fH = fs === 'L' || fs === 'R'
+		const tH = ts === 'L' || ts === 'R'
+		return fH === tH && fs !== ts
+	}
+	const routePath = (e, ov = {}) => {
+		const fa = ov.fa ?? anchors.get(`${e.id}:from`)
+		const ta = ov.ta ?? anchors.get(`${e.id}:to`)
+		if (!fa || !ta) return null
+		const p0 = anchorPoint(endRect(e.fromShape, e.from), fa)
+		const p3 = anchorPoint(endRect(e.toShape, e.to), ta)
+		const mid = 'mid' in ov ? ov.mid : (e.mid ?? null)
+		const fs = sideOfAnchor(fa)
+		const ts = sideOfAnchor(ta)
+		if (!fs || !ts) return elbowPath(p0, p3, mid, !!e.midVertical)
+		const fH = fs === 'L' || fs === 'R'
+		const tH = ts === 'L' || ts === 'R'
+		if (fs === ts) {
+			// same side: the route loops OUTSIDE that side, never between the ends
+			const off = 80
+			if (fs === 'L') {
+				const bx = Math.min(p0.x, p3.x) - off
+				return [p0, { x: bx, y: p0.y }, { x: bx, y: p3.y }, p3]
+			}
+			if (fs === 'R') {
+				const bx = Math.max(p0.x, p3.x) + off
+				return [p0, { x: bx, y: p0.y }, { x: bx, y: p3.y }, p3]
+			}
+			if (fs === 'T') {
+				const by = Math.min(p0.y, p3.y) - off
+				return [p0, { x: p0.x, y: by }, { x: p3.x, y: by }, p3]
+			}
+			const by = Math.max(p0.y, p3.y) + off
+			return [p0, { x: p0.x, y: by }, { x: p3.x, y: by }, p3]
+		}
+		const simple =
+			fH && tH
+				? elbowPath(p0, p3, mid ?? 0.5, true)
+				: !fH && !tH
+					? elbowPath(p0, p3, mid ?? 0.5, false)
+					: // mixed orientations: L along the exit axis, then the entry axis
+						fH
+						? [p0, { x: p3.x, y: p0.y }, p3]
+						: [p0, { x: p0.x, y: p3.y }, p3]
+		const longSide = { L: 'left', R: 'right', T: 'top', B: 'bottom' }
+		if (
+			exitLegOk(longSide[fs], simple[0], simple[1]) &&
+			entryLegOk(longSide[ts], simple[simple.length - 2], simple[simple.length - 1])
+		) {
+			return simple
+		}
+		// the simple shape contradicts an anchor side: tldraw wraps instead -
+		// out from the exit side, around, and in against the entry side
+		const dir = (s) =>
+			s === 'L' ? { x: -1, y: 0 } : s === 'R' ? { x: 1, y: 0 } : s === 'T' ? { x: 0, y: -1 } : { x: 0, y: 1 }
+		const o0 = { x: p0.x + dir(fs).x * 40, y: p0.y + dir(fs).y * 40 }
+		const o3 = { x: p3.x + dir(ts).x * 40, y: p3.y + dir(ts).y * 40 }
+		const corner = fH ? { x: o0.x, y: o3.y } : { x: o3.x, y: o0.y }
+		return [p0, o0, corner, o3, p3]
+	}
+	const currentPath = (e) => routePath(e)
 
 	/**
 	 * Anchor side for an endpoint bound to a control INSIDE a frame: exit
@@ -963,7 +1055,7 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 	// different control runs its own course and the minimum-separation pass
 	// keeps it clear of the lanes
 	for (const e of edges) {
-		if (!e.routable || e.packRouted || e.chainPts || e.mid == null || !e.midVertical) continue
+		if (!e.routable || e.packRouted || e.mid == null || !e.midVertical) continue
 		for (const end of ['from', 'to']) {
 			const hubId = end === 'from' ? e.from : e.to
 			const trunk = hubTrunk.get(hubId)
@@ -983,7 +1075,7 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 			if (Math.abs(span) < 1) continue
 			const nm = (g.lane - p0.x) / span
 			if (nm < 0.05 || nm > 0.95) continue
-			if (pathCrosses(elbowPath(p0, p3, nm, true), e.from, e.to)) continue
+			if (pathCrosses(routePath(e, { mid: Math.round(nm * 1000) / 1000 }), e.from, e.to)) continue
 			e.mid = Math.round(nm * 1000) / 1000
 			e.laneAbs = g.lane // joins the lane's separation group
 			e.fused = true
@@ -991,155 +1083,16 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		}
 	}
 
-	// ---- minimum lane separation (user rule: unrelated near-parallel runs
-	// keep their distance; a fused trunk is one line and exempt within itself)
-	{
-		const MIN_SEP = 56
-		const laneEntries = []
-		for (const e of edges) {
-			if (!e.routable || e.mid == null || e.chainPts) continue
-			const fa = anchors.get(`${e.id}:from`)
-			const ta = anchors.get(`${e.id}:to`)
-			if (!fa || !ta) continue
-			const exit = anchorPoint(endRect(e.fromShape, e.from), fa)
-			const entry = anchorPoint(endRect(e.toShape, e.to), ta)
-			const vertical = !!e.midVertical
-			// pack trunks know their absolute lane; computed lanes for other
-			// edges follow the bound terminals
-			const lane =
-				e.laneAbs ?? (vertical ? exit.x + e.mid * (entry.x - exit.x) : exit.y + e.mid * (entry.y - exit.y))
-			laneEntries.push({
-				e,
-				exit,
-				entry,
-				lane,
-				vertical,
-				lo: vertical ? Math.min(exit.y, entry.y) : Math.min(exit.x, entry.x),
-				hi: vertical ? Math.max(exit.y, entry.y) : Math.max(exit.x, entry.x),
-				group:
-					e.laneAbs != null
-						? `pack:${e.laneAbs}`
-						: e.sharedLane != null
-							? `fuse:${e.from}:${e.sharedLane}`
-							: e.id,
-			})
-		}
-		for (const vertical of [true, false]) {
-			const list = laneEntries.filter((en) => en.vertical === vertical).sort((a, b) => a.lane - b.lane)
-			for (let i = 1; i < list.length; i++) {
-				const prev = list[i - 1]
-				const cur = list[i]
-				if (cur.group === prev.group) continue
-				const overlap = Math.min(prev.hi, cur.hi) - Math.max(prev.lo, cur.lo)
-				if (overlap < 40) continue
-				if (cur.lane - prev.lane >= MIN_SEP) continue
-				// a pack trunk's lane is fixed by construction: when one side of
-				// the conflict is a trunk, the OTHER edge moves
-				let move = cur
-				let anchor = prev
-				if (cur.e.laneAbs != null && prev.e.laneAbs == null) {
-					move = prev
-					anchor = cur
-				} else if (cur.e.laneAbs != null && prev.e.laneAbs != null) {
-					continue // two trunks: their spacing is set where they are built
-				}
-				const shifted = move.lane >= anchor.lane ? anchor.lane + MIN_SEP : anchor.lane - MIN_SEP
-				const span = move.vertical ? move.entry.x - move.exit.x : move.entry.y - move.exit.y
-				if (Math.abs(span) < 1) continue
-				const nm = (shifted - (move.vertical ? move.exit.x : move.exit.y)) / span
-				if (nm < 0.05 || nm > 0.95) continue
-				// never separate INTO a screen: keep the old lane if the shifted
-				// path would cross one
-				if (pathCrosses(elbowPath(move.exit, move.entry, nm, move.vertical), move.e.from, move.e.to)) continue
-				move.e.mid = Math.round(nm * 1000) / 1000
-				move.lane = shifted
-			}
-		}
-	}
+	// (route separation is enforced by separateRoutes after verify and
+	// placement repair, when the geometry is final)
 
 	// ---- verify every elbow against every screen ------------------------------
 	// A crossing edge first tries a nudged lane, then a full joint re-solve.
 	// Runs again after placement repair moves a screen, because a moved screen
 	// changes what every nearby route crosses.
-	// ---- anchor-side-aware path model ------------------------------------------
-	// tldraw's elbow leaves PERPENDICULAR to the start side and arrives
-	// perpendicular to the end side. Modeling routes as bare mid-lane elbows
-	// ignored that: a route entering a BOTTOM anchor really ends with a
-	// vertical leg at the anchor's x, and that leg can hug a screen the
-	// mid-lane model never saw (user finding: DailyChallenge -> DCWin rode
-	// DCSubmit's right edge while the planner scored a clear imaginary lane).
-	const sideOfAnchor = (a) =>
-		a.x === 0 ? 'L' : a.x === 1 ? 'R' : a.y === 0 ? 'T' : a.y === 1 ? 'B' : null
-	// a mid fraction only means something to tldraw between FACING sides
-	// (left-right or top-bottom); for same-side and mixed pairs tldraw shapes
-	// the route itself
-	const midMeaningful = (fa, ta) => {
-		const fs = sideOfAnchor(fa)
-		const ts = sideOfAnchor(ta)
-		if (!fs || !ts) return true
-		const fH = fs === 'L' || fs === 'R'
-		const tH = ts === 'L' || ts === 'R'
-		return fH === tH && fs !== ts
-	}
-	const routePath = (e, ov = {}) => {
-		const fa = ov.fa ?? anchors.get(`${e.id}:from`)
-		const ta = ov.ta ?? anchors.get(`${e.id}:to`)
-		if (!fa || !ta) return null
-		const p0 = anchorPoint(endRect(e.fromShape, e.from), fa)
-		const p3 = anchorPoint(endRect(e.toShape, e.to), ta)
-		const mid = 'mid' in ov ? ov.mid : (e.mid ?? null)
-		const fs = sideOfAnchor(fa)
-		const ts = sideOfAnchor(ta)
-		if (!fs || !ts) return elbowPath(p0, p3, mid, !!e.midVertical)
-		const fH = fs === 'L' || fs === 'R'
-		const tH = ts === 'L' || ts === 'R'
-		if (fs === ts) {
-			// same side: the route loops OUTSIDE that side, never between the ends
-			const off = 80
-			if (fs === 'L') {
-				const bx = Math.min(p0.x, p3.x) - off
-				return [p0, { x: bx, y: p0.y }, { x: bx, y: p3.y }, p3]
-			}
-			if (fs === 'R') {
-				const bx = Math.max(p0.x, p3.x) + off
-				return [p0, { x: bx, y: p0.y }, { x: bx, y: p3.y }, p3]
-			}
-			if (fs === 'T') {
-				const by = Math.min(p0.y, p3.y) - off
-				return [p0, { x: p0.x, y: by }, { x: p3.x, y: by }, p3]
-			}
-			const by = Math.max(p0.y, p3.y) + off
-			return [p0, { x: p0.x, y: by }, { x: p3.x, y: by }, p3]
-		}
-		const simple =
-			fH && tH
-				? elbowPath(p0, p3, mid ?? 0.5, true)
-				: !fH && !tH
-					? elbowPath(p0, p3, mid ?? 0.5, false)
-					: // mixed orientations: L along the exit axis, then the entry axis
-						fH
-						? [p0, { x: p3.x, y: p0.y }, p3]
-						: [p0, { x: p0.x, y: p3.y }, p3]
-		const longSide = { L: 'left', R: 'right', T: 'top', B: 'bottom' }
-		if (
-			exitLegOk(longSide[fs], simple[0], simple[1]) &&
-			entryLegOk(longSide[ts], simple[simple.length - 2], simple[simple.length - 1])
-		) {
-			return simple
-		}
-		// the simple shape contradicts an anchor side: tldraw wraps instead -
-		// out from the exit side, around, and in against the entry side
-		const dir = (s) =>
-			s === 'L' ? { x: -1, y: 0 } : s === 'R' ? { x: 1, y: 0 } : s === 'T' ? { x: 0, y: -1 } : { x: 0, y: 1 }
-		const o0 = { x: p0.x + dir(fs).x * 40, y: p0.y + dir(fs).y * 40 }
-		const o3 = { x: p3.x + dir(ts).x * 40, y: p3.y + dir(ts).y * 40 }
-		const corner = fH ? { x: o0.x, y: o3.y } : { x: o3.x, y: o0.y }
-		return [p0, o0, corner, o3, p3]
-	}
-	const currentPath = (e) => routePath(e)
 	const verifyRoutes = () => {
 		for (const e of edges) {
-			if (!e.routable || e.chainPts) continue
+			if (!e.routable) continue
 			const path = currentPath(e)
 			if (!path) continue
 			const crossing = pathCrosses(path, e.from, e.to)
@@ -1224,15 +1177,19 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		// above a frame is worth opening a channel for
 		const crossedScreens = (path, skipA, skipB) => nearPassers(path, skipA, skipB)
 		let nudged = 0
+		// a screen may move at most twice: two edges wanting it in opposite
+		// places would otherwise make the rounds oscillate
+		const movedCount = new Map()
 		for (let round = 0; round < 3; round++) {
 			let moved = false
 			for (const e of edges) {
-				if (!e.routable || e.chainPts) continue
+				if (!e.routable) continue
 				const path = currentPath(e)
 				if (!path) continue
 				const hit = crossedScreens(path, e.from, e.to)
 				if (hit.length !== 1 || !movable(hit[0])) continue
 				const sid = hit[0]
+				if ((movedCount.get(sid) ?? 0) >= 2) continue
 				const r = rectOf(sid)
 				// candidate shifts: slide the screen fully past each offending
 				// segment (plus 80px of air), smallest move first. Pack leaves may
@@ -1257,6 +1214,7 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 					if (Math.hypot(c.dx, c.dy) > gapY * 1.5) continue
 					const nr = { x: r.x + c.dx, y: r.y + c.dy, w: r.w, h: r.h }
 					if (screens.some((o) => o.id !== sid && rectsClash(nr, rectOf(o.id), 48))) continue
+					movedCount.set(sid, (movedCount.get(sid) ?? 0) + 1)
 					const t = targets.get(sid)
 					targets.set(sid, { x: Math.round(t.x + c.dx), y: Math.round(t.y + c.dy) })
 					const d = deltas.get(sid) ?? { dx: 0, dy: 0 }
@@ -1287,56 +1245,15 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		if (nudged) report.push(`moved ${nudged} screen${nudged === 1 ? '' : 's'} to open route channels`)
 	}
 
-	// ---- a start point must never sit on an end point ---------------------------
-	// (user finding: Discovery -> DiscoveryGoal's start and DiscoveryGoal ->
-	// Discovery's end shared Discovery's bottom center, which reads as one
-	// arrow). When an outgoing and an incoming terminal land on the same spot
-	// of the same shape, the outgoing slides to 0.38 of the side and the
-	// incoming to 0.62 - the same direction split the pack trunks use.
-	{
-		const terms = []
-		for (const e of edges) {
-			if (!e.routable || e.chainPts || e.laneAbs != null) continue
-			for (const which of ['from', 'to']) {
-				const a = anchors.get(`${e.id}:${which}`)
-				if (!a) continue
-				const shape = which === 'from' ? e.fromShape : e.toShape
-				const root = which === 'from' ? e.from : e.to
-				terms.push({ e, which, shape, a, p: anchorPoint(endRect(shape, root), a) })
-			}
-		}
-		let split = 0
-		for (let i = 0; i < terms.length; i++) {
-			for (let j = i + 1; j < terms.length; j++) {
-				const s = terms[i]
-				const t = terms[j]
-				if (s.which === t.which || s.shape !== t.shape) continue
-				if (Math.hypot(s.p.x - t.p.x, s.p.y - t.p.y) > 12) continue
-				const out = s.which === 'from' ? s : t
-				const inn = out === s ? t : s
-				const slide = (term, frac) => {
-					const a = term.a
-					const na =
-						a.y === 0 || a.y === 1 ? { x: frac, y: a.y } : { x: a.x, y: frac }
-					anchors.set(`${term.e.id}:${term.which}`, na)
-				}
-				slide(out, 0.38)
-				slide(inn, 0.62)
-				split++
-			}
-		}
-		if (split) {
-			report.push(`split ${split} start/end pair(s) sharing one anchor point`)
-			verifyRoutes()
-		}
-	}
-
-	// ---- separate same-source routes to different destinations -----------------
-	// Fusion is for arrows that share a destination or a trunk on purpose. Two
-	// arrows leaving the same frame for DIFFERENT screens must stay readable as
-	// two lines: when their paths run together (coincident or closer than 28px
-	// for a long stretch), one start anchor slides along its side until the
-	// pair separates.
+	// ---- separation: overlap is legal only at truly shared terminal points -----
+	// ONE pass enforces the whole fusion rule against final geometry:
+	//   a) a start point never sits on an end point (they split 0.38/0.62
+	//      along the side, the same direction split the packs use);
+	//   b) two runs may coincide only while forced by a genuinely shared
+	//      start or end point; everything else keeps its distance.
+	// Fix menu, in order: shift a tunable lane, slide the start anchor along
+	// its side. Engineered lanes never move (they are built 56px apart);
+	// a pair nothing fixes stays put for lint.
 	{
 		const proximityLen = (pa, pb, near) => {
 			let total = 0
@@ -1364,58 +1281,138 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 			}
 			return total
 		}
-		let separated = 0
-		const routables = edges.filter((e) => e.routable && !e.chainPts && !e.laneAbs)
-		for (let i = 0; i < routables.length; i++) {
-			for (let j = i + 1; j < routables.length; j++) {
-				const a = routables[i]
-				const b = routables[j]
-				if (a.from !== b.from || a.to === b.to) continue
-				const pa = currentPath(a)
-				const pb = currentPath(b)
-				if (!pa || !pb) continue
-				// exactly-shared runs are deliberate fusion (rule 5) and don't
-				// count; NEAR-but-not-exact parallel runs are what reads as a
-				// confusing accidental overlap
-				const confusion = (p1, p2) => proximityLen(p1, p2, 28) - proximityLen(p1, p2, 2)
-				if (confusion(pa, pb) < 80) continue
-				// slide the shorter route's start along its side, then sweep its
-				// lane; keep the first variant that pulls the pair apart cleanly
-				const lenOf = (p) => {
-					let l = 0
-					for (let k = 0; k < p.length - 1; k++) l += Math.abs(p[k + 1].x - p[k].x) + Math.abs(p[k + 1].y - p[k].y)
-					return l
-				}
-				const mover = lenOf(pa) <= lenOf(pb) ? a : b
-				const other = mover === a ? b : a
-				const fa = anchors.get(`${mover.id}:from`)
-				const ta = anchors.get(`${mover.id}:to`)
-				if (!fa || !ta) continue
-				const onVertSide = fa.x === 0 || fa.x === 1
-				const fracs = [0.28, 0.72, 0.2, 0.8]
-				let fixed = false
-				for (const f of fracs) {
-					const cand = onVertSide ? { x: fa.x, y: f } : { x: f, y: fa.y }
-					const mids = midMeaningful(cand, ta)
-						? [mover.mid ?? null, null, 0.5, 0.35, 0.65, 0.25, 0.75]
-						: [null]
-					for (const m of mids) {
-						const np = routePath(mover, { fa: cand, mid: m })
-						if (!np || pathCrosses(np, mover.from, mover.to)) continue
-						if (confusion(np, currentPath(other)) >= 80) continue
-						anchors.set(`${mover.id}:from`, cand)
-						mover.mid = m ?? undefined
-						fixed = true
-						separated++
-						break
-					}
-					if (fixed) break
-				}
+		const routables = edges.filter((e) => e.routable)
+		const termPts = (e) => {
+			const fa = anchors.get(`${e.id}:from`)
+			const ta = anchors.get(`${e.id}:to`)
+			if (!fa || !ta) return null
+			return {
+				p0: anchorPoint(endRect(e.fromShape, e.from), fa),
+				p3: anchorPoint(endRect(e.toShape, e.to), ta),
 			}
 		}
-		if (separated) {
-			report.push(`separated ${separated} same-source route${separated === 1 ? '' : 's'} to different screens`)
+		// a) start/end coincidence split
+		let split = 0
+		for (const a of routables) {
+			if (a.laneAbs != null) continue
+			const pa = termPts(a)
+			if (!pa) continue
+			for (const b of routables) {
+				if (a === b || b.laneAbs != null || a.fromShape !== b.toShape) continue
+				const pb = termPts(b)
+				if (!pb) continue
+				if (Math.hypot(pa.p0.x - pb.p3.x, pa.p0.y - pb.p3.y) > 12) continue
+				const slide = (e, which, frac) => {
+					const an = anchors.get(`${e.id}:${which}`)
+					anchors.set(
+						`${e.id}:${which}`,
+						an.y === 0 || an.y === 1 ? { x: frac, y: an.y } : { x: an.x, y: frac }
+					)
+				}
+				slide(a, 'from', 0.38)
+				slide(b, 'to', 0.62)
+				split++
+			}
 		}
+		// b) parallel-run separation
+		const sharedTerminal = (pa, pb) =>
+			Math.hypot(pa.p0.x - pb.p0.x, pa.p0.y - pb.p0.y) < 2 ||
+			Math.hypot(pa.p3.x - pb.p3.x, pa.p3.y - pb.p3.y) < 2
+		const illegalOverlap = (a, b) => {
+			const pa = currentPath(a)
+			const pb = currentPath(b)
+			if (!pa || !pb) return 0
+			const near = proximityLen(pa, pb, 48)
+			if (near < 1) return 0
+			const ta = termPts(a)
+			const tb = termPts(b)
+			const allowed = ta && tb && sharedTerminal(ta, tb) ? proximityLen(pa, pb, 2) : 0
+			return near - allowed
+		}
+		const lenOf = (p) => {
+			let l = 0
+			for (let k = 0; k < p.length - 1; k++) {
+				l += Math.abs(p[k + 1].x - p[k].x) + Math.abs(p[k + 1].y - p[k].y)
+			}
+			return l
+		}
+		let separated = 0
+		for (let round = 0; round < 3; round++) {
+			let fixedAny = false
+			for (let i = 0; i < routables.length; i++) {
+				for (let j = i + 1; j < routables.length; j++) {
+					const a = routables[i]
+					const b = routables[j]
+					if (illegalOverlap(a, b) < 64) continue
+					// engineered lanes never move; otherwise the shorter route does
+					let mover = a.laneAbs != null ? b : b.laneAbs != null ? a : null
+					if (mover?.laneAbs != null) continue
+					if (mover == null) mover = lenOf(currentPath(a)) <= lenOf(currentPath(b)) ? a : b
+					const other = mover === a ? b : a
+					const fa = anchors.get(`${mover.id}:from`)
+					const taM = anchors.get(`${mover.id}:to`)
+					if (!fa || !taM) continue
+					const baseAir = nearPassers(currentPath(mover), mover.from, mover.to).length
+					const tryFix = (ov) => {
+						const np = routePath(mover, ov)
+						if (!np || pathCrosses(np, mover.from, mover.to)) return false
+						if (nearPassers(np, mover.from, mover.to).length > baseAir) return false
+						const save = { fa: anchors.get(`${mover.id}:from`), mid: mover.mid }
+						if (ov.fa) anchors.set(`${mover.id}:from`, ov.fa)
+						if ('mid' in ov) mover.mid = ov.mid ?? undefined
+						let ok = illegalOverlap(mover, other) < 64
+						if (ok) {
+							for (const c of routables) {
+								if (c === mover || c === other) continue
+								if (illegalOverlap(mover, c) >= 64) {
+									ok = false
+									break
+								}
+							}
+						}
+						if (!ok) {
+							anchors.set(`${mover.id}:from`, save.fa)
+							mover.mid = save.mid
+						}
+						return ok
+					}
+					let fixed = false
+					if (midMeaningful(fa, taM)) {
+						for (const m of [0.5, 0.35, 0.65, 0.2, 0.8, 0.12, 0.88]) {
+							if (m === mover.mid) continue
+							if (tryFix({ mid: m })) {
+								fixed = true
+								break
+							}
+						}
+					}
+					if (!fixed) {
+						const onVertSide = fa.x === 0 || fa.x === 1
+						for (const f of [0.28, 0.72, 0.2, 0.8]) {
+							const cand = onVertSide ? { x: fa.x, y: f } : { x: f, y: fa.y }
+							const mids = midMeaningful(cand, taM)
+								? [mover.mid ?? null, null, 0.5, 0.35, 0.65]
+								: [null]
+							for (const m of mids) {
+								if (tryFix({ fa: cand, mid: m })) {
+									fixed = true
+									break
+								}
+							}
+							if (fixed) break
+						}
+					}
+					if (fixed) {
+						separated++
+						fixedAny = true
+					}
+				}
+			}
+			if (!fixedAny) break
+		}
+		if (split) report.push(`split ${split} start/end pair(s) sharing one anchor point`)
+		if (separated) report.push(`separated ${separated} overlapping route pair(s)`)
+		if (split || separated) verifyRoutes()
 	}
 
 	// ---- keep labels off screens ----------------------------------------------
@@ -1445,7 +1442,7 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 				return p.x + w / 2 > r.x && p.x - w / 2 < r.x + r.w && p.y + h / 2 > r.y && p.y - h / 2 < r.y + r.h
 			})
 		for (const e of edges) {
-			if (!e.routable || e.chainPts || e.piSide || !e.label || e.labelAt == null) continue
+			if (!e.routable || !e.label || e.labelAt == null) continue
 			const path = currentPath(e)
 			if (!path) continue
 			const w = Math.min(320, String(e.label).length * 8 + 20)
@@ -1458,29 +1455,16 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		}
 	}
 
-	// ---- emit chain/route ops -------------------------------------------------
+	// ---- emit route ops ---------------------------------------------------------
 	let routed = 0
 	for (const e of edges) {
 		if (!e.routable) continue
 		const fromAnchor = anchors.get(`${e.id}:from`)
 		const toAnchor = anchors.get(`${e.id}:to`)
-		if (e.chainPts?.length) {
-			ops.push({
-				chain: {
-					id: e.id,
-					points: e.chainPts,
-					...(fromAnchor ? { fromAnchor } : {}),
-					...(toAnchor ? { toAnchor } : {}),
-				},
-			})
-			routed++
-			continue
-		}
-		// EVERY non-chained routable edge gets an unchain first — an edge that
-		// was chained by a previous layout may be classified differently this
-		// run (packed, same-column, unrouted) and would otherwise keep a stale
-		// chain frozen at its old geometry. No-op for plain arrows, and it
-		// restores real bindings so a following route op works.
+		// EVERY routable edge gets an unchain first - a file from an older
+		// engine may still carry a frozen waypoint chain, and unchaining
+		// restores real bindings so the following route op works. No-op for
+		// plain arrows.
 		ops.push({ chain: { id: e.id, points: [] } })
 		if (!fromAnchor && !toAnchor && e.mid == null) continue
 		// tldraw's elbowMidPoint only positions a lane between FACING sides; on
@@ -1489,6 +1473,24 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 		// carried in from the source file
 		const emitMid =
 			e.mid != null && (!fromAnchor || !toAnchor || midMeaningful(fromAnchor, toAnchor))
+		// every emitted lane carries its absolute position so the executor can
+		// calibrate the midpoint against REAL geometry - tldraw measures the
+		// fraction over its own span, so a model-solved mid lands a few px off,
+		// differently per arrow, and runs meant to coincide (or stay apart)
+		// drift
+		let laneX
+		let laneY
+		if (emitMid && fromAnchor && toAnchor) {
+			if (e.laneAbs != null) {
+				laneX = e.laneAbs
+			} else {
+				const p0 = anchorPoint(endRect(e.fromShape, e.from), fromAnchor)
+				const p3 = anchorPoint(endRect(e.toShape, e.to), toAnchor)
+				const fs = sideOfAnchor(fromAnchor)
+				if (fs === 'L' || fs === 'R') laneX = Math.round(p0.x + e.mid * (p3.x - p0.x))
+				else laneY = Math.round(p0.y + e.mid * (p3.y - p0.y))
+			}
+		}
 		ops.push({
 			route: {
 				id: e.id,
@@ -1496,12 +1498,8 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 				...(fromAnchor ? { fromAnchor } : {}),
 				...(toAnchor ? { toAnchor } : {}),
 				mid: emitMid ? e.mid : 0.5,
-				// trunk edges carry their absolute lane so the executor can
-				// calibrate the midpoint against REAL geometry - tldraw measures
-				// the fraction over its own span, so a model-solved mid lands each
-				// edge a few px off the lane, differently per edge, and the trunk
-				// stops overlapping exactly
-				...(emitMid && e.laneAbs != null ? { laneX: e.laneAbs } : {}),
+				...(laneX != null ? { laneX } : {}),
+				...(laneY != null ? { laneY } : {}),
 				...(e.labelAt != null ? { labelAt: e.labelAt } : {}),
 			},
 		})
