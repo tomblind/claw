@@ -24,7 +24,8 @@ node ~/.claude/skills/claw/cli/claw.mjs <command> <file.tldr>
 | `lint <file>` | **Run after every apply.** Heuristic visual checks as text: shapes outside their frame, overlapping boxes, labels wider than their chip, arrows cutting through unrelated screens, unreadable label contrast. Catches most of what you'd render to look for, at ~1% of the context cost. |
 | `inspect <file> <ref>` | Everything about one shape: full props, bounds, containing frame, resolved styling (real hex values and font family, custom slots included). The zoom-in companion to `outline` when implementing a specific component. |
 | `render <file>` | **Pixel-accurate PNG from the real tldraw editor.** `--frame <id\|name>` renders one screen; `--around <ref> --pad N` is a tight crop of one shape (the cheap self-check while building). **Read the PNG** — layout is spatial and the text output can't convey it. |
-| `diff <new> <old>` | What changed between two canvases (or `--against <git-rev>`). Pure comparison — see *Syncing a canvas to code* for how projects use it. |
+| `snapshot <file>` | Store a compressed copy of the canvas **inside the file** (document metadata; other editors preserve it). **Run it whenever you start reading a canvas** — then `diff --snapshot` later tells you exactly what changed while you worked, or since you last looked. One slot; a new snapshot replaces the old. |
+| `diff <new> <old>` | What changed between two canvases (or `--snapshot` for the snapshot stored in the file, or `--against <git-rev>`). Pure comparison — see *Syncing a canvas to code* for how projects use it. |
 | `ops` | **The op reference.** Read it once before writing your first ops file — every op, kind, default size, and allowed value. |
 | `apply <file> <ops.json>` | Modify the canvas through the real editor — see *Writing to a canvas* below. |
 | `new <file> <ops.json>` | Create a fresh canvas from the same ops vocabulary. **Once per file** — after that, always `apply`. |
@@ -99,9 +100,13 @@ Every write (`apply`, `new`) automatically opens a **live room** on the file and
 - **Before choosing the write path, check `claw status` + the URL output**: `apply` automatically routes through the live room when one exists — if the output says `wrote <file>` but the user says their canvas is open, stop and reconcile (the app may have restarted, invalidating old room URLs) rather than continuing to write the file.
 - Never edit the `.tldr` file by any other means while a room is live (no direct writes, no VS Code extension edits) — the room will overwrite them.
 
+## Seeing what changed (snapshots)
+
+Querying tells you the current *state*; only a baseline gives you a *delta*. The canvas carries its own baseline: `claw snapshot <file>` stores a compressed copy inside the file's document metadata (invisible in every editor, preserved by vanilla tldraw), and `claw diff <file> --snapshot` reports what changed since. **Snapshot whenever you start reading a canvas** — it costs one command and makes "what did the user (or another agent) change while I worked?" a single diff instead of a re-read. The snapshot survives the file being moved, committed, or edited elsewhere.
+
 ## Syncing a canvas to code (the accepted-copy pattern)
 
-Claw keeps **no history and no hidden state** — every command reads the file as it is. When a project derives an artifact from a canvas (an HTML prototype, Unity screens, generated code), the *project* owns the sync point, as a plain visible file:
+When a project derives an artifact from a canvas (an HTML prototype, Unity screens, generated code), a *durable* sync point should outlive the single-slot snapshot — the project owns it, as a plain visible file:
 
 1. Build (or update) the artifact from the canvas.
 2. Snapshot the moment they matched: `cp design/ui.tldr design/ui.accepted.tldr`

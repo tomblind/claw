@@ -42,13 +42,18 @@ USAGE
       unless --scale is given. --frame renders one screen and its contents;
       --around is a tight crop of any single shape (cheap self-check).
 
+  claw snapshot <file.tldr>
+      Store a compressed copy of the canvas INSIDE the file (document
+      metadata; other tldraw editors preserve and ignore it). One slot -
+      a new snapshot replaces the old. Take one whenever you start
+      reading a canvas, then see what changed with diff --snapshot.
+
   claw diff <new.tldr> <old.tldr>
       What changed between two canvases: screens, text, shapes and flow
       edges, with pure layout churn summarised separately.
+        claw diff <file> --snapshot       compare against the snapshot
+                                          stored in the file
         claw diff <file> --against <rev>  compare against a git revision
-      Claw keeps no history itself. Projects that sync a canvas to code
-      keep their own snapshot (e.g. copy ui.tldr to ui.accepted.tldr when
-      the code matches) and diff against that.
 
   claw ops
       The full op reference: every op, kind, default size, and documented
@@ -370,20 +375,46 @@ async function main() {
 				const rev = String(flags.against)
 				oldRaw = readFromGit(file, rev)
 				labels = [`${basename(file)}@${rev}`, basename(file)]
+			} else if (flags.snapshot) {
+				const parsed = JSON.parse(raw)
+				const doc = (parsed.records ?? []).find((r) => r.typeName === 'document')
+				const snap = doc?.meta?.clawSnapshot
+				if (!snap?.data) {
+					throw new TldrError(
+						`no snapshot stored in ${basename(file)}. Take one first:\n` +
+							`    claw snapshot ${file}`,
+						1
+					)
+				}
+				const { default: lz } = await import('lz-string')
+				oldRaw = lz.decompressFromBase64(snap.data)
+				if (!oldRaw) throw new TldrError(`the stored snapshot could not be decompressed`, 1)
+				labels = [`snapshot@${snap.at}`, basename(file)]
+				process.stdout.write(`against snapshot taken ${snap.at}\n`)
 			} else {
 				throw new TldrError(
 					`diff needs something to compare against:\n` +
 						`    claw diff <new.tldr> <old.tldr>\n` +
+						`    claw diff <file.tldr> --snapshot     (the snapshot stored in the file)\n` +
 						`    claw diff <file.tldr> --against <git-rev>\n` +
-						`  Claw keeps no history. Sync workflows keep their own snapshot - copy\n` +
-						`  the canvas (e.g. to ui.accepted.tldr) when the code matches it, and\n` +
-						`  diff against that copy on the next pass.`,
+						`  Run \`claw snapshot <file>\` when you start reading a canvas; the\n` +
+						`  snapshot is stored inside the file and --snapshot diffs against it.`,
 					1
 				)
 			}
 			const { before, after } = await projectPair(oldRaw, raw)
 			process.stdout.write(`${diff(before, after, { labels })}\n`)
 			emitWarnings(after)
+			return 0
+		}
+
+		case 'snapshot': {
+			const { call } = await import('./lib/client.mjs')
+			const result = await call('/api/snapshot', { path: file })
+			process.stdout.write(
+				`snapshot stored inside ${basename(file)} (${result.records} records, ${Math.round(result.bytes / 1024)}KB compressed, ${result.at})\n` +
+					`compare later with: claw diff ${file} --snapshot\n`
+			)
 			return 0
 		}
 

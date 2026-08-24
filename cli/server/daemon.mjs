@@ -330,6 +330,37 @@ const api = {
 		return { ok: true, hadRoom: flushed }
 	},
 
+	// Store a compressed copy of the CURRENT canvas inside the document
+	// record's meta (meta.clawSnapshot). The snapshot travels with the file -
+	// vanilla tldraw preserves record meta - so `claw diff --snapshot` works
+	// later with no external state. One slot: a new snapshot replaces the old.
+	'POST /api/snapshot': async (body) => {
+		touch()
+		const path = required(body, 'path')
+		touchRecent(path)
+		const entry = rooms.getOrCreate(pathToRoomId(path))
+		const file = JSON.parse(rooms.snapshotText(entry))
+		// the stored copy never contains a snapshot itself (snapshots must not nest)
+		for (const r of file.records) {
+			if (r.typeName === 'document' && r.meta?.clawSnapshot) {
+				r.meta = { ...r.meta }
+				delete r.meta.clawSnapshot
+			}
+		}
+		const { default: lz } = await import('lz-string')
+		const data = lz.compressToBase64(JSON.stringify(file))
+		const at = new Date().toISOString()
+		await entry.room.updateStore((store) => {
+			const doc = store.get('document:document')
+			if (!doc) throw new Error('room has no document record')
+			doc.meta = { ...(doc.meta ?? {}), clawSnapshot: { at, data } }
+			store.put(doc)
+		})
+		entry.dirty = true
+		entry.lastActivity = Date.now()
+		return { at, bytes: data.length, records: file.records.length }
+	},
+
 	'GET /api/debug-executor': async () => await withExecutor((call) => call('debug', [])),
 
 	'GET /api/recent': async () => ({
