@@ -3069,9 +3069,9 @@ function CustomStylePanel(props) {
 			<div className="tlui-style-panel__section">
 				<TL.StylePanelFontPicker />
 				{fontRelevant && <ClawFontControls />}
+				<ClawTextOutlineControl />
 				<TL.StylePanelTextAlignPicker />
 				<TL.StylePanelLabelAlignPicker />
-				<ClawTextOutlineControl />
 			</div>
 			<div className="tlui-style-panel__section">
 				<TL.StylePanelGeoShapePicker />
@@ -3185,20 +3185,29 @@ function ClawTextOutlineControl() {
 			}))
 		)
 	}
+	const Icon = TL.TldrawUiIcon
 	return (
 		<TL.TldrawUiButton
 			type="normal"
 			data-testid="claw-text-outline"
 			onClick={toggle}
 			title="Toggle the text outline (background halo) for the selected shapes"
+			style={{ justifyContent: 'flex-start', gap: 6 }}
 		>
-			<span style={{ fontSize: 11 }}>Text outline: {state.allOff ? 'off' : 'on'}</span>
+			{Icon ? (
+				<Icon small icon={state.allOff ? 'toggle-off' : 'toggle-on'} label="Text outline" />
+			) : null}
+			<span style={{ fontSize: 11 }}>Text outline</span>
 		</TL.TldrawUiButton>
 	)
 }
 
 // main menu: the default menu rebuilt so the smooth-text checkbox sits INSIDE
 // the Preferences submenu with the other view preferences
+// components may be plain functions OR React.memo/forwardRef wrappers
+// (objects) - DefaultMainMenu is memo-wrapped, so a typeof-function check
+// wrongly falls back to the stock menu
+const isComponent = (v) => v != null && (typeof v === 'function' || typeof v === 'object')
 const HAS_MENU_PARTS = [
 	'DefaultMainMenu', 'EditSubmenu', 'ViewSubmenu', 'ExportFileContentSubMenu',
 	'ExtrasGroup', 'ToggleSnapModeItem', 'ToggleToolLockItem', 'ToggleGridItem',
@@ -3206,7 +3215,7 @@ const HAS_MENU_PARTS = [
 	'ToggleDynamicSizeModeItem', 'TogglePasteAtCursorItem', 'ToggleDebugModeItem',
 	'AccessibilityMenu', 'InputModeMenu', 'ColorSchemeMenu', 'LanguageMenu',
 	'TldrawUiMenuGroup', 'TldrawUiMenuSubmenu', 'TldrawUiMenuCheckboxItem',
-].every((k) => typeof TL[k] === 'function')
+].every((k) => isComponent(TL[k]))
 
 function ClawMainMenu() {
 	const editor = TL.useEditor()
