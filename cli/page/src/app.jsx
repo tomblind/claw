@@ -2302,6 +2302,8 @@ function onMount(editor) {
 		window.__editor = editor
 		setupHost(editor)
 		installInsecureClipboardShim(editor)
+		ensureStaticCss()
+		if (isSmoothText()) editor.getContainer()?.classList.add('claw-smooth-text')
 		applyClawTheme(editor)
 		// live retheme: a `theme` op lands in document meta and every connected
 		// tab restyles without reloading
@@ -2490,6 +2492,7 @@ function patchSlotLabels(messages, theme) {
 			const val = theme?.fonts?.[slot]
 			messages[`font-style.${slot}`] = val != null ? fontLabelOf(val) || slot : slot
 		}
+		messages['claw.smooth-text'] = 'Smooth text outline'
 	} catch {}
 }
 
@@ -3046,6 +3049,7 @@ function CustomStylePanel(props) {
 				<div className="tlui-style-panel__section">
 					{colorRelevant && <ClawColorControls />}
 					{fontRelevant && <ClawFontControls />}
+					<ClawTextOutlineControl />
 				</div>
 			</TL.DefaultStylePanel>
 		)
@@ -3067,6 +3071,7 @@ function CustomStylePanel(props) {
 				{fontRelevant && <ClawFontControls />}
 				<TL.StylePanelTextAlignPicker />
 				<TL.StylePanelLabelAlignPicker />
+				<ClawTextOutlineControl />
 			</div>
 			<div className="tlui-style-panel__section">
 				<TL.StylePanelGeoShapePicker />
@@ -3077,12 +3082,205 @@ function CustomStylePanel(props) {
 		</TL.DefaultStylePanel>
 	)
 }
-const APP_COMPONENTS = { StylePanel: CustomStylePanel }
+/**
+ * Per-shape text outline control. tldraw's text halo (six offset text-shadow
+ * copies in the background color) is a per-UTIL option (showTextOutline), not
+ * a per-shape one. These wrappers read `meta.clawText.outline === 'off'` and
+ * flip the util option around the synchronous component()/toSvg() calls, so
+ * both the live canvas AND exports honor it. The meta travels with the file
+ * and other tldraw editors ignore it. Extensible: clawText is an object so
+ * widths/styles can join later.
+ */
+function withClawTextOutline(Util) {
+	return class extends Util {
+		component(shape) {
+			if (shape.meta?.clawText?.outline !== 'off') return super.component(shape)
+			const prev = this.options.showTextOutline
+			this.options.showTextOutline = false
+			try {
+				return super.component(shape)
+			} finally {
+				this.options.showTextOutline = prev
+			}
+		}
+		toSvg(shape, ctx) {
+			if (shape.meta?.clawText?.outline !== 'off') return super.toSvg(shape, ctx)
+			const prev = this.options.showTextOutline
+			this.options.showTextOutline = false
+			try {
+				return super.toSvg(shape, ctx)
+			} finally {
+				this.options.showTextOutline = prev
+			}
+		}
+	}
+}
+const CLAW_SHAPE_UTILS = [
+	withClawTextOutline(TL.TextShapeUtil),
+	withClawTextOutline(TL.GeoShapeUtil),
+	withClawTextOutline(TL.ArrowShapeUtil),
+]
+
+// ---- smooth text outline (user preference) ---------------------------------
+// tldraw's halo is six stamped copies of the glyphs - lumpy at the diagonals.
+// The smooth variant is a real vector stroke painted behind the fill
+// (-webkit-text-stroke + paint-order), width zoom-compensated the same way
+// tldraw compensates its shadow offsets.
+const SMOOTH_TEXT_KEY = 'claw-smooth-text'
+function isSmoothText() {
+	try {
+		return localStorage.getItem(SMOOTH_TEXT_KEY) === '1'
+	} catch {
+		return false
+	}
+}
+function setSmoothText(editor, on) {
+	try {
+		localStorage.setItem(SMOOTH_TEXT_KEY, on ? '1' : '0')
+	} catch {}
+	editor.getContainer()?.classList.toggle('claw-smooth-text', on)
+}
+function ensureStaticCss() {
+	if (document.getElementById('claw-static-css')) return
+	const el = document.createElement('style')
+	el.id = 'claw-static-css'
+	el.textContent = `
+.claw-smooth-text .tl-text__outline {
+	text-shadow: none !important;
+	-webkit-text-stroke: calc(min(0.5, 1 / var(--tl-zoom, 1)) * 4px) var(--tl-color-background);
+	paint-order: stroke fill;
+}
+`
+	document.head.appendChild(el)
+}
+
+/** "Text outline: on/off" toggle for the selection, next to the style pickers. */
+function ClawTextOutlineControl() {
+	const editor = TL.useEditor()
+	const useVal = typeof TL.useValue === 'function' ? TL.useValue : (_n, fn) => fn()
+	const state = useVal(
+		'claw text outline',
+		() => {
+			const shapes = editor
+				.getSelectedShapes()
+				.filter((s) => s.type === 'text' || s.type === 'geo' || s.type === 'arrow')
+			if (!shapes.length) return null
+			return {
+				allOff: shapes.every((s) => s.meta?.clawText?.outline === 'off'),
+			}
+		},
+		[editor]
+	)
+	if (!state) return null
+	const toggle = () => {
+		const shapes = editor
+			.getSelectedShapes()
+			.filter((s) => s.type === 'text' || s.type === 'geo' || s.type === 'arrow')
+		const next = state.allOff ? 'on' : 'off'
+		editor.updateShapes(
+			shapes.map((s) => ({
+				id: s.id,
+				type: s.type,
+				meta: { ...s.meta, clawText: { ...(s.meta?.clawText ?? {}), outline: next } },
+			}))
+		)
+	}
+	return (
+		<TL.TldrawUiButton
+			type="normal"
+			data-testid="claw-text-outline"
+			onClick={toggle}
+			title="Toggle the text outline (background halo) for the selected shapes"
+		>
+			<span style={{ fontSize: 11 }}>Text outline: {state.allOff ? 'off' : 'on'}</span>
+		</TL.TldrawUiButton>
+	)
+}
+
+// main menu: the default menu rebuilt so the smooth-text checkbox sits INSIDE
+// the Preferences submenu with the other view preferences
+const HAS_MENU_PARTS = [
+	'DefaultMainMenu', 'EditSubmenu', 'ViewSubmenu', 'ExportFileContentSubMenu',
+	'ExtrasGroup', 'ToggleSnapModeItem', 'ToggleToolLockItem', 'ToggleGridItem',
+	'ToggleWrapModeItem', 'ToggleFocusModeItem', 'ToggleEdgeScrollingItem',
+	'ToggleDynamicSizeModeItem', 'TogglePasteAtCursorItem', 'ToggleDebugModeItem',
+	'AccessibilityMenu', 'InputModeMenu', 'ColorSchemeMenu', 'LanguageMenu',
+	'TldrawUiMenuGroup', 'TldrawUiMenuSubmenu', 'TldrawUiMenuCheckboxItem',
+].every((k) => typeof TL[k] === 'function')
+
+function ClawMainMenu() {
+	const editor = TL.useEditor()
+	const translation = typeof TL.useCurrentTranslation === 'function' ? TL.useCurrentTranslation() : null
+	if (translation?.messages) translation.messages['claw.smooth-text'] = 'Smooth text outline'
+	const [smooth, setSmooth] = React.useState(isSmoothText)
+	const toggle = () => {
+		const next = !smooth
+		setSmooth(next)
+		setSmoothText(editor, next)
+	}
+	if (!HAS_MENU_PARTS) {
+		// tldraw version drift: stock menu plus the toggle at the bottom
+		return (
+			<TL.DefaultMainMenu>
+				<TL.DefaultMainMenuContent />
+				<TL.TldrawUiMenuGroup id="claw">
+					<TL.TldrawUiMenuCheckboxItem
+						id="claw-smooth-text"
+						toggle
+						readonlyOk
+						checked={smooth}
+						onSelect={toggle}
+						label="claw.smooth-text"
+					/>
+				</TL.TldrawUiMenuGroup>
+			</TL.DefaultMainMenu>
+		)
+	}
+	return (
+		<TL.DefaultMainMenu>
+			<TL.EditSubmenu />
+			<TL.ViewSubmenu />
+			<TL.ExportFileContentSubMenu />
+			<TL.ExtrasGroup />
+			<TL.TldrawUiMenuGroup id="preferences">
+				<TL.TldrawUiMenuSubmenu id="preferences" label="menu.preferences">
+					<TL.TldrawUiMenuGroup id="preferences-actions">
+						<TL.ToggleSnapModeItem />
+						<TL.ToggleToolLockItem />
+						<TL.ToggleGridItem />
+						<TL.ToggleWrapModeItem />
+						<TL.ToggleFocusModeItem />
+						<TL.ToggleEdgeScrollingItem />
+						<TL.ToggleDynamicSizeModeItem />
+						<TL.TogglePasteAtCursorItem />
+						<TL.ToggleDebugModeItem />
+						<TL.TldrawUiMenuCheckboxItem
+							id="claw-smooth-text"
+							toggle
+							readonlyOk
+							checked={smooth}
+							onSelect={toggle}
+							label="claw.smooth-text"
+						/>
+					</TL.TldrawUiMenuGroup>
+					<TL.TldrawUiMenuGroup id="user-interface-submenus">
+						<TL.AccessibilityMenu />
+						<TL.InputModeMenu />
+						<TL.ColorSchemeMenu />
+					</TL.TldrawUiMenuGroup>
+				</TL.TldrawUiMenuSubmenu>
+				<TL.LanguageMenu />
+			</TL.TldrawUiMenuGroup>
+		</TL.DefaultMainMenu>
+	)
+}
+
+const APP_COMPONENTS = { StylePanel: CustomStylePanel, MainMenu: ClawMainMenu }
 
 function StandaloneApp() {
 	return (
 		<div style={{ position: 'fixed', inset: 0 }}>
-			<Tldraw onMount={onMount} components={APP_COMPONENTS} themes={CLAW_THEMES} />
+			<Tldraw onMount={onMount} components={APP_COMPONENTS} themes={CLAW_THEMES} shapeUtils={CLAW_SHAPE_UTILS} />
 		</div>
 	)
 }
@@ -3132,7 +3330,7 @@ function SyncApp() {
 	if (!restored && store.status !== 'error') return null
 	return (
 		<div style={{ position: 'fixed', inset: 0 }}>
-			<Tldraw store={store} onMount={onMount} components={APP_COMPONENTS} themes={CLAW_THEMES} />
+			<Tldraw store={store} onMount={onMount} components={APP_COMPONENTS} themes={CLAW_THEMES} shapeUtils={CLAW_SHAPE_UTILS} />
 		</div>
 	)
 }
