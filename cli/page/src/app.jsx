@@ -2657,6 +2657,7 @@ function patchSlotLabels(messages, theme) {
 			messages[`font-style.${slot}`] = val != null ? fontLabelOf(val) || slot : slot
 		}
 		messages['claw.smooth-text'] = 'Smooth text outline'
+		messages['claw.export-figma'] = 'SVG for Figma'
 	} catch {}
 }
 
@@ -3366,6 +3367,75 @@ function ClawTextOutlineControl() {
 	)
 }
 
+/**
+ * Name a download after the canvas it came from. A live room's id is the
+ * base64url of the file's absolute path, so the .tldr's own filename is
+ * recoverable here; standalone documents fall back to their document name.
+ */
+function canvasBaseName(editor) {
+	try {
+		const room = new URLSearchParams(location.search).get('room') ??
+			(location.pathname.startsWith('/f/') ? location.pathname.slice(3).split('/')[0] : null)
+		if (room) {
+			const path = atob(room.replace(/-/g, '+').replace(/_/g, '/'))
+			const leaf = path.split(/[\\/]/).pop()
+			if (leaf) return leaf.replace(/\.tldr$/i, '').replace(/[^\w.-]+/g, '-') || 'canvas'
+		}
+	} catch {}
+	const named = (editor.getDocumentSettings?.()?.name ?? '').trim()
+	return (named || 'canvas').replace(/\.tldr$/i, '').replace(/[^\w.-]+/g, '-') || 'canvas'
+}
+
+/**
+ * "SVG for Figma" in the Export submenu, beside tldraw's own SVG and PNG
+ * items. Figma ignores the <foreignObject> elements tldraw puts text in, so
+ * this runs the same conversion `claw export` uses and downloads the result.
+ */
+function ClawFigmaExportItem() {
+	const editor = TL.useEditor()
+	const [busy, setBusy] = React.useState(false)
+	const run = async () => {
+		if (busy) return
+		setBusy(true)
+		try {
+			const { svg } = await window.host.exportSvg({ figmaText: true })
+			const file = new File([svg], `${canvasBaseName(editor)}.figma.svg`, { type: 'image/svg+xml' })
+			TL.downloadFile(file)
+		} catch (err) {
+			reportError('figma export', err)
+		} finally {
+			setBusy(false)
+		}
+	}
+	return (
+		<TL.TldrawUiMenuItem
+			id="claw-export-figma"
+			label="claw.export-figma"
+			readonlyOk
+			disabled={busy}
+			onSelect={run}
+		/>
+	)
+}
+
+/** Export submenu rebuilt so the Figma item sits with the other export items. */
+function ClawExportSubmenu() {
+	const actions = typeof TL.useActions === 'function' ? TL.useActions() : {}
+	if (!actions['export-all-as-svg'] && !actions['export-all-as-png']) return null
+	return (
+		<TL.TldrawUiMenuSubmenu id="export-all-as" label="context-menu.export-all-as" size="small">
+			<TL.TldrawUiMenuGroup id="export-all-as-group">
+				<TL.TldrawUiMenuActionItem actionId="export-all-as-svg" />
+				<TL.TldrawUiMenuActionItem actionId="export-all-as-png" />
+				<ClawFigmaExportItem />
+			</TL.TldrawUiMenuGroup>
+			<TL.TldrawUiMenuGroup id="export-all-as-bg">
+				<TL.ToggleTransparentBgMenuItem />
+			</TL.TldrawUiMenuGroup>
+		</TL.TldrawUiMenuSubmenu>
+	)
+}
+
 // main menu: the default menu rebuilt so the smooth-text checkbox sits INSIDE
 // the Preferences submenu with the other view preferences
 // components may be plain functions OR React.memo/forwardRef wrappers
@@ -3379,12 +3449,16 @@ const HAS_MENU_PARTS = [
 	'ToggleDynamicSizeModeItem', 'TogglePasteAtCursorItem', 'ToggleDebugModeItem',
 	'AccessibilityMenu', 'InputModeMenu', 'ColorSchemeMenu', 'LanguageMenu',
 	'TldrawUiMenuGroup', 'TldrawUiMenuSubmenu', 'TldrawUiMenuCheckboxItem',
+	'TldrawUiMenuItem', 'TldrawUiMenuActionItem', 'ToggleTransparentBgMenuItem',
 ].every((k) => isComponent(TL[k]))
 
 function ClawMainMenu() {
 	const editor = TL.useEditor()
 	const translation = typeof TL.useCurrentTranslation === 'function' ? TL.useCurrentTranslation() : null
-	if (translation?.messages) translation.messages['claw.smooth-text'] = 'Smooth text outline'
+	if (translation?.messages) {
+		translation.messages['claw.smooth-text'] = 'Smooth text outline'
+		translation.messages['claw.export-figma'] = 'SVG for Figma'
+	}
 	const [smooth, setSmooth] = React.useState(isSmoothText)
 	const toggle = () => {
 		const next = !smooth
@@ -3392,11 +3466,12 @@ function ClawMainMenu() {
 		setSmoothText(editor, next)
 	}
 	if (!HAS_MENU_PARTS) {
-		// tldraw version drift: stock menu plus the toggle at the bottom
+		// tldraw version drift: stock menu plus claw's items at the bottom
 		return (
 			<TL.DefaultMainMenu>
 				<TL.DefaultMainMenuContent />
 				<TL.TldrawUiMenuGroup id="claw">
+					<ClawFigmaExportItem />
 					<TL.TldrawUiMenuCheckboxItem
 						id="claw-smooth-text"
 						toggle
@@ -3413,7 +3488,7 @@ function ClawMainMenu() {
 		<TL.DefaultMainMenu>
 			<TL.EditSubmenu />
 			<TL.ViewSubmenu />
-			<TL.ExportFileContentSubMenu />
+			<ClawExportSubmenu />
 			<TL.ExtrasGroup />
 			<TL.TldrawUiMenuGroup id="preferences">
 				<TL.TldrawUiMenuSubmenu id="preferences" label="menu.preferences">
