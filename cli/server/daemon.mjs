@@ -191,6 +191,11 @@ const host = {
 			await call('load', [tldr])
 			return await call('render', [opts])
 		}),
+	exportSvg: (tldr, opts) =>
+		withExecutor(async (call) => {
+			await call('load', [tldr])
+			return await call('exportSvg', [opts])
+		}),
 	lint: (tldr) =>
 		withExecutor(async (call) => {
 			await call('load', [tldr])
@@ -283,6 +288,16 @@ const api = {
 				scale: body.scale ?? null,
 			}),
 		}
+	},
+
+	'POST /api/export': async (body) => {
+		touch()
+		return await host.exportSvg(required(body, 'tldr'), {
+			frame: body.frame ?? null,
+			figmaText: body.figmaText !== false,
+			...(body.padding != null ? { padding: body.padding } : {}),
+			...(body.scale != null ? { scale: body.scale } : {}),
+		})
 	},
 
 	'POST /api/lint': async (body) => {

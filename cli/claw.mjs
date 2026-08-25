@@ -42,6 +42,14 @@ USAGE
       unless --scale is given. --frame renders one screen and its contents;
       --around is a tight crop of any single shape (cheap self-check).
 
+  claw export <file.tldr> [-o out.svg] [--frame <ref>] [--scale N] [--raw]
+      SVG built for Figma: tldraw puts text in <foreignObject>, which Figma
+      ignores (shapes import, words vanish), so each block is rewritten as
+      real <text> measured from the browser's own layout. Import the .svg
+      into Figma and the text arrives as editable text layers. --raw emits
+      tldraw's SVG untouched. Fonts travel by name; Figma substitutes any
+      it doesn't have installed.
+
   claw snapshot <file.tldr>
       Store a compressed copy of the canvas INSIDE the file (document
       metadata; other tldraw editors preserve and ignore it). One slot -
@@ -405,6 +413,29 @@ async function main() {
 			const { before, after } = await projectPair(oldRaw, raw)
 			process.stdout.write(`${diff(before, after, { labels })}\n`)
 			emitWarnings(after)
+			return 0
+		}
+
+		case 'export': {
+			const { call } = await import('./lib/client.mjs')
+			const result = await call('/api/export', {
+				tldr: raw,
+				frame: flags.frame && flags.frame !== true ? String(flags.frame) : null,
+				figmaText: !flags.raw,
+				...(flags.scale && flags.scale !== true ? { scale: Number(flags.scale) } : {}),
+			})
+			const out =
+				flags.o && flags.o !== true
+					? String(flags.o)
+					: `${file.replace(/\.tldr$/i, '')}${flags.frame && flags.frame !== true ? `.${String(flags.frame).replace(/[^\w.-]+/g, '_')}` : ''}.svg`
+			writeFileSync(out, result.svg, 'utf8')
+			process.stdout.write(`${out}\n`)
+			if (!flags.raw) {
+				process.stdout.write(
+					`${result.converted} text block(s) converted to SVG <text> for Figma\n` +
+						`fonts are referenced by name - Figma substitutes any it doesn't have\n`
+				)
+			}
 			return 0
 		}
 
