@@ -9,6 +9,7 @@ import { createRoot } from 'react-dom/client'
 import * as TL from 'tldraw'
 import { useSync } from '@tldraw/sync'
 import lz from 'lz-string'
+import { getIndexAbove, getIndexBelow, getIndexBetween } from '@tldraw/utils'
 import 'tldraw/tldraw.css'
 import {
 	CUSTOM_COLOR_SLOTS,
@@ -2065,6 +2066,61 @@ async function applyOps(editor, ops) {
 					editor.deleteShape(target.id)
 					touched.deleted.push(target.id)
 					report.push(`delete ${short(target.id)} (${target.type})`)
+					break
+				}
+
+				case 'order': {
+					// Z-order: which shape draws on top where they overlap. tldraw
+					// orders SIBLINGS by a fractional index, so everything here is
+					// relative to the other shapes in the same parent (screen).
+					const target = ref(args.id)
+					const to = String(args.to ?? 'front')
+					if (args.ref != null && to !== 'above' && to !== 'below') {
+						throw new Error('"ref" only applies with to:"above" or to:"below"')
+					}
+					if (to === 'above' || to === 'below') {
+						if (args.ref == null) throw new Error(`to:"${to}" needs "ref" (the shape to sit ${to})`)
+						const anchor = ref(args.ref)
+						if (anchor.id === target.id) throw new Error('a shape cannot be ordered against itself')
+						if (anchor.parentId !== target.parentId) {
+							throw new Error(
+								'z-order is relative to siblings: both shapes must sit in the same screen (or both on the page)'
+							)
+						}
+						// place between the anchor and its neighbour on that side, so
+						// the move lands exactly adjacent instead of at the extreme
+						// already in z-order: getSortedChildIdsForParent sorts by index
+						const siblings = editor
+							.getSortedChildIdsForParent(anchor.parentId)
+							.map((id) => editor.getShape(id))
+							.filter((sh) => sh && sh.id !== target.id)
+						const at = siblings.findIndex((sh) => sh.id === anchor.id)
+						const neighbor = to === 'above' ? siblings[at + 1] : siblings[at - 1]
+						const index = neighbor
+							? getIndexBetween(
+									to === 'above' ? anchor.index : neighbor.index,
+									to === 'above' ? neighbor.index : anchor.index
+								)
+							: to === 'above'
+								? getIndexAbove(anchor.index)
+								: getIndexBelow(anchor.index)
+						editor.updateShape({ id: target.id, type: target.type, index })
+						touched.updated.push(target.id)
+						report.push(`order ${short(target.id)} -> ${to} ${short(anchor.id)}`)
+						break
+					}
+					const fn = {
+						front: 'bringToFront',
+						back: 'sendToBack',
+						forward: 'bringForward',
+						backward: 'sendBackward',
+					}[to]
+					if (!fn) {
+						throw new Error(`order "to" must be front | back | forward | backward | above | below, got "${to}"`)
+					}
+					editor[fn]([target.id])
+					touched.updated.push(target.id)
+					report.push(`order ${short(target.id)} -> ${to}`)
 					break
 				}
 

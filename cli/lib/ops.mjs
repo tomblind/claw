@@ -34,6 +34,7 @@ const OPS = {
 	chain: { required: ['id'], optional: ['points', 'fromAnchor', 'toAnchor'] },
 	delete: { required: ['id'], optional: [] },
 	rename: { required: ['id', 'name'], optional: [] },
+	order: { required: ['id'], optional: ['to', 'ref'] },
 }
 
 export function readOps(path) {
@@ -261,5 +262,11 @@ label text, or the "name" given to an earlier op in the same batch.
       an error (deleting a group's children dissolves the group, so its id
       may vanish mid-batch). Deleting a group or frame deletes its children -
       delete containers FIRST rather than children-then-container.
-  {"rename": {"id": "...", "name": "NewFrameName"}}   (frames only)`
+  {"rename": {"id": "...", "name": "NewFrameName"}}   (frames only)
+  {"order": {"id": "Badge", "to": "front"}}
+      Z-order (which shape draws on top when they overlap).
+      to: front | back | forward | backward   (default: front)
+      {"order": {"id": "Badge", "to": "above", "ref": "Card"}} places it
+      directly above/below another shape. Ordering is relative to SIBLINGS -
+      shapes in the same screen - so id and ref must share a parent.`
 }

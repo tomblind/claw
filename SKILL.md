@@ -168,6 +168,11 @@ rework:
   `size.h` creates the exact-size box plus a separate centered overlay
   label. To change a chip's text later, `set_text` the box ref — it
   redirects to the overlay label and re-centers automatically.
+- **Overlap is z-order, not luck.** Shapes stack in creation order, so a
+  badge added before its card hides behind it. Fix it with `order`
+  (`to: front | back | forward | backward`, or `to: above|below` with a
+  `ref` to sit directly next to another shape). Ordering is relative to
+  siblings, so both shapes must live in the same screen.
 - **Never hand-compute text positions — use `center`/`align`/`row` on BOTH
   axes.** A text shape's y is the top of its line-box, not the visible glyph;
   any label that must line up with a sibling must be `center`ed on it.
