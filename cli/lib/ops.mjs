@@ -36,6 +36,10 @@ const OPS = {
 	rename: { required: ['id', 'name'], optional: [] },
 	order: { required: ['id'], optional: ['to', 'ref'] },
 	rotate: { required: [], optional: ['id', 'ids', 'to', 'by'] },
+	format: {
+		required: ['id'],
+		optional: ['bold', 'italic', 'underline', 'strike', 'code', 'highlight', 'match', 'all', 'clear'],
+	},
 }
 
 export function readOps(path) {
@@ -264,6 +268,14 @@ label text, or the "name" given to an earlier op in the same batch.
       may vanish mid-batch). Deleting a group or frame deletes its children -
       delete containers FIRST rather than children-then-container.
   {"rename": {"id": "...", "name": "NewFrameName"}}   (frames only)
+  {"format": {"id": "Title", "bold": true}}
+      Inline text styling: bold | italic | underline | strike | code |
+      highlight. true adds, false removes, "clear": true strips all.
+      Styles the WHOLE text unless "match" names a substring:
+      {"format": {"id": "Score", "match": "1200", "bold": true}}
+      add "all": true to style every occurrence, not just the first.
+      On a fixed chip, target the BOX - it redirects to the overlay label
+      and re-centres it (bold changes the text's width).
   {"rotate": {"id": "Badge", "by": 15}}
       Rotation in DEGREES, clockwise, around the shape's own center.
       "by": turn from where it is now.  "to": set an absolute angle.

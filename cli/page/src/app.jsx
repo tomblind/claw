@@ -955,6 +955,122 @@ function setupHost(editor) {
 // ops executor
 // ---------------------------------------------------------------------------
 
+/** Inline marks tldraw's rich text supports (StarterKit + Highlight). */
+const TEXT_MARKS = ['bold', 'italic', 'underline', 'strike', 'code', 'highlight']
+
+/**
+ * A fixed chip is a box plus a SEPARATE overlay label, so text ops have to
+ * target the label rather than the box (retexting the box would add a second
+ * label inside it and grow the box).
+ */
+function textTargetOf(editor, shape) {
+	if (shape.type === 'geo' && !shapePlaintext(editor, shape)) {
+		const overlay = editor
+			.getSortedChildIdsForParent(shape.id)
+			.map((cid) => editor.getShape(cid))
+			.find((c) => c?.type === 'text')
+		if (overlay) return { target: overlay, chipBox: shape }
+	}
+	return { target: shape, chipBox: null }
+}
+
+/** Re-centre a chip's overlay label after its text or styling changed width. */
+function recenterChipLabel(editor, chipBox, label) {
+	const bb = editor.getShapePageBounds(chipBox.id)
+	const lb = editor.getShapePageBounds(label.id)
+	const shape = editor.getShape(label.id)
+	if (!bb || !lb || !shape) return
+	editor.updateShape({
+		id: label.id,
+		type: 'text',
+		x: shape.x + (bb.x + bb.w / 2 - (lb.x + lb.w / 2)),
+		y: shape.y + (bb.y + bb.h / 2 - (lb.y + lb.h / 2)),
+	})
+}
+
+/**
+ * Add or remove inline marks on a rich-text document, optionally only on the
+ * runs covering a substring. Works on the document JSON (the same shape tldraw
+ * stores) so it needs no editing session: text nodes are split at range
+ * boundaries and each covered slice gets the new mark set.
+ */
+function applyRichTextMarks(doc, { marks = {}, match = null, all = false, clear = false }) {
+	let hits = 0
+	const mergeMarks = (existing) => {
+		if (clear) return []
+		const next = existing.filter((mk) => marks[mk.type] !== false)
+		for (const [type, on] of Object.entries(marks)) {
+			if (on && !next.some((mk) => mk.type === type)) next.push({ type })
+		}
+		return next
+	}
+	const transformTextParent = (node) => {
+		const runs = (node.content ?? []).map((child) =>
+			child.type === 'text' ? { text: child.text ?? '', marks: child.marks ?? [] } : { node: child }
+		)
+		const plain = runs.map((r) => r.text ?? '').join('')
+		const ranges = []
+		if (match) {
+			let from = 0
+			for (;;) {
+				const at = plain.indexOf(match, from)
+				if (at === -1) break
+				ranges.push([at, at + match.length])
+				from = at + match.length
+				if (!all) break
+			}
+			if (!ranges.length) return node
+		} else {
+			if (!plain.length) return node
+			ranges.push([0, plain.length])
+		}
+		hits += ranges.length
+		const covered = (i) => ranges.some(([a, b]) => i >= a && i < b)
+		const out = []
+		let pos = 0
+		for (const run of runs) {
+			if (run.text == null) {
+				out.push(run.node)
+				continue
+			}
+			let start = 0
+			while (start < run.text.length) {
+				const state = covered(pos + start)
+				let end = start + 1
+				while (end < run.text.length && covered(pos + end) === state) end++
+				const nextMarks = state ? mergeMarks(run.marks) : run.marks
+				out.push({
+					type: 'text',
+					text: run.text.slice(start, end),
+					...(nextMarks.length ? { marks: nextMarks } : {}),
+				})
+				start = end
+			}
+			pos += run.text.length
+		}
+		// merge neighbouring runs that ended up with identical marks, so
+		// repeated formatting can't fragment the text indefinitely
+		const merged = []
+		for (const run of out) {
+			const prev = merged[merged.length - 1]
+			const sameMarks =
+				prev?.type === 'text' &&
+				run.type === 'text' &&
+				JSON.stringify((prev.marks ?? []).map((m) => m.type).sort()) ===
+					JSON.stringify((run.marks ?? []).map((m) => m.type).sort())
+			if (sameMarks) prev.text += run.text
+			else merged.push({ ...run })
+		}
+		return { ...node, content: merged }
+	}
+	const walk = (node) => {
+		if (!node?.content?.length) return node
+		if (node.content.some((c) => c.type === 'text')) return transformTextParent(node)
+		return { ...node, content: node.content.map(walk) }
+	}
+	return { doc: walk(doc), hits }
+}
+
 const rich = (text) =>
 	typeof TL.toRichText === 'function'
 		? TL.toRichText(String(text))
@@ -1377,37 +1493,13 @@ async function applyOps(editor, ops) {
 				}
 
 				case 'set_text': {
-					let target = ref(args.id)
-					let chipBox = null
-					// a fixed chip is a box + separate overlay label. Retexting the
-					// BOX would add a second label inside it and grow the box -
-					// redirect to the overlay label instead (and re-center it after)
-					if (target.type === 'geo' && !shapePlaintext(editor, target)) {
-						const overlay = editor
-							.getSortedChildIdsForParent(target.id)
-							.map((cid) => editor.getShape(cid))
-							.find((c) => c?.type === 'text')
-						if (overlay) {
-							chipBox = target
-							target = overlay
-						}
-					}
+					const { target, chipBox } = textTargetOf(editor, ref(args.id))
 					editor.updateShape({
 						id: target.id,
 						type: target.type,
 						props: { richText: rich(args.text) },
 					})
-					if (chipBox) {
-						const bb = editor.getShapePageBounds(chipBox.id)
-						const lb = editor.getShapePageBounds(target.id)
-						const lShape = editor.getShape(target.id)
-						editor.updateShape({
-							id: target.id,
-							type: 'text',
-							x: lShape.x + (bb.x + bb.w / 2 - (lb.x + lb.w / 2)),
-							y: lShape.y + (bb.y + bb.h / 2 - (lb.y + lb.h / 2)),
-						})
-					}
+					if (chipBox) recenterChipLabel(editor, chipBox, target)
 					touched.updated.push(target.id)
 					report.push(
 						`set_text ${short(target.id)}${chipBox ? ` (chip label of ${short(chipBox.id)})` : ''} -> ${JSON.stringify(String(args.text).slice(0, 40))}`
@@ -2066,6 +2158,40 @@ async function applyOps(editor, ops) {
 					editor.deleteShape(target.id)
 					touched.deleted.push(target.id)
 					report.push(`delete ${short(target.id)} (${target.type})`)
+					break
+				}
+
+				case 'format': {
+					// Inline styling for text: whole shape, or just the runs covering
+					// a substring. Marks live in the rich-text document itself, so
+					// this is portable - any tldraw editor renders them.
+					const { target, chipBox } = textTargetOf(editor, ref(args.id))
+					const marks = {}
+					for (const m of TEXT_MARKS) if (args[m] != null) marks[m] = !!args[m]
+					const clear = !!args.clear
+					if (!clear && !Object.keys(marks).length) {
+						throw new Error(`format needs at least one of ${TEXT_MARKS.join(', ')} (or clear:true)`)
+					}
+					const current = editor.getShape(target.id)?.props?.richText
+					const doc = current ?? rich(shapePlaintext(editor, target) ?? '')
+					const { doc: next, hits } = applyRichTextMarks(doc, {
+						marks,
+						match: args.match != null ? String(args.match) : null,
+						all: !!args.all,
+						clear,
+					})
+					if (args.match != null && hits === 0) {
+						throw new Error(`format: no text matching ${JSON.stringify(String(args.match))} in ${short(target.id)}`)
+					}
+					editor.updateShape({ id: target.id, type: target.type, props: { richText: next } })
+					// bold/italic change the glyph widths, so a chip label that was
+					// centred is no longer centred
+					if (chipBox) recenterChipLabel(editor, chipBox, target)
+					touched.updated.push(target.id)
+					const applied = clear ? 'cleared' : Object.entries(marks).map(([k, v]) => (v ? k : `no-${k}`)).join(' ')
+					report.push(
+						`format ${short(target.id)}${chipBox ? ` (chip label of ${short(chipBox.id)})` : ''} -> ${applied}${args.match != null ? ` on ${hits} match(es) of ${JSON.stringify(String(args.match))}` : ''}`
+					)
 					break
 				}
 
