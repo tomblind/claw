@@ -35,6 +35,7 @@ const OPS = {
 	delete: { required: ['id'], optional: [] },
 	rename: { required: ['id', 'name'], optional: [] },
 	order: { required: ['id'], optional: ['to', 'ref'] },
+	rotate: { required: [], optional: ['id', 'ids', 'to', 'by'] },
 }
 
 export function readOps(path) {
@@ -263,6 +264,13 @@ label text, or the "name" given to an earlier op in the same batch.
       may vanish mid-batch). Deleting a group or frame deletes its children -
       delete containers FIRST rather than children-then-container.
   {"rename": {"id": "...", "name": "NewFrameName"}}   (frames only)
+  {"rotate": {"id": "Badge", "by": 15}}
+      Rotation in DEGREES, clockwise, around the shape's own center.
+      "by": turn from where it is now.  "to": set an absolute angle.
+      {"rotate": {"ids": ["A", "B"], "by": 15}} turns the group as one
+      unit around their shared center; with "to" each shape is set to
+      that angle around its own center. Bound arrows are driven by their
+      endpoints and cannot be rotated.
   {"order": {"id": "Badge", "to": "front"}}
       Z-order (which shape draws on top when they overlap).
       to: front | back | forward | backward   (default: front)

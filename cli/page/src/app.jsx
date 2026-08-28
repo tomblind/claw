@@ -2069,6 +2069,48 @@ async function applyOps(editor, ops) {
 					break
 				}
 
+				case 'rotate': {
+					// Degrees, clockwise, around the shape's own center. tldraw stores
+					// radians and rotating via the raw `rotation` prop would pivot
+					// around the shape's top-left corner, visibly moving it - so this
+					// goes through rotateShapesBy, which pivots around the center.
+					if ((args.id == null) === (args.ids == null)) {
+						throw new Error('rotate needs either "id" (one shape) or "ids" (a set)')
+					}
+					if ((args.by == null) === (args.to == null)) {
+						throw new Error('rotate needs either "by" (turn from here) or "to" (absolute angle), in degrees')
+					}
+					const deg = Number(args.by ?? args.to)
+					if (!Number.isFinite(deg)) throw new Error(`rotate: "${args.by != null ? 'by' : 'to'}" must be a number of degrees`)
+					const list = (args.ids ?? [args.id]).map((r) => ref(r))
+					for (const sh of list) {
+						if (sh.type !== 'arrow') continue
+						if (editor.getBindingsFromShape(sh.id, 'arrow').length) {
+							throw new Error(
+								`${short(sh.id)} is a bound arrow: its shape follows its endpoints, so rotating it has no meaning (move or re-route the arrow instead)`
+							)
+						}
+					}
+					const toRad = (d) => (d * Math.PI) / 180
+					const norm = (d) => Math.round((((d % 360) + 360) % 360) * 100) / 100
+					if (args.by != null && list.length > 1) {
+						// a set turns as one unit, around the center of the whole group
+						editor.rotateShapesBy(list.map((sh) => sh.id), toRad(deg))
+					} else {
+						for (const sh of list) {
+							const current = (editor.getShape(sh.id)?.rotation ?? 0) * (180 / Math.PI)
+							const delta = args.by != null ? deg : deg - current
+							editor.rotateShapesBy([sh.id], toRad(delta))
+						}
+					}
+					touched.updated.push(...list.map((sh) => sh.id))
+					const angles = list
+						.map((sh) => `${short(sh.id)}@${norm((editor.getShape(sh.id)?.rotation ?? 0) * (180 / Math.PI))}deg`)
+						.join(' ')
+					report.push(`rotate ${args.by != null ? `by ${deg}` : `to ${deg}`}deg -> ${angles}`)
+					break
+				}
+
 				case 'order': {
 					// Z-order: which shape draws on top where they overlap. tldraw
 					// orders SIBLINGS by a fractional index, so everything here is
