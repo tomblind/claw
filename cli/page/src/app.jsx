@@ -171,10 +171,24 @@ function applyClawTheme(editor, { force = false } = {}) {
 				if (!base || typeof base !== 'object') continue
 				if (typeof val === 'string') {
 					const bg = mode === 'light' ? '#ffffff' : '#101011'
+					const ink = mode === 'light' ? '#000000' : '#ffffff'
+					// a palette entry is more than a fill: frames, notes and lined
+					// fills read their own keys, and a slot cloned from black would
+					// otherwise tint geo shapes while leaving frames/notes black.
+					// Ratios follow tldraw's own palette (e.g. blue solid #4465e9 ->
+					// frameStroke #6681ec, frameFill #f9fafe).
 					Object.assign(base, {
 						solid: val,
 						semi: mixHex(val, bg, 0.7),
 						pattern: mixHex(val, bg, 0.45),
+						frameStroke: mixHex(val, bg, 0.18),
+						frameHeadingStroke: mixHex(val, bg, 0.18),
+						frameFill: mixHex(val, bg, 0.96),
+						frameHeadingFill: mixHex(val, bg, 0.96),
+						frameText: ink,
+						noteFill: mixHex(val, bg, 0.35),
+						noteText: ink,
+						linedFill: mixHex(val, bg, 0.15),
 					})
 					if ('fill' in base) base.fill = val
 				} else {
@@ -1332,7 +1346,7 @@ async function applyOps(editor, ops) {
 						x,
 						y,
 						meta: { clawName: String(args.name ?? 'Screen') },
-						props: { w, h, name: String(args.name ?? 'Screen') },
+						props: { w, h, name: String(args.name ?? 'Screen'), ...(args.color != null ? { color: String(args.color) } : {}) },
 					})
 					aliases.set(String(args.name), id)
 					touched.created.push(id)
@@ -2691,6 +2705,7 @@ function onMount(editor) {
 		setupHost(editor)
 		installInsecureClipboardShim(editor)
 		ensureStaticCss()
+		applyClawStyleDefaults(editor)
 		if (isSmoothText()) editor.getContainer()?.classList.add('claw-smooth-text')
 		applyClawTheme(editor)
 		// live retheme: a `theme` op lands in document meta and every connected
@@ -3508,7 +3523,34 @@ const CLAW_SHAPE_UTILS = [
 	withClawTextOutline(TL.TextShapeUtil),
 	withClawTextOutline(TL.GeoShapeUtil),
 	withClawTextOutline(TL.ArrowShapeUtil),
+	// frames carry a real color prop, but tldraw keeps it off the style system
+	// until this option turns it on (it then registers the colour style, so the
+	// style panel, the `style` op and claw's custom colour slots all reach it)
+	TL.FrameShapeUtil.configure({ showColors: true }),
 ]
+
+/**
+ * Claw draws diagrams, not doodles: shapes start with a solid edge and a sans
+ * label rather than tldraw's hand-sketched "draw" styles. Only tldraw's own
+ * default is replaced - anything else is a deliberate choice and is left
+ * alone. (Agent ops already default the same way.)
+ */
+function applyClawStyleDefaults(editor) {
+	try {
+		const swap = [
+			[TL.DefaultDashStyle, 'draw', 'solid'],
+			[TL.DefaultFontStyle, 'draw', 'sans'],
+		]
+		for (const [style, tldrawDefault, want] of swap) {
+			if (!style) continue
+			if (editor.getStyleForNextShape(style) === tldrawDefault) {
+				editor.setStyleForNextShapes(style, want)
+			}
+		}
+	} catch (err) {
+		reportError('style-defaults', err)
+	}
+}
 
 // ---- smooth text outline (user preference) ---------------------------------
 // tldraw's halo is six stamped copies of the glyphs - lumpy at the diagonals.

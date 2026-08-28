@@ -9,7 +9,7 @@ import { TldrError } from './load.mjs'
  */
 
 const OPS = {
-	add_screen: { required: ['name'], optional: ['near', 'at', 'size'] },
+	add_screen: { required: ['name'], optional: ['near', 'at', 'size', 'color'] },
 	add: {
 		required: [],
 		optional: ['screen', 'kind', 'text', 'at', 'size', 'color', 'name', 'font', 'textSize', 'labelColor', 'svg', 'src', 'dataUrl'],
@@ -142,7 +142,9 @@ export function opsHelp() {
 References (id/from/to/screen/near) accept: a shape id, short id, frame name,
 label text, or the "name" given to an earlier op in the same batch.
 
-  {"add_screen": {"name": "BonusRound"}}
+  {"add_screen": {"name": "BonusRound", "color": "light-blue"}}
+      "color" tints the frame (default white). Any palette colour or a
+      theme's custom-N slot; restyle later with {"style": {...,"color":...}}.
       Placement is optional: omit "near"/"at" and screens auto-flow onto a
       grid (rows of 5) - the right default when authoring a whole canvas.
       "near": <ref> places beside that shape; "at": {"x","y"} is explicit.
