@@ -335,7 +335,15 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 			if (still.length === pending.length) break
 			pending = still
 		}
-		// anything unplaceable keeps its current position; bound arrows adapt
+		// A satellite the spiral search can't fit (its barycenter is boxed in by
+		// large neighbours - common on canvases with a big overview board) keeps
+		// its current position. Record that as its target: leaving it absent
+		// makes every later pass read a missing entry.
+		for (const id of pending) {
+			if (targets.has(id)) continue
+			const s = byId.get(id)
+			targets.set(id, { x: s.x, y: s.y })
+		}
 	}
 
 	// ---- emit move ops -------------------------------------------------------
@@ -384,9 +392,13 @@ export async function computeLayout(projection, { gapX = GAP_X, gapY = GAP_Y } =
 	}
 
 	// ---- route translation: ELK bend points -> tldraw elbows ----------------
+	// A screen with no assigned target keeps its current position, so read it
+	// from the shape rather than assuming `targets` covers every screen. The
+	// satellite pass can legitimately give up on a screen (see below), and
+	// every later pass measures screens through here.
 	const rectOf = (id) => {
 		const s = byId.get(id)
-		const t = targets.get(id)
+		const t = targets.get(id) ?? { x: s.x, y: s.y }
 		return { x: t.x, y: t.y, w: s.w, h: s.h }
 	}
 	const endRect = (shapeId, rootId) => {
