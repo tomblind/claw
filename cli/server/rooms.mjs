@@ -9,6 +9,7 @@ import {
 	CUSTOM_FONT_SLOTS,
 	extractCustomStyles,
 	restoreCustomStyles,
+	ROUNDED_GEO,
 } from '../lib/custom-slots.mjs'
 
 /**
@@ -67,6 +68,13 @@ for (const styleProp of [
 }
 try {
 	tlschema.DefaultFontStyle?.addValues?.(...CUSTOM_FONT_SLOTS)
+} catch {}
+// rounded boxes render as a claw-only geo value. Room memory carries it (the
+// restore pass sets it from meta.clawRadius), so the room's own schema has to
+// accept it too - otherwise a synced rounded box is rejected as INVALID_RECORD
+// and the client is disconnected.
+try {
+	tlschema.GeoShapeGeoStyle?.addValues?.(ROUNDED_GEO)
 } catch {}
 
 const schema = createTLSchema()
