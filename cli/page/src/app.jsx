@@ -260,8 +260,13 @@ function paintGradients(editor) {
 				// every descendant paints its own opaque colour, which would cover
 				// the clipped gradient - they all have to become transparent so only
 				// the wrapper's clipped background shows through the glyphs
+				// gradient text paints by clipping a background to the glyphs, so its
+				// own fill is transparent. Any text outline then sits ON TOP of the
+				// letterforms and eats inward - the stamped halo (text-shadow) and
+				// the smooth variant (-webkit-text-stroke) both have to go.
 				rules.push(
-					`${sel} .tl-rich-text-wrapper, ${sel} .tl-rich-text-wrapper * { color: transparent !important; text-shadow: none !important; }`
+					`${sel} .tl-rich-text-wrapper, ${sel} .tl-rich-text-wrapper * { color: transparent !important;` +
+						` text-shadow: none !important; -webkit-text-stroke: 0 !important; paint-order: normal !important; }`
 				)
 			}
 		}
@@ -4080,7 +4085,8 @@ const withClawGradientExport = (Util) =>
 					`.${scope} .tl-rich-text > div { background-image: ${css} !important;` +
 					` -webkit-background-clip: text !important; background-clip: text !important; }` +
 					`.${scope} .tl-rich-text > div, .${scope} .tl-rich-text > div *, .${scope} .tl-rich-text {` +
-					` color: transparent !important; text-shadow: none !important; }` +
+					` color: transparent !important; text-shadow: none !important;` +
+					` -webkit-text-stroke: 0 !important; paint-order: normal !important; }` +
 					`</style>`
 			}
 			return React.createElement(
