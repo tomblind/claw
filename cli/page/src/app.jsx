@@ -153,6 +153,121 @@ const mixHex = (hex, other, t) => {
 	return '#' + a.map((v, i) => Math.round(v + (b[i] - v) * t).toString(16).padStart(2, '0')).join('')
 }
 
+/**
+ * Gradient slots. A custom colour slot may hold a gradient instead of a hex:
+ *   { gradient: 'linear' | 'radial', from: '#hex', to: '#hex' }
+ * The slot owns the COLOURS (change it once, every shape using it follows);
+ * each shape owns the GEOMETRY, as fractions of its own box in
+ * meta.clawGradient = { from: {x, y}, to: {x, y} } - fractions so a gradient
+ * keeps its look when the shape is resized.
+ */
+const isGradientSlot = (val) => !!val && typeof val === 'object' && typeof val.gradient === 'string'
+const gradientMidpoint = (val) => mixHex(val.from ?? '#000000', val.to ?? '#ffffff', 0.5)
+const DEFAULT_GRADIENT_POINTS = {
+	linear: { from: { x: 0.5, y: 0 }, to: { x: 0.5, y: 1 } },
+	radial: { from: { x: 0.5, y: 0.5 }, to: { x: 1, y: 0.5 } },
+}
+const gradientPointsOf = (shape, kind) => {
+	const d = DEFAULT_GRADIENT_POINTS[kind] ?? DEFAULT_GRADIENT_POINTS.linear
+	const m = shape?.meta?.clawGradient
+	const pt = (p, fb) => ({
+		x: Number.isFinite(Number(p?.x)) ? Number(p.x) : fb.x,
+		y: Number.isFinite(Number(p?.y)) ? Number(p.y) : fb.y,
+	})
+	return { from: pt(m?.from, d.from), to: pt(m?.to, d.to) }
+}
+
+/**
+ * Paint gradient slots onto the canvas.
+ *
+ * tldraw resolves a colour slot to ONE css colour and paints fill, stroke and
+ * text with it, so a gradient cannot travel through the theme itself. Instead
+ * each shape using a gradient slot gets its own gradient definition (in
+ * object-bounding-box units, which is exactly what fractional control points
+ * are) plus a css rule pointing that shape's paint at it: svg fill/stroke for
+ * shapes, background-clip for html text. Rebuilt when the shapes or the theme
+ * change, and a no-op when nothing on the page uses a gradient.
+ */
+let lastGradientKey = null
+function paintGradients(editor) {
+	try {
+		const spec = editor.getDocumentSettings?.()?.meta?.clawTheme ?? null
+		const bySlot = new Map(Object.entries(spec?.colors ?? {}).filter(([, v]) => isGradientSlot(v)))
+		const entries = []
+		if (bySlot.size) {
+			for (const shape of editor.getCurrentPageShapes()) {
+				for (const prop of ['color', 'labelColor']) {
+					const def = bySlot.get(shape.props?.[prop])
+					if (!def) continue
+					// how the paint reaches the pixels decides the technique: a text
+					// SHAPE paints its glyphs through `color` as html, while a geo's
+					// `color` paints svg and its `labelColor` paints html
+					const asText = prop === 'labelColor' || shape.type === 'text' || shape.type === 'note'
+					entries.push({
+						id: shape.id,
+						prop,
+						asText,
+						def,
+						points: gradientPointsOf(shape, def.gradient),
+					})
+				}
+			}
+		}
+		const key = JSON.stringify(entries)
+		if (key === lastGradientKey) return
+		lastGradientKey = key
+		document.getElementById('claw-gradient-defs')?.remove()
+		document.getElementById('claw-gradient-css')?.remove()
+		if (!entries.length) return
+		const defs = []
+		const rules = []
+		for (const { id, prop, asText, def, points } of entries) {
+			const gid = `claw-grad-${id.replace(/[^\w-]/g, '')}-${prop}`
+			const stops = `<stop offset="0" stop-color="${def.from}"/><stop offset="1" stop-color="${def.to}"/>`
+			if (def.gradient === 'radial') {
+				const r = Math.max(0.01, Math.hypot(points.to.x - points.from.x, points.to.y - points.from.y))
+				defs.push(
+					`<radialGradient id="${gid}" gradientUnits="objectBoundingBox" cx="${points.from.x}" cy="${points.from.y}" r="${r}">${stops}</radialGradient>`
+				)
+			} else {
+				defs.push(
+					`<linearGradient id="${gid}" gradientUnits="objectBoundingBox" x1="${points.from.x}" y1="${points.from.y}" x2="${points.to.x}" y2="${points.to.y}">${stops}</linearGradient>`
+				)
+			}
+			const sel = `[data-shape-id="${id}"]`
+			if (!asText) {
+				// two paths: the filled body (fill != none) and the outline
+				// (fill="none" with a stroke) - each takes the gradient on its own
+				// channel, so an unfilled shape still gets a gradient outline
+				rules.push(`${sel} .tl-svg-container path:not([fill="none"]) { fill: url(#${gid}); }`)
+				rules.push(`${sel} .tl-svg-container path[stroke] { stroke: url(#${gid}); }`)
+			} else {
+				const css =
+					def.gradient === 'radial'
+						? `radial-gradient(circle at ${points.from.x * 100}% ${points.from.y * 100}%, ${def.from}, ${def.to})`
+						: `linear-gradient(to bottom, ${def.from}, ${def.to})`
+				// html text takes a gradient by clipping a background to the glyphs;
+				// the outline halo would paint over it, so it goes off here
+				rules.push(
+					`${sel} .tl-rich-text-wrapper { background-image: ${css}; -webkit-background-clip: text; background-clip: text; color: transparent !important; text-shadow: none !important; }`
+				)
+			}
+		}
+		const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+		svg.id = 'claw-gradient-defs'
+		svg.setAttribute('aria-hidden', 'true')
+		svg.style.cssText = 'position:absolute;width:0;height:0;overflow:hidden'
+		svg.innerHTML = `<defs>${defs.join('')}</defs>`
+		document.body.appendChild(svg)
+		const style = document.createElement('style')
+		style.id = 'claw-gradient-css'
+		style.textContent = rules.join(String.fromCharCode(10))
+		document.head.appendChild(style)
+	} catch (err) {
+		reportError('gradients', err)
+	}
+}
+
 function applyClawTheme(editor, { force = false } = {}) {
 	try {
 		if (typeof editor.getTheme !== 'function' || typeof editor.updateThemes !== 'function') return
@@ -172,7 +287,9 @@ function applyClawTheme(editor, { force = false } = {}) {
 					next.colors[mode][name] = base
 				}
 				if (!base || typeof base !== 'object') continue
-				if (typeof val === 'string') {
+				const asColor = isGradientSlot(val) ? gradientMidpoint(val) : val
+				if (typeof asColor === 'string') {
+					const val = asColor // eslint-disable-line no-shadow
 					const bg = mode === 'light' ? '#ffffff' : '#101011'
 					const ink = mode === 'light' ? '#000000' : '#ffffff'
 					// a palette entry is more than a fill: frames, notes and lined
@@ -2199,6 +2316,43 @@ async function applyOps(editor, ops) {
 					break
 				}
 
+				case 'gradient': {
+					// per-shape geometry for a gradient slot: fractions of the shape's
+					// own box, so the look survives a resize
+					const target = ref(args.id)
+					const frac = (p, what) => {
+						const x = Number(p?.x)
+						const y = Number(p?.y)
+						if (!Number.isFinite(x) || !Number.isFinite(y)) {
+							throw new Error(`gradient "${what}" needs {x, y} as fractions of the shape (0-1)`)
+						}
+						return { x: Math.max(-1, Math.min(2, x)), y: Math.max(-1, Math.min(2, y)) }
+					}
+					if (args.reset) {
+						const { clawGradient: _drop, ...rest } = target.meta ?? {}
+						editor.updateShape({ id: target.id, type: target.type, meta: rest })
+						touched.updated.push(target.id)
+						report.push(`gradient ${short(target.id)} -> reset to default placement`)
+						break
+					}
+					if (args.from == null || args.to == null) {
+						throw new Error('gradient needs "from" and "to" ({x, y} fractions), or "reset": true')
+					}
+					editor.updateShape({
+						id: target.id,
+						type: target.type,
+						meta: {
+							...(target.meta ?? {}),
+							clawGradient: { from: frac(args.from, 'from'), to: frac(args.to, 'to') },
+						},
+					})
+					touched.updated.push(target.id)
+					report.push(
+						`gradient ${short(target.id)} -> from ${args.from.x},${args.from.y} to ${args.to.x},${args.to.y}`
+					)
+					break
+				}
+
 				case 'format': {
 					// Inline styling for text: whole shape, or just the runs covering
 					// a substring. Marks live in the rich-text document itself, so
@@ -2738,6 +2892,11 @@ function onMount(editor) {
 			TL.react('claw-theme', () => {
 				editor.getDocumentSettings() // tracked; retheme when meta changes
 				applyClawTheme(editor)
+			})
+			TL.react('claw-gradients', () => {
+				editor.getDocumentSettings()
+				editor.getCurrentPageShapes() // tracked: shapes, colours, control points
+				paintGradients(editor)
 			})
 		}
 		if (EXECUTOR) {

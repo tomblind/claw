@@ -36,6 +36,7 @@ const OPS = {
 	rename: { required: ['id', 'name'], optional: [] },
 	order: { required: ['id'], optional: ['to', 'ref'] },
 	rotate: { required: [], optional: ['id', 'ids', 'to', 'by'] },
+	gradient: { required: ['id'], optional: ['from', 'to', 'reset'] },
 	format: {
 		required: ['id'],
 		optional: ['bold', 'italic', 'underline', 'strike', 'code', 'highlight', 'match', 'all', 'clear'],
@@ -277,6 +278,16 @@ label text, or the "name" given to an earlier op in the same batch.
       {"style": {"id": "...", "geo": "hexagon", "radius": 20}}
       ("radius": 0 squares it off). Rounding lives in metadata, so other
       editors show the ordinary shape.
+  {"theme": {"colors": {"custom-1": {"gradient": "linear", "from": "#ff8a3d", "to": "#c2185b"}}}}
+      A colour slot can hold a gradient ("linear" or "radial") instead of a
+      hex. The SLOT owns the two colours - edit it once and every shape
+      using it follows. Apply it like any colour: {"style": {"id": "...",
+      "color": "custom-1"}} paints fill and outline, "labelColor" paints text.
+  {"gradient": {"id": "Card", "from": {"x": 0, "y": 0}, "to": {"x": 1, "y": 1}}}
+      Where the gradient runs ACROSS ONE SHAPE, as fractions of that shape's
+      box (linear: start and end; radial: centre and outer edge). Defaults to
+      top-to-bottom. "reset": true restores the default. Fractions, so the
+      look survives a resize.
   {"format": {"id": "Title", "bold": true}}
       Inline text styling: bold | italic | underline | strike | code |
       highlight. true adds, false removes, "clear": true strips all.

@@ -66,6 +66,16 @@ const STANDARD_SOLIDS = {
 
 const hexOf = (val) => {
 	if (typeof val === 'string') return val
+	// a gradient slot falls back to the colour halfway between its two stops
+	if (val && typeof val.gradient === 'string') {
+		const mid = (a, b) => {
+			const p = (h) => [1, 3, 5].map((i) => parseInt(String(h).slice(i, i + 2), 16))
+			const [x, y] = [p(a), p(b)]
+			if (x.some(Number.isNaN) || y.some(Number.isNaN)) return null
+			return '#' + x.map((v, i) => Math.round((v + y[i]) / 2).toString(16).padStart(2, '0')).join('')
+		}
+		return mid(val.from ?? '#000000', val.to ?? '#ffffff')
+	}
 	const solid = val?.light?.solid ?? val?.solid
 	return typeof solid === 'string' ? solid : null
 }
