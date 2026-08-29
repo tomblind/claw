@@ -2947,9 +2947,16 @@ const fontFamilyOf = (val) =>
 const fontLabelOf = (val) => (typeof val === 'string' ? val : (val?.family ?? ''))
 const colorHexOf = (val) => {
 	if (typeof val === 'string') return val
+	if (isGradientSlot(val)) return gradientMidpoint(val)
 	const solid = val?.light?.solid ?? val?.solid
 	return typeof solid === 'string' ? solid : '#888888'
 }
+
+/** css for a gradient slot's preview swatch */
+const gradientCss = (def) =>
+	def.gradient === 'radial'
+		? `radial-gradient(circle at 50% 50%, ${def.from}, ${def.to})`
+		: `linear-gradient(to bottom, ${def.from}, ${def.to})`
 
 /** One meta write for add/edit/remove of a custom slot (value null = remove). */
 function clawThemePatch(editor, kind, slot, value) {
@@ -3166,6 +3173,85 @@ function ColorCustomizeDialog() {
 				)}
 				{defined.map((slot) => {
 					const isEditing = editing?.slot === slot
+					const def = colors[slot]
+					if (isGradientSlot(def) && !isEditing) {
+						// a gradient slot edits in place: two stops and a type, with no
+						// native picker session (there is no single colour to preview)
+						const patch = (next) => {
+							try {
+								clawThemePatch(editor, 'colors', slot, { ...def, ...next })
+							} catch (err) {
+								reportError('edit-gradient', err)
+							}
+						}
+						return (
+							<div key={slot} style={dialogRowStyle}>
+								<span
+									title={`${def.gradient} gradient`}
+									style={{
+										width: 22,
+										height: 22,
+										borderRadius: 4,
+										background: gradientCss(def),
+										border: '1px solid var(--tl-color-muted-1)',
+										flexShrink: 0,
+									}}
+								/>
+								<input
+									type="color"
+									aria-label="gradient start"
+									data-testid={`claw-grad-from-${slot}`}
+									value={def.from}
+									onChange={(e) => patch({ from: e.target.value })}
+									style={{ width: 26, height: 22, padding: 0, border: 'none', background: 'none' }}
+								/>
+								<input
+									type="color"
+									aria-label="gradient end"
+									data-testid={`claw-grad-to-${slot}`}
+									value={def.to}
+									onChange={(e) => patch({ to: e.target.value })}
+									style={{ width: 26, height: 22, padding: 0, border: 'none', background: 'none' }}
+								/>
+								<TL.TldrawUiButton
+									type="normal"
+									title="Switch between linear and radial"
+									data-testid={`claw-grad-type-${slot}`}
+									onClick={() => patch({ gradient: def.gradient === 'radial' ? 'linear' : 'radial' })}
+								>
+									<TL.TldrawUiButtonLabel>{def.gradient}</TL.TldrawUiButtonLabel>
+								</TL.TldrawUiButton>
+								<TL.TldrawUiButton
+									type="normal"
+									title="Back to a single colour"
+									data-testid={`claw-grad-solid-${slot}`}
+									onClick={() => {
+										try {
+											clawThemePatch(editor, 'colors', slot, gradientMidpoint(def))
+										} catch (err) {
+											reportError('edit-gradient', err)
+										}
+									}}
+								>
+									<TL.TldrawUiButtonLabel>Solid</TL.TldrawUiButtonLabel>
+								</TL.TldrawUiButton>
+								<TL.TldrawUiButton
+									type="normal"
+									title="Shapes using it go grey until it's re-added"
+									data-testid={`claw-color-remove-${slot}`}
+									onClick={() => {
+										try {
+											clawThemePatch(editor, 'colors', slot, null)
+										} catch (err) {
+											reportError('remove-color', err)
+										}
+									}}
+								>
+									<TL.TldrawUiButtonLabel>Remove</TL.TldrawUiButtonLabel>
+								</TL.TldrawUiButton>
+							</div>
+						)
+					}
 					return (
 						<div key={slot} style={dialogRowStyle}>
 							{isEditing ? (
@@ -3249,6 +3335,25 @@ function ColorCustomizeDialog() {
 										onClick={() => startEdit(slot, false)}
 									>
 										<TL.TldrawUiButtonLabel>Edit</TL.TldrawUiButtonLabel>
+									</TL.TldrawUiButton>
+									<TL.TldrawUiButton
+										type="normal"
+										title="Turn this colour into a gradient"
+										data-testid={`claw-color-gradient-${slot}`}
+										onClick={() => {
+											const from = colorHexOf(colors[slot])
+											try {
+												clawThemePatch(editor, 'colors', slot, {
+													gradient: 'linear',
+													from,
+													to: mixHex(from, '#ffffff', 0.55),
+												})
+											} catch (err) {
+												reportError('edit-gradient', err)
+											}
+										}}
+									>
+										<TL.TldrawUiButtonLabel>Gradient</TL.TldrawUiButtonLabel>
 									</TL.TldrawUiButton>
 									<TL.TldrawUiButton
 										type="normal"
@@ -3820,9 +3925,49 @@ function clawDisplayValues(editor, shape) {
 	return out
 }
 
-/** carry the shape's own gradient definition into whatever export it lands in */
+/**
+ * Carry the shape's own gradient into exports, and give a gradient shape two
+ * draggable control points.
+ *
+ * Handles are tldraw's own mechanism (the line tool uses them), so dragging,
+ * snapping and undo all come for free. Handle positions are shape-local
+ * pixels, while claw stores control points as FRACTIONS of the shape's box -
+ * the conversion happens in both directions here, which is what keeps a
+ * gradient looking the same after a resize.
+ */
 const withClawGradientExport = (Util) =>
 	class extends Util {
+		getHandles(shape) {
+			const inherited = super.getHandles?.(shape) ?? []
+			const def = gradientDefFor(this.editor, shape, 'color')
+			if (!def) return inherited
+			const w = shape.props?.w
+			const h = shape.props?.h
+			if (!Number.isFinite(w) || !Number.isFinite(h)) return inherited
+			const pts = gradientPointsOf(shape, def.gradient)
+			return [
+				...inherited,
+				{ id: 'claw-grad-from', type: 'vertex', canSnap: false, index: 'a1', x: pts.from.x * w, y: pts.from.y * h },
+				{ id: 'claw-grad-to', type: 'vertex', canSnap: false, index: 'a2', x: pts.to.x * w, y: pts.to.y * h },
+			]
+		}
+		onHandleDrag(shape, info) {
+			const { handle } = info
+			if (handle?.id !== 'claw-grad-from' && handle?.id !== 'claw-grad-to') {
+				return super.onHandleDrag?.(shape, info)
+			}
+			const def = gradientDefFor(this.editor, shape, 'color')
+			if (!def) return undefined
+			const w = shape.props?.w || 1
+			const h = shape.props?.h || 1
+			const pts = gradientPointsOf(shape, def.gradient)
+			const moved = { x: handle.x / w, y: handle.y / h }
+			const next = handle.id === 'claw-grad-from' ? { from: moved, to: pts.to } : { from: pts.from, to: moved }
+			return {
+				...shape,
+				meta: { ...(shape.meta ?? {}), clawGradient: next },
+			}
+		}
 		toSvg(shape, ctx) {
 			const def = gradientDefFor(this.editor, shape, 'color')
 			const inner = super.toSvg(shape, ctx)
