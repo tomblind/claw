@@ -9,7 +9,7 @@ import {
 	CUSTOM_FONT_SLOTS,
 	extractCustomStyles,
 	restoreCustomStyles,
-	ROUNDED_GEO,
+	ROUNDED_GEOS,
 } from '../lib/custom-slots.mjs'
 
 /**
@@ -74,7 +74,7 @@ try {
 // accept it too - otherwise a synced rounded box is rejected as INVALID_RECORD
 // and the client is disconnected.
 try {
-	tlschema.GeoShapeGeoStyle?.addValues?.(ROUNDED_GEO)
+	tlschema.GeoShapeGeoStyle?.addValues?.(...ROUNDED_GEOS)
 } catch {}
 
 const schema = createTLSchema()

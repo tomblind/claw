@@ -10,13 +10,15 @@ import * as TL from 'tldraw'
 import { useSync } from '@tldraw/sync'
 import lz from 'lz-string'
 import { getIndexAbove, getIndexBelow, getIndexBetween } from '@tldraw/utils'
+import { getPolygonVertices } from '@tldraw/editor'
 import 'tldraw/tldraw.css'
 import {
 	CUSTOM_COLOR_SLOTS,
 	CUSTOM_FONT_SLOTS,
 	extractCustomStyles,
 	restoreCustomStyles,
-	ROUNDED_GEO,
+	BASE_GEO_BY_ROUNDED,
+	ROUNDED_GEO_BY_BASE,
 } from '../../lib/custom-slots.mjs'
 
 const { Tldraw } = TL
@@ -1448,7 +1450,7 @@ async function applyOps(editor, ops) {
 							...(radius ? { meta: { ...(base.meta ?? {}), clawRadius: radius } } : {}),
 							type: 'geo',
 							props: {
-								geo: radius && spec.geo === 'rectangle' ? ROUNDED_GEO : spec.geo,
+								geo: (radius && ROUNDED_GEO_BY_BASE[spec.geo]) || spec.geo,
 								w: w ?? 160,
 								h: h ?? 100,
 								dash: 'solid',
@@ -2064,13 +2066,18 @@ async function applyOps(editor, ops) {
 						else skipped.push(key)
 					}
 					if (args.radius != null) {
-						if (target.type !== 'geo') throw new Error('radius applies to boxes (geo shapes)')
+						if (target.type !== 'geo') throw new Error('radius applies to geo shapes')
 						const radius = Math.max(0, Number(args.radius) || 0)
-						const squareGeo = target.props.geo === ROUNDED_GEO ? 'rectangle' : target.props.geo
-						if (radius && squareGeo !== 'rectangle') {
-							throw new Error(`radius applies to rectangles, not "${squareGeo}"`)
+						// the shape may be changing geo in this same op; round whatever
+						// it ends up as
+						const asked = patch.geo ?? target.props.geo
+						const base = BASE_GEO_BY_ROUNDED[asked] ?? asked
+						if (radius && !ROUNDED_GEO_BY_BASE[base]) {
+							throw new Error(
+								`"${base}" has no corners to round (rounding covers ${Object.keys(ROUNDED_GEO_BY_BASE).join(', ')})`
+							)
 						}
-						patch.geo = radius ? ROUNDED_GEO : squareGeo
+						patch.geo = radius ? ROUNDED_GEO_BY_BASE[base] : base
 						editor.updateShape({
 							id: target.id,
 							type: 'geo',
@@ -3550,34 +3557,107 @@ function withClawTextOutline(Util) {
  * editors therefore show an ordinary box, exactly as the radius is meant to
  * degrade.
  */
-const roundedRectPath = (w, h, shape) => {
-	const isFilled = shape.props.fill !== 'none'
-	// never let the corners swallow the shape
-	const r = Math.max(0, Math.min(Number(shape.meta?.clawRadius) || 0, Math.min(w, h) / 2))
+/** Corner points of each shape claw can round, matching tldraw's own paths. */
+const ROUNDABLE_VERTICES = {
+	rectangle: (w, h) => [[0, 0], [w, 0], [w, h], [0, h]],
+	triangle: (w, h) => [[w / 2, 0], [w, h], [0, h]],
+	diamond: (w, h) => [[w / 2, 0], [w, h / 2], [w / 2, h], [0, h / 2]],
+	pentagon: (w, h) => getPolygonVertices(w, h, 5).map((p) => [p.x, p.y]),
+	hexagon: (w, h) => getPolygonVertices(w, h, 6).map((p) => [p.x, p.y]),
+	octagon: (w, h) => getPolygonVertices(w, h, 8).map((p) => [p.x, p.y]),
+	rhombus: (w, h) => {
+		const o = Math.min(w * 0.38, h * 0.38)
+		return [[o, 0], [w, 0], [w - o, h], [0, h]]
+	},
+	'rhombus-2': (w, h) => {
+		const o = Math.min(w * 0.38, h * 0.38)
+		return [[0, 0], [w - o, 0], [w, h], [o, h]]
+	},
+	trapezoid: (w, h) => {
+		const o = Math.min(w * 0.38, h * 0.38)
+		return [[o, 0], [w - o, 0], [w, h], [0, h]]
+	},
+}
+
+/**
+ * Replace each corner of a polygon with an arc tangent to both edges.
+ *
+ * At a corner the arc has to start back along each edge by r/tan(angle/2),
+ * which grows fast as a corner gets sharp - so the trim is clamped to half of
+ * each adjacent edge and the radius recomputed from what actually fits. That
+ * keeps a pointy triangle from folding in on itself at a radius that a
+ * rectangle handles fine. The sweep direction comes from the sign of the turn,
+ * so winding never has to be assumed.
+ */
+function filletedPolygonPath(points, radius, isFilled) {
 	const P = TL.PathBuilder
-	if (!r) {
-		return new P().moveTo(0, 0, { geometry: { isFilled } }).lineTo(w, 0).lineTo(w, h).lineTo(0, h).close()
+	const pts = points.map(([x, y]) => ({ x, y }))
+	const n = pts.length
+	if (!(radius > 0) || n < 3) {
+		return P.lineThroughPoints(pts, { geometry: { isFilled } }).close()
 	}
-	return new P()
-		.moveTo(r, 0, { geometry: { isFilled } })
-		.lineTo(w - r, 0)
-		.circularArcTo(r, false, true, w, r)
-		.lineTo(w, h - r)
-		.circularArcTo(r, false, true, w - r, h)
-		.lineTo(r, h)
-		.circularArcTo(r, false, true, 0, h - r)
-		.lineTo(0, r)
-		.circularArcTo(r, false, true, r, 0)
-		.close()
+	const sub = (a, b) => ({ x: a.x - b.x, y: a.y - b.y })
+	const len = (v) => Math.hypot(v.x, v.y) || 1
+	const unit = (v) => {
+		const l = len(v)
+		return { x: v.x / l, y: v.y / l }
+	}
+	const corners = []
+	for (let i = 0; i < n; i++) {
+		const prev = pts[(i - 1 + n) % n]
+		const cur = pts[i]
+		const next = pts[(i + 1) % n]
+		const toPrev = unit(sub(prev, cur))
+		const toNext = unit(sub(next, cur))
+		const cos = Math.max(-1, Math.min(1, toPrev.x * toNext.x + toPrev.y * toNext.y))
+		const angle = Math.acos(cos)
+		// straight or doubled-back corner: nothing to round
+		if (!Number.isFinite(angle) || angle < 0.01 || Math.PI - angle < 0.01) {
+			corners.push({ start: cur, end: cur, r: 0, sweep: true })
+			continue
+		}
+		const maxTrim = Math.min(len(sub(prev, cur)), len(sub(next, cur))) / 2
+		const trim = Math.min(radius / Math.tan(angle / 2), maxTrim)
+		const r = trim * Math.tan(angle / 2)
+		const cross = (cur.x - prev.x) * (next.y - cur.y) - (cur.y - prev.y) * (next.x - cur.x)
+		corners.push({
+			start: { x: cur.x + toPrev.x * trim, y: cur.y + toPrev.y * trim },
+			end: { x: cur.x + toNext.x * trim, y: cur.y + toNext.y * trim },
+			r,
+			sweep: cross > 0,
+		})
+	}
+	const first = corners[0]
+	const path = new P().moveTo(first.start.x, first.start.y, { geometry: { isFilled } })
+	for (let i = 0; i < n; i++) {
+		const c = corners[i]
+		if (c.r > 0) path.circularArcTo(c.r, false, c.sweep, c.end.x, c.end.y)
+		else path.lineTo(c.end.x, c.end.y)
+		const nextCorner = corners[(i + 1) % n]
+		path.lineTo(nextCorner.start.x, nextCorner.start.y)
+	}
+	return path.close()
 }
 
 const CLAW_SHAPE_UTILS = [
 	withClawTextOutline(TL.TextShapeUtil),
 	withClawTextOutline(
 		TL.GeoShapeUtil.configure({
-			customGeoTypes: {
-				[ROUNDED_GEO]: { snapType: 'polygon', icon: 'geo-rectangle', getPath: roundedRectPath },
-			},
+			customGeoTypes: Object.fromEntries(
+				Object.entries(ROUNDED_GEO_BY_BASE).map(([base, rounded]) => [
+					rounded,
+					{
+						snapType: 'polygon',
+						icon: `geo-${base}`,
+						getPath: (w, h, shape) =>
+							filletedPolygonPath(
+								ROUNDABLE_VERTICES[base](w, h),
+								Math.max(0, Number(shape.meta?.clawRadius) || 0),
+								shape.props.fill !== 'none'
+							),
+					},
+				])
+			),
 		})
 	),
 	withClawTextOutline(TL.ArrowShapeUtil),
@@ -3604,6 +3684,16 @@ function applyClawStyleDefaults(editor) {
 			if (editor.getStyleForNextShape(style) === tldrawDefault) {
 				editor.setStyleForNextShapes(style, want)
 			}
+		}
+		// grid on by default. View preferences are saved per document, so this
+		// only applies to a canvas with nothing saved yet: turning the grid off
+		// is remembered rather than re-forced on every open.
+		let seenBefore = false
+		try {
+			seenBefore = SYNC ? localStorage.getItem(sessionKey()) != null : false
+		} catch {}
+		if (!seenBefore && !editor.getInstanceState().isGridMode) {
+			editor.updateInstanceState({ isGridMode: true })
 		}
 	} catch (err) {
 		reportError('style-defaults', err)
@@ -3652,7 +3742,7 @@ function ClawCornerRadiusControl() {
 		() => {
 			const boxes = editor
 				.getSelectedShapes()
-				.filter((s) => s.type === 'geo' && (s.props.geo === 'rectangle' || s.props.geo === ROUNDED_GEO))
+				.filter((s) => s.type === 'geo' && (ROUNDED_GEO_BY_BASE[s.props.geo] || BASE_GEO_BY_ROUNDED[s.props.geo]))
 			if (!boxes.length) return null
 			return { radius: Math.round(Number(boxes[0].meta?.clawRadius) || 0) }
 		},
@@ -3663,14 +3753,17 @@ function ClawCornerRadiusControl() {
 		const radius = Math.max(0, Math.min(200, Math.round(value)))
 		const boxes = editor
 			.getSelectedShapes()
-			.filter((s) => s.type === 'geo' && (s.props.geo === 'rectangle' || s.props.geo === ROUNDED_GEO))
+			.filter((s) => s.type === 'geo' && (ROUNDED_GEO_BY_BASE[s.props.geo] || BASE_GEO_BY_ROUNDED[s.props.geo]))
 		editor.updateShapes(
-			boxes.map((s) => ({
-				id: s.id,
-				type: 'geo',
-				meta: { ...s.meta, clawRadius: radius },
-				props: { geo: radius ? ROUNDED_GEO : 'rectangle' },
-			}))
+			boxes.map((s) => {
+				const base = BASE_GEO_BY_ROUNDED[s.props.geo] ?? s.props.geo
+				return {
+					id: s.id,
+					type: 'geo',
+					meta: { ...s.meta, clawRadius: radius },
+					props: { geo: radius ? ROUNDED_GEO_BY_BASE[base] : base },
+				}
+			})
 		)
 	}
 	return (

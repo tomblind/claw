@@ -16,8 +16,30 @@
  * the recorded fallback), that edit wins and the claw payload is dropped.
  */
 
-/** claw-only geo value: rounded boxes render with it, files never carry it. */
-export const ROUNDED_GEO = 'rounded-rectangle'
+/**
+ * Claw-only geo values: rounded shapes render with these, files never carry
+ * them (see restore/extract below). One entry per shape whose corners claw
+ * can round - all convex polygons; already-curved shapes have nothing to
+ * round, and shapes with inward corners (star, the arrows, x-box) are not
+ * supported yet.
+ */
+export const ROUNDED_GEO_BY_BASE = {
+	rectangle: 'rounded-rectangle',
+	triangle: 'rounded-triangle',
+	diamond: 'rounded-diamond',
+	pentagon: 'rounded-pentagon',
+	hexagon: 'rounded-hexagon',
+	octagon: 'rounded-octagon',
+	rhombus: 'rounded-rhombus',
+	'rhombus-2': 'rounded-rhombus-2',
+	trapezoid: 'rounded-trapezoid',
+}
+export const BASE_GEO_BY_ROUNDED = Object.fromEntries(
+	Object.entries(ROUNDED_GEO_BY_BASE).map(([base, rounded]) => [rounded, base])
+)
+export const ROUNDED_GEOS = Object.values(ROUNDED_GEO_BY_BASE)
+/** kept for callers that only deal with boxes */
+export const ROUNDED_GEO = ROUNDED_GEO_BY_BASE.rectangle
 
 export const CUSTOM_COLOR_SLOTS = Array.from({ length: 24 }, (_, i) => `custom-${i + 1}`)
 export const CUSTOM_FONT_SLOTS = Array.from({ length: 8 }, (_, i) => `custom-${i + 1}`)
@@ -101,8 +123,8 @@ export function restoreCustomStyles(records) {
 		// rounded boxes are stored as plain rectangles (so other editors show an
 		// ordinary box) with the radius on meta.clawRadius - the radius itself is
 		// what says "this was rounded"
-		if (r.props?.geo === 'rectangle' && Number(r.meta?.clawRadius) > 0) {
-			r.props.geo = ROUNDED_GEO
+		if (Number(r.meta?.clawRadius) > 0 && ROUNDED_GEO_BY_BASE[r.props?.geo]) {
+			r.props.geo = ROUNDED_GEO_BY_BASE[r.props.geo]
 		}
 		const legacy = typeof r.meta?.claw === 'object' && r.meta.claw !== null ? r.meta.claw : null
 		const payload = r.meta?.clawStyle ?? legacy
@@ -125,7 +147,7 @@ export function extractCustomStyles(records) {
 	const theme = docThemeOf(records)
 	for (const r of records) {
 		if (r.typeName !== 'shape') continue
-		if (r.props?.geo === ROUNDED_GEO) r.props.geo = 'rectangle'
+		if (BASE_GEO_BY_ROUNDED[r.props?.geo]) r.props.geo = BASE_GEO_BY_ROUNDED[r.props.geo]
 		let claw = null
 		for (const key of STYLE_KEYS) {
 			const v = r.props?.[key]

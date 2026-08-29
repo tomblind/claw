@@ -271,9 +271,12 @@ label text, or the "name" given to an earlier op in the same batch.
       delete containers FIRST rather than children-then-container.
   {"rename": {"id": "...", "name": "NewFrameName"}}   (frames only)
   {"add": {"screen": "Home", "kind": "box", "radius": 16, "size": {"w": 200, "h": 80}}}
-      "radius" rounds a box's corners (px). Change or remove it later with
-      {"style": {"id": "...", "radius": 24}} ("radius": 0 squares it off).
-      Rounding lives in metadata, so other editors show a plain box.
+      "radius" rounds corners (px). Works on any convex shape - rectangle,
+      triangle, diamond, pentagon, hexagon, octagon, rhombus, rhombus-2,
+      trapezoid - and combines with "geo" in one style op:
+      {"style": {"id": "...", "geo": "hexagon", "radius": 20}}
+      ("radius": 0 squares it off). Rounding lives in metadata, so other
+      editors show the ordinary shape.
   {"format": {"id": "Title", "bold": true}}
       Inline text styling: bold | italic | underline | strike | code |
       highlight. true adds, false removes, "clear": true strips all.
