@@ -12,12 +12,12 @@ const OPS = {
 	add_screen: { required: ['name'], optional: ['near', 'at', 'size', 'color'] },
 	add: {
 		required: [],
-		optional: ['screen', 'kind', 'text', 'at', 'size', 'color', 'name', 'font', 'textSize', 'labelColor', 'svg', 'src', 'dataUrl'],
+		optional: ['screen', 'kind', 'text', 'at', 'size', 'color', 'name', 'font', 'textSize', 'labelColor', 'svg', 'src', 'dataUrl', 'radius'],
 	},
 	set_text: { required: ['id', 'text'], optional: [] },
 	style: {
 		required: ['id'],
-		optional: ['font', 'size', 'color', 'fill', 'dash', 'align', 'verticalAlign', 'geo', 'opacity', 'labelColor', 'kind', 'bend'],
+		optional: ['font', 'size', 'color', 'fill', 'dash', 'align', 'verticalAlign', 'geo', 'opacity', 'labelColor', 'kind', 'bend', 'radius'],
 	},
 	move: { required: ['id'], optional: ['to', 'by'] },
 	center: { required: ['id', 'on'], optional: ['axis'] },
@@ -270,6 +270,10 @@ label text, or the "name" given to an earlier op in the same batch.
       may vanish mid-batch). Deleting a group or frame deletes its children -
       delete containers FIRST rather than children-then-container.
   {"rename": {"id": "...", "name": "NewFrameName"}}   (frames only)
+  {"add": {"screen": "Home", "kind": "box", "radius": 16, "size": {"w": 200, "h": 80}}}
+      "radius" rounds a box's corners (px). Change or remove it later with
+      {"style": {"id": "...", "radius": 24}} ("radius": 0 squares it off).
+      Rounding lives in metadata, so other editors show a plain box.
   {"format": {"id": "Title", "bold": true}}
       Inline text styling: bold | italic | underline | strike | code |
       highlight. true adds, false removes, "clear": true strips all.

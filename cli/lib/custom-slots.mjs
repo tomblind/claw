@@ -16,6 +16,9 @@
  * the recorded fallback), that edit wins and the claw payload is dropped.
  */
 
+/** claw-only geo value: rounded boxes render with it, files never carry it. */
+export const ROUNDED_GEO = 'rounded-rectangle'
+
 export const CUSTOM_COLOR_SLOTS = Array.from({ length: 24 }, (_, i) => `custom-${i + 1}`)
 export const CUSTOM_FONT_SLOTS = Array.from({ length: 8 }, (_, i) => `custom-${i + 1}`)
 
@@ -95,6 +98,12 @@ const docThemeOf = (records) =>
 export function restoreCustomStyles(records) {
 	for (const r of records) {
 		if (r.typeName !== 'shape') continue
+		// rounded boxes are stored as plain rectangles (so other editors show an
+		// ordinary box) with the radius on meta.clawRadius - the radius itself is
+		// what says "this was rounded"
+		if (r.props?.geo === 'rectangle' && Number(r.meta?.clawRadius) > 0) {
+			r.props.geo = ROUNDED_GEO
+		}
 		const legacy = typeof r.meta?.claw === 'object' && r.meta.claw !== null ? r.meta.claw : null
 		const payload = r.meta?.clawStyle ?? legacy
 		if (!payload) continue
@@ -116,6 +125,7 @@ export function extractCustomStyles(records) {
 	const theme = docThemeOf(records)
 	for (const r of records) {
 		if (r.typeName !== 'shape') continue
+		if (r.props?.geo === ROUNDED_GEO) r.props.geo = 'rectangle'
 		let claw = null
 		for (const key of STYLE_KEYS) {
 			const v = r.props?.[key]

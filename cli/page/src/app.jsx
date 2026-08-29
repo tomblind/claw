@@ -16,6 +16,7 @@ import {
 	CUSTOM_FONT_SLOTS,
 	extractCustomStyles,
 	restoreCustomStyles,
+	ROUNDED_GEO,
 } from '../../lib/custom-slots.mjs'
 
 const { Tldraw } = TL
@@ -1441,11 +1442,13 @@ async function applyOps(editor, ops) {
 						])
 						editor.createShape({ ...base, type: 'image', props: { assetId, w, h } })
 					} else if (spec.type === 'geo') {
+						const radius = Math.max(0, Number(args.radius) || 0)
 						editor.createShape({
 							...base,
+							...(radius ? { meta: { ...(base.meta ?? {}), clawRadius: radius } } : {}),
 							type: 'geo',
 							props: {
-								geo: spec.geo,
+								geo: radius && spec.geo === 'rectangle' ? ROUNDED_GEO : spec.geo,
 								w: w ?? 160,
 								h: h ?? 100,
 								dash: 'solid',
@@ -2059,6 +2062,20 @@ async function applyOps(editor, ops) {
 						if (args[key] == null) continue
 						if (key in (target.props ?? {})) patch[key] = args[key]
 						else skipped.push(key)
+					}
+					if (args.radius != null) {
+						if (target.type !== 'geo') throw new Error('radius applies to boxes (geo shapes)')
+						const radius = Math.max(0, Number(args.radius) || 0)
+						const squareGeo = target.props.geo === ROUNDED_GEO ? 'rectangle' : target.props.geo
+						if (radius && squareGeo !== 'rectangle') {
+							throw new Error(`radius applies to rectangles, not "${squareGeo}"`)
+						}
+						patch.geo = radius ? ROUNDED_GEO : squareGeo
+						editor.updateShape({
+							id: target.id,
+							type: 'geo',
+							meta: { ...(target.meta ?? {}), clawRadius: radius },
+						})
 					}
 					if (Object.keys(patch).length) {
 						editor.updateShape({ id: target.id, type: target.type, props: patch })
@@ -3454,6 +3471,7 @@ function CustomStylePanel(props) {
 					{colorRelevant && <ClawColorControls />}
 					{fontRelevant && <ClawFontControls />}
 					<ClawTextOutlineControl />
+					<ClawCornerRadiusControl />
 				</div>
 			</TL.DefaultStylePanel>
 		)
@@ -3478,6 +3496,7 @@ function CustomStylePanel(props) {
 				<TL.StylePanelLabelAlignPicker />
 			</div>
 			<div className="tlui-style-panel__section">
+				<ClawCornerRadiusControl />
 				<TL.StylePanelGeoShapePicker />
 				<TL.StylePanelArrowKindPicker />
 				<TL.StylePanelArrowheadPicker />
@@ -3519,9 +3538,48 @@ function withClawTextOutline(Util) {
 		}
 	}
 }
+/**
+ * Rounded boxes. tldraw's rectangle has no corner radius, so this registers a
+ * custom geo type whose path is a rounded rect; the radius itself rides on the
+ * shape as meta.clawRadius. Going through tldraw's own geo-type hook (rather
+ * than drawing our own rect) means every dash and fill style, including the
+ * hand-drawn "draw" look, keeps working untouched.
+ *
+ * Portability: the geo VALUE is claw-only, so files record the shape as a
+ * plain "rectangle" and it is restored on load (see custom-slots.mjs). Other
+ * editors therefore show an ordinary box, exactly as the radius is meant to
+ * degrade.
+ */
+const roundedRectPath = (w, h, shape) => {
+	const isFilled = shape.props.fill !== 'none'
+	// never let the corners swallow the shape
+	const r = Math.max(0, Math.min(Number(shape.meta?.clawRadius) || 0, Math.min(w, h) / 2))
+	const P = TL.PathBuilder
+	if (!r) {
+		return new P().moveTo(0, 0, { geometry: { isFilled } }).lineTo(w, 0).lineTo(w, h).lineTo(0, h).close()
+	}
+	return new P()
+		.moveTo(r, 0, { geometry: { isFilled } })
+		.lineTo(w - r, 0)
+		.circularArcTo(r, false, true, w, r)
+		.lineTo(w, h - r)
+		.circularArcTo(r, false, true, w - r, h)
+		.lineTo(r, h)
+		.circularArcTo(r, false, true, 0, h - r)
+		.lineTo(0, r)
+		.circularArcTo(r, false, true, r, 0)
+		.close()
+}
+
 const CLAW_SHAPE_UTILS = [
 	withClawTextOutline(TL.TextShapeUtil),
-	withClawTextOutline(TL.GeoShapeUtil),
+	withClawTextOutline(
+		TL.GeoShapeUtil.configure({
+			customGeoTypes: {
+				[ROUNDED_GEO]: { snapType: 'polygon', icon: 'geo-rectangle', getPath: roundedRectPath },
+			},
+		})
+	),
 	withClawTextOutline(TL.ArrowShapeUtil),
 	// frames carry a real color prop, but tldraw keeps it off the style system
 	// until this option turns it on (it then registers the colour style, so the
@@ -3583,6 +3641,54 @@ function ensureStaticCss() {
 }
 `
 	document.head.appendChild(el)
+}
+
+/** Corner rounding for the selected boxes (px), beside the style pickers. */
+function ClawCornerRadiusControl() {
+	const editor = TL.useEditor()
+	const useVal = typeof TL.useValue === 'function' ? TL.useValue : (_n, fn) => fn()
+	const state = useVal(
+		'claw corner radius',
+		() => {
+			const boxes = editor
+				.getSelectedShapes()
+				.filter((s) => s.type === 'geo' && (s.props.geo === 'rectangle' || s.props.geo === ROUNDED_GEO))
+			if (!boxes.length) return null
+			return { radius: Math.round(Number(boxes[0].meta?.clawRadius) || 0) }
+		},
+		[editor]
+	)
+	if (!state) return null
+	const setRadius = (value) => {
+		const radius = Math.max(0, Math.min(200, Math.round(value)))
+		const boxes = editor
+			.getSelectedShapes()
+			.filter((s) => s.type === 'geo' && (s.props.geo === 'rectangle' || s.props.geo === ROUNDED_GEO))
+		editor.updateShapes(
+			boxes.map((s) => ({
+				id: s.id,
+				type: 'geo',
+				meta: { ...s.meta, clawRadius: radius },
+				props: { geo: radius ? ROUNDED_GEO : 'rectangle' },
+			}))
+		)
+	}
+	return (
+		<div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 8px' }}>
+			<span style={{ fontSize: 11, color: 'var(--tl-color-text-3)', minWidth: 52 }}>Corners</span>
+			<input
+				type="range"
+				min="0"
+				max="60"
+				step="1"
+				value={state.radius}
+				data-testid="claw-corner-radius"
+				onChange={(e) => setRadius(Number(e.target.value))}
+				style={{ flex: 1, minWidth: 0 }}
+			/>
+			<span style={{ fontSize: 11, minWidth: 22, textAlign: 'right' }}>{state.radius}</span>
+		</div>
+	)
 }
 
 /** "Text outline: on/off" toggle for the selection, next to the style pickers. */
