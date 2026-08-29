@@ -250,14 +250,17 @@ function paintGradients(editor) {
 				// makes exports gradient-fill too. The definition below is what
 				// that reference resolves against on the canvas.
 			} else {
-				const css =
-					def.gradient === 'radial'
-						? `radial-gradient(circle at ${points.from.x * 100}% ${points.from.y * 100}%, ${def.from}, ${def.to})`
-						: `linear-gradient(to bottom, ${def.from}, ${def.to})`
+				const css = gradientTextCss(def, points)
 				// html text takes a gradient by clipping a background to the glyphs;
 				// the outline halo would paint over it, so it goes off here
 				rules.push(
-					`${sel} .tl-rich-text-wrapper { background-image: ${css}; -webkit-background-clip: text; background-clip: text; color: transparent !important; text-shadow: none !important; }`
+					`${sel} .tl-rich-text-wrapper { background-image: ${css}; -webkit-background-clip: text; background-clip: text; }`
+				)
+				// every descendant paints its own opaque colour, which would cover
+				// the clipped gradient - they all have to become transparent so only
+				// the wrapper's clipped background shows through the glyphs
+				rules.push(
+					`${sel} .tl-rich-text-wrapper, ${sel} .tl-rich-text-wrapper * { color: transparent !important; text-shadow: none !important; }`
 				)
 			}
 		}
@@ -2337,8 +2340,14 @@ async function applyOps(editor, ops) {
 						return { x: Math.max(-1, Math.min(2, x)), y: Math.max(-1, Math.min(2, y)) }
 					}
 					if (args.reset) {
-						const { clawGradient: _drop, ...rest } = target.meta ?? {}
-						editor.updateShape({ id: target.id, type: target.type, meta: rest })
+						// tldraw MERGES meta on update, so omitting the key leaves the old
+						// value in place - it has to be explicitly nulled (the file
+						// transform drops nulls, so nothing is left behind on disk)
+						editor.updateShape({
+							id: target.id,
+							type: target.type,
+							meta: { ...(target.meta ?? {}), clawGradient: null },
+						})
 						touched.updated.push(target.id)
 						report.push(`gradient ${short(target.id)} -> reset to default placement`)
 						break
@@ -2962,6 +2971,22 @@ const colorHexOf = (val) => {
 	if (isGradientSlot(val)) return gradientMidpoint(val)
 	const solid = val?.light?.solid ?? val?.solid
 	return typeof solid === 'string' ? solid : '#888888'
+}
+
+/**
+ * The css equivalent of a shape's gradient, for html text (which cannot
+ * reference an svg paint). The control points set the direction: css angles
+ * measure clockwise from "up", hence atan2(dx, -dy).
+ */
+function gradientTextCss(def, points) {
+	if (def.gradient === 'radial') {
+		const r = Math.max(1, Math.round(Math.hypot(points.to.x - points.from.x, points.to.y - points.from.y) * 100))
+		return `radial-gradient(circle at ${points.from.x * 100}% ${points.from.y * 100}%, ${def.from} 0%, ${def.to} ${r}%)`
+	}
+	const dx = points.to.x - points.from.x
+	const dy = points.to.y - points.from.y
+	const deg = Math.round(((Math.atan2(dx, -dy) * 180) / Math.PI + 360) % 360)
+	return `linear-gradient(${deg}deg, ${def.from}, ${def.to})`
 }
 
 /** css for a gradient slot's preview swatch */
@@ -4027,10 +4052,7 @@ const withClawGradientExport = (Util) =>
 			const textDef = gradientDefFor(this.editor, shape, shape.type === 'text' ? 'color' : 'labelColor')
 			let scope = null
 			if (textDef) {
-				const css =
-					textDef.gradient === 'radial'
-						? `radial-gradient(circle at ${points.from.x * 100}% ${points.from.y * 100}%, ${textDef.from}, ${textDef.to})`
-						: `linear-gradient(to bottom, ${textDef.from}, ${textDef.to})`
+				const css = gradientTextCss(textDef, points)
 				// every declaration needs !important: tldraw inlines the element's
 				// full computed style, and an inline style beats a rule. Scoped to
 				// this shape's own group so two gradient labels don't collide.
@@ -4039,7 +4061,7 @@ const withClawGradientExport = (Util) =>
 					`<style>` +
 					`.${scope} .tl-rich-text > div { background-image: ${css} !important;` +
 					` -webkit-background-clip: text !important; background-clip: text !important; }` +
-					`.${scope} .tl-rich-text > div, .${scope} .tl-rich-text > div * {` +
+					`.${scope} .tl-rich-text > div, .${scope} .tl-rich-text > div *, .${scope} .tl-rich-text {` +
 					` color: transparent !important; text-shadow: none !important; }` +
 					`</style>`
 			}
