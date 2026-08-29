@@ -162,6 +162,13 @@ const mixHex = (hex, other, t) => {
  * keeps its look when the shape is resized.
  */
 const isGradientSlot = (val) => !!val && typeof val === 'object' && typeof val.gradient === 'string'
+const gradientIdFor = (shapeId, prop) => 'claw-grad-' + String(shapeId).replace(/[^\w-]/g, '') + '-' + prop
+/** the gradient definition a shape's colour slot resolves to, if any */
+const gradientDefFor = (editor, shape, prop) => {
+	const spec = editor.getDocumentSettings?.()?.meta?.clawTheme ?? null
+	const val = spec?.colors?.[shape?.props?.[prop]]
+	return isGradientSlot(val) ? val : null
+}
 const gradientMidpoint = (val) => mixHex(val.from ?? '#000000', val.to ?? '#ffffff', 0.5)
 const DEFAULT_GRADIENT_POINTS = {
 	linear: { from: { x: 0.5, y: 0 }, to: { x: 0.5, y: 1 } },
@@ -222,25 +229,14 @@ function paintGradients(editor) {
 		const defs = []
 		const rules = []
 		for (const { id, prop, asText, def, points } of entries) {
-			const gid = `claw-grad-${id.replace(/[^\w-]/g, '')}-${prop}`
-			const stops = `<stop offset="0" stop-color="${def.from}"/><stop offset="1" stop-color="${def.to}"/>`
-			if (def.gradient === 'radial') {
-				const r = Math.max(0.01, Math.hypot(points.to.x - points.from.x, points.to.y - points.from.y))
-				defs.push(
-					`<radialGradient id="${gid}" gradientUnits="objectBoundingBox" cx="${points.from.x}" cy="${points.from.y}" r="${r}">${stops}</radialGradient>`
-				)
-			} else {
-				defs.push(
-					`<linearGradient id="${gid}" gradientUnits="objectBoundingBox" x1="${points.from.x}" y1="${points.from.y}" x2="${points.to.x}" y2="${points.to.y}">${stops}</linearGradient>`
-				)
-			}
+			const gid = gradientIdFor(id, prop)
+			defs.push(gradientDefMarkup(id, prop, def, points))
 			const sel = `[data-shape-id="${id}"]`
 			if (!asText) {
-				// two paths: the filled body (fill != none) and the outline
-				// (fill="none" with a stroke) - each takes the gradient on its own
-				// channel, so an unfilled shape still gets a gradient outline
-				rules.push(`${sel} .tl-svg-container path:not([fill="none"]) { fill: url(#${gid}); }`)
-				rules.push(`${sel} .tl-svg-container path[stroke] { stroke: url(#${gid}); }`)
+				// vector shapes need no css: their resolved fill/stroke already
+				// points at this definition (see clawDisplayValues), which is what
+				// makes exports gradient-fill too. The definition below is what
+				// that reference resolves against on the canvas.
 			} else {
 				const css =
 					def.gradient === 'radial'
@@ -3798,11 +3794,56 @@ function filletedPolygonPath(points, radius, isFilled) {
 	return path.close()
 }
 
+/** svg markup for one shape's gradient, used on canvas and inside exports */
+function gradientDefMarkup(shapeId, prop, def, points) {
+	const gid = gradientIdFor(shapeId, prop)
+	const stops = `<stop offset="0" stop-color="${def.from}"/><stop offset="1" stop-color="${def.to}"/>`
+	if (def.gradient === 'radial') {
+		const r = Math.max(0.01, Math.hypot(points.to.x - points.from.x, points.to.y - points.from.y))
+		return `<radialGradient id="${gid}" gradientUnits="objectBoundingBox" cx="${points.from.x}" cy="${points.from.y}" r="${r}">${stops}</radialGradient>`
+	}
+	return `<linearGradient id="${gid}" gradientUnits="objectBoundingBox" x1="${points.from.x}" y1="${points.from.y}" x2="${points.to.x}" y2="${points.to.y}">${stops}</linearGradient>`
+}
+
+/**
+ * Point a shape's resolved fill/stroke at its own gradient. This runs for BOTH
+ * the live canvas and svg/png export, because tldraw funnels every consumer
+ * through getDisplayValues - so an export gradient-fills with no post
+ * processing of the exported markup.
+ */
+function clawDisplayValues(editor, shape) {
+	const def = gradientDefFor(editor, shape, 'color')
+	if (!def) return {}
+	const ref = `url(#${gradientIdFor(shape.id, 'color')})`
+	const out = { strokeColor: ref }
+	if (shape.props?.fill && shape.props.fill !== 'none') out.fillColor = ref
+	return out
+}
+
+/** carry the shape's own gradient definition into whatever export it lands in */
+const withClawGradientExport = (Util) =>
+	class extends Util {
+		toSvg(shape, ctx) {
+			const def = gradientDefFor(this.editor, shape, 'color')
+			const inner = super.toSvg(shape, ctx)
+			if (!def) return inner
+			const markup = gradientDefMarkup(shape.id, 'color', def, gradientPointsOf(shape, def.gradient))
+			return React.createElement(
+				React.Fragment,
+				null,
+				React.createElement('defs', { key: 'claw-grad', dangerouslySetInnerHTML: { __html: markup } }),
+				inner
+			)
+		}
+	}
+
 const CLAW_SHAPE_UTILS = [
 	withClawTextOutline(TL.TextShapeUtil),
-	withClawTextOutline(
-		TL.GeoShapeUtil.configure({
-			customGeoTypes: Object.fromEntries(
+	withClawGradientExport(
+		withClawTextOutline(
+			TL.GeoShapeUtil.configure({
+				getCustomDisplayValues: (editor, shape) => clawDisplayValues(editor, shape),
+				customGeoTypes: Object.fromEntries(
 				Object.entries(ROUNDED_GEO_BY_BASE).map(([base, rounded]) => [
 					rounded,
 					{
@@ -3816,10 +3857,17 @@ const CLAW_SHAPE_UTILS = [
 							),
 					},
 				])
-			),
-		})
+				),
+			})
+		)
 	),
-	withClawTextOutline(TL.ArrowShapeUtil),
+	withClawGradientExport(
+		withClawTextOutline(
+			TL.ArrowShapeUtil.configure({
+				getCustomDisplayValues: (editor, shape) => clawDisplayValues(editor, shape),
+			})
+		)
+	),
 	// frames carry a real color prop, but tldraw keeps it off the style system
 	// until this option turns it on (it then registers the colour style, so the
 	// style panel, the `style` op and claw's custom colour slots all reach it)
