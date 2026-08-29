@@ -819,6 +819,16 @@ function foreignObjectTextToSvgText(svgText) {
 		}
 		let converted = 0
 		for (const fo of [...svg.querySelectorAll('foreignObject')]) {
+			// gradient text is painted by clipping a background to the glyphs, so
+			// its own colour is transparent - emitting that verbatim gives Figma
+			// invisible text. The shape's gradient is already in this file (its
+			// toSvg put it there), and the wrapper class names the shape, so the
+			// <text> can point straight at it.
+			const scoped = fo.closest('[class*="claw-gt-"]')
+			const scopeClass = scoped
+				? [...scoped.classList].find((c) => c.startsWith('claw-gt-'))
+				: null
+			const textGradientId = scopeClass ? `claw-grad-${scopeClass.slice('claw-gt-'.length)}-color` : null
 			// each foreignObject usually sits in a translated group, and the
 			// replacement text goes back into that same group (keeping the
 			// original stacking order), so measurements must land in the GROUP's
@@ -887,7 +897,13 @@ function foreignObjectTextToSvgText(svgText) {
 				el.setAttribute('font-family', cs.fontFamily)
 				if (cs.fontWeight && cs.fontWeight !== '400') el.setAttribute('font-weight', cs.fontWeight)
 				if (cs.fontStyle && cs.fontStyle !== 'normal') el.setAttribute('font-style', cs.fontStyle)
-				el.setAttribute('fill', cs.color)
+				const transparent = /rgba?\([^)]*,\s*0(\.0+)?\s*\)/.test(cs.color)
+				el.setAttribute(
+					'fill',
+					transparent && textGradientId && svg.querySelector(`#${textGradientId}`)
+						? `url(#${textGradientId})`
+						: cs.color
+				)
 				if (anchor !== 'start') el.setAttribute('text-anchor', anchor)
 				el.textContent = ln.text.replace(/\s+$/, '')
 				group.appendChild(el)
