@@ -226,6 +226,7 @@ function paintGradients(editor) {
 						prop,
 						asText,
 						def,
+						box: asText ? editor.getShapeGeometry(shape)?.bounds : null,
 						points: gradientPointsOf(shape, def.gradient),
 					})
 				}
@@ -250,7 +251,7 @@ function paintGradients(editor) {
 				// makes exports gradient-fill too. The definition below is what
 				// that reference resolves against on the canvas.
 			} else {
-				const css = gradientTextCss(def, points)
+				const css = gradientTextCss(def, points, entry.box)
 				// html text takes a gradient by clipping a background to the glyphs;
 				// the outline halo would paint over it, so it goes off here
 				rules.push(
@@ -2978,15 +2979,32 @@ const colorHexOf = (val) => {
  * reference an svg paint). The control points set the direction: css angles
  * measure clockwise from "up", hence atan2(dx, -dy).
  */
-function gradientTextCss(def, points) {
+function gradientTextCss(def, points, box) {
+	const W = Math.max(1, box?.w || 1)
+	const H = Math.max(1, box?.h || 1)
 	if (def.gradient === 'radial') {
-		const r = Math.max(1, Math.round(Math.hypot(points.to.x - points.from.x, points.to.y - points.from.y) * 100))
-		return `radial-gradient(circle at ${points.from.x * 100}% ${points.from.y * 100}%, ${def.from} 0%, ${def.to} ${r}%)`
+		// matches the svg version: an objectBoundingBox radius r describes an
+		// ellipse of r*width by r*height, which is what these percentages mean
+		const r = Math.max(0.01, Math.hypot(points.to.x - points.from.x, points.to.y - points.from.y))
+		const pct = (n) => Math.round(n * 1000) / 10
+		return `radial-gradient(ellipse ${pct(r)}% ${pct(r)}% at ${pct(points.from.x)}% ${pct(points.from.y)}%, ${def.from} 0%, ${def.to} 100%)`
 	}
-	const dx = points.to.x - points.from.x
-	const dy = points.to.y - points.from.y
-	const deg = Math.round(((Math.atan2(dx, -dy) * 180) / Math.PI + 360) % 360)
-	return `linear-gradient(${deg}deg, ${def.from}, ${def.to})`
+	// The control points set WHERE the gradient starts and stops, not just its
+	// direction. A css gradient line runs through the box centre at the given
+	// angle with length |W*sin| + |H*cos|, so each control point becomes a stop
+	// offset by projecting it onto that line.
+	const p0 = { x: points.from.x * W, y: points.from.y * H }
+	const p1 = { x: points.to.x * W, y: points.to.y * H }
+	const dx = p1.x - p0.x
+	const dy = p1.y - p0.y
+	if (Math.abs(dx) < 0.01 && Math.abs(dy) < 0.01) return `linear-gradient(${def.from}, ${def.to})`
+	const rad = Math.atan2(dx, -dy) // css angles measure clockwise from "up"
+	const deg = Math.round((((rad * 180) / Math.PI + 360) % 360) * 10) / 10
+	const u = { x: Math.sin(rad), y: -Math.cos(rad) }
+	const L = Math.abs(W * Math.sin(rad)) + Math.abs(H * Math.cos(rad))
+	const start = { x: W / 2 - (u.x * L) / 2, y: H / 2 - (u.y * L) / 2 }
+	const at = (p) => Math.round((((p.x - start.x) * u.x + (p.y - start.y) * u.y) / L) * 1000) / 10
+	return `linear-gradient(${deg}deg, ${def.from} ${at(p0)}%, ${def.to} ${at(p1)}%)`
 }
 
 /** css for a gradient slot's preview swatch */
@@ -4052,7 +4070,7 @@ const withClawGradientExport = (Util) =>
 			const textDef = gradientDefFor(this.editor, shape, shape.type === 'text' ? 'color' : 'labelColor')
 			let scope = null
 			if (textDef) {
-				const css = gradientTextCss(textDef, points)
+				const css = gradientTextCss(textDef, points, this.editor.getShapeGeometry(shape)?.bounds)
 				// every declaration needs !important: tldraw inlines the element's
 				// full computed style, and an inline style beats a rule. Scoped to
 				// this shape's own group so two gradient labels don't collide.
