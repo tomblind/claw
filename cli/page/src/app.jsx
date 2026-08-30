@@ -241,6 +241,7 @@ function paintGradients(editor) {
 		if (!entries.length) return
 		const defs = []
 		const rules = []
+		let needOutlineFilter = false
 		for (const entry of entries) {
 			const { id, prop, asText, def, points } = entry
 			const gid = gradientIdFor(id, prop)
@@ -270,9 +271,14 @@ function paintGradients(editor) {
 						` text-shadow: none !important; -webkit-text-stroke: 0 !important; paint-order: normal !important; }`
 				)
 				if (entry.outline !== 'off') {
-					rules.push(`${sel} .tl-rich-text-wrapper { filter: ${gradientTextOutlineFilter()}; }`)
+					needOutlineFilter = true
+					rules.push(`${sel} .tl-rich-text-wrapper { filter: url(#${GRADIENT_OUTLINE_ID}); }`)
 				}
 			}
+		}
+		if (needOutlineFilter) {
+			const bg = (editor.getColorMode?.() ?? 'light') === 'dark' ? '#101011' : '#ffffff'
+			defs.push(gradientOutlineFilterMarkup(GRADIENT_OUTLINE_ID, bg))
 		}
 		const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
 		svg.id = 'claw-gradient-defs'
@@ -3013,19 +3019,21 @@ const colorHexOf = (val) => {
  * ring of offset silhouettes gives an outline that stays outside the glyphs
  * with the gradient fully visible inside.
  */
-const GRADIENT_OUTLINE_RING = [
-	[0, -1], [0.7, -0.7], [1, 0], [0.7, 0.7],
-	[0, 1], [-0.7, 0.7], [-1, 0], [-0.7, -0.7],
-]
-const gradientTextOutlineFilter = ({ color, literal = false } = {}) =>
-	GRADIENT_OUTLINE_RING.map(([x, y]) => {
-		// an export has neither --tl-zoom nor --tl-color-background, and an
-		// unresolvable variable drops the whole filter - so exports get plain
-		// numbers and a real colour
-		const len = (n) =>
-			literal ? `${(n * 2).toFixed(2)}px` : `calc(min(0.5, 1 / var(--tl-zoom, 1)) * ${n * 2}px)`
-		return `drop-shadow(${len(x)} ${len(y)} 0 ${color ?? 'var(--tl-color-background)'})`
-	}).join(' ')
+const GRADIENT_OUTLINE_ID = 'claw-text-outline'
+/**
+ * Outline markup for gradient text: dilate the glyph shape once, flood it with
+ * the background colour and merge the original on top. A chain of css
+ * drop-shadows cannot do this - each one shadows the RESULT of the previous
+ * one, so eight of them compound into a hugely thick outline instead of a
+ * uniform 1px ring.
+ */
+const gradientOutlineFilterMarkup = (id, color, radius = 1) =>
+	`<filter id="${id}" x="-25%" y="-25%" width="150%" height="150%" color-interpolation-filters="sRGB">` +
+	`<feMorphology in="SourceAlpha" operator="dilate" radius="${radius}" result="claw-d"/>` +
+	`<feFlood flood-color="${color}" result="claw-c"/>` +
+	`<feComposite in="claw-c" in2="claw-d" operator="in" result="claw-o"/>` +
+	`<feMerge><feMergeNode in="claw-o"/><feMergeNode in="SourceGraphic"/></feMerge>` +
+	`</filter>`
 
 function gradientTextCss(def, points, box) {
 	const W = Math.max(1, box?.w || 1)
@@ -4117,12 +4125,16 @@ const withClawGradientExport = (Util) =>
 			// along with its definition
 			const textDef = gradientDefFor(this.editor, shape, shape.type === 'text' ? 'color' : 'labelColor')
 			let scope = null
+			const outlineBg = (this.editor.getColorMode?.() ?? 'light') === 'dark' ? '#101011' : '#ffffff'
 			if (textDef) {
 				const css = gradientTextCss(textDef, points, this.editor.getShapeGeometry(shape)?.bounds)
 				// every declaration needs !important: tldraw inlines the element's
 				// full computed style, and an inline style beats a rule. Scoped to
 				// this shape's own group so two gradient labels don't collide.
 				scope = `claw-gt-${String(shape.id).replace(/[^\w-]/g, '')}`
+				if (shape.meta?.clawText?.outline !== 'off') {
+					markup += gradientOutlineFilterMarkup(`${scope}-outline`, outlineBg)
+				}
 				markup +=
 					`<style>` +
 					`.${scope} .tl-rich-text > div { background-image: ${css} !important;` +
@@ -4132,10 +4144,7 @@ const withClawGradientExport = (Util) =>
 					` -webkit-text-stroke: 0 !important; paint-order: normal !important; }` +
 					(shape.meta?.clawText?.outline === 'off'
 						? ''
-						: `.${scope} .tl-rich-text { filter: ${gradientTextOutlineFilter({
-								literal: true,
-								color: (this.editor.getColorMode?.() ?? 'light') === 'dark' ? '#101011' : '#ffffff',
-							})}; }`) +
+						: `.${scope} .tl-rich-text { filter: url(#${scope}-outline); }`) +
 					`</style>`
 			}
 			return React.createElement(
