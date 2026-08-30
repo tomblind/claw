@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { homedir, networkInterfaces } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -613,8 +613,17 @@ async function main() {
 		log('another core is already running - exiting')
 		process.exit(0)
 	}
+	// Keep the previous run's log instead of truncating: without it, any
+	// evidence of why a core died is destroyed by the next launch, which is
+	// exactly when you want to read it. One rollover file, capped.
 	try {
-		writeFileSync(LOGFILE, '')
+		const MAX_LOG = 512 * 1024
+		if (existsSync(LOGFILE) && statSync(LOGFILE).size > MAX_LOG) {
+			renameSync(LOGFILE, `${LOGFILE}.1`)
+		}
+		appendFileSync(LOGFILE, `
+=== core ${VERSION} starting (pid ${process.pid}) ===
+`)
 	} catch {}
 
 	const { WebSocketServer } = await import('ws')

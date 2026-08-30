@@ -165,15 +165,43 @@ $('retry').addEventListener('click', () => {
 	boot()
 })
 
-// died-core recovery
+// died-core recovery.
+//
+// A single missed health check means almost nothing: waking from sleep, a
+// moment of load, or a core restart under the window will all drop one. Three
+// consecutive misses is a real outage, and even then the app tries to heal
+// itself before interrupting the user - the usual case (the core is alive and
+// only the poll stumbled) resolves silently.
+const HEALTH_STRIKES = 3
+let healthMisses = 0
+let reconnecting = false
 setInterval(async () => {
-	if (!daemon) return
-	const ok = await health(daemon.port)
-	if (!ok) {
+	if (!daemon || reconnecting) return
+	if (await health(daemon.port)) {
+		healthMisses = 0
+		return
+	}
+	healthMisses++
+	if (healthMisses < HEALTH_STRIKES) return
+	reconnecting = true
+	try {
+		// still there after all? carry on as if nothing happened
+		if (await health(daemon.port)) {
+			healthMisses = 0
+			return
+		}
+		overlay('Reconnecting to the canvas core…')
+		try {
+			await boot()
+			healthMisses = 0
+			return
+		} catch {}
 		daemon = null
 		$('executor').src = 'about:blank'
 		$('frame').src = 'about:blank'
 		overlay('The canvas core stopped.', true)
+	} finally {
+		reconnecting = false
 	}
 }, 10000)
 
