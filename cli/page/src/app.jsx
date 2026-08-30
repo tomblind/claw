@@ -227,6 +227,7 @@ function paintGradients(editor) {
 						asText,
 						def,
 						box: asText ? editor.getShapeGeometry(shape)?.bounds : null,
+						outline: shape.meta?.clawText?.outline,
 						points: gradientPointsOf(shape, def.gradient),
 					})
 				}
@@ -268,6 +269,9 @@ function paintGradients(editor) {
 					`${sel} .tl-rich-text-wrapper, ${sel} .tl-rich-text-wrapper * { color: transparent !important;` +
 						` text-shadow: none !important; -webkit-text-stroke: 0 !important; paint-order: normal !important; }`
 				)
+				if (entry.outline !== 'off') {
+					rules.push(`${sel} .tl-rich-text-wrapper { filter: ${gradientTextOutlineFilter()}; }`)
+				}
 			}
 		}
 		const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
@@ -3000,6 +3004,29 @@ const colorHexOf = (val) => {
  * reference an svg paint). The control points set the direction: css angles
  * measure clockwise from "up", hence atan2(dx, -dy).
  */
+/**
+ * An outline for gradient text. Neither of tldraw's techniques can work here:
+ * gradient text paints by clipping a background to the glyphs, and both a
+ * text-shadow and a -webkit-text-stroke paint ABOVE that background, so one
+ * whites out the letters and the other eats into them. A filter, by contrast,
+ * renders the element first and then draws the result offset BEHIND it - so a
+ * ring of offset silhouettes gives an outline that stays outside the glyphs
+ * with the gradient fully visible inside.
+ */
+const GRADIENT_OUTLINE_RING = [
+	[0, -1], [0.7, -0.7], [1, 0], [0.7, 0.7],
+	[0, 1], [-0.7, 0.7], [-1, 0], [-0.7, -0.7],
+]
+const gradientTextOutlineFilter = ({ color, literal = false } = {}) =>
+	GRADIENT_OUTLINE_RING.map(([x, y]) => {
+		// an export has neither --tl-zoom nor --tl-color-background, and an
+		// unresolvable variable drops the whole filter - so exports get plain
+		// numbers and a real colour
+		const len = (n) =>
+			literal ? `${(n * 2).toFixed(2)}px` : `calc(min(0.5, 1 / var(--tl-zoom, 1)) * ${n * 2}px)`
+		return `drop-shadow(${len(x)} ${len(y)} 0 ${color ?? 'var(--tl-color-background)'})`
+	}).join(' ')
+
 function gradientTextCss(def, points, box) {
 	const W = Math.max(1, box?.w || 1)
 	const H = Math.max(1, box?.h || 1)
@@ -4103,6 +4130,12 @@ const withClawGradientExport = (Util) =>
 					`.${scope} .tl-rich-text > div, .${scope} .tl-rich-text > div *, .${scope} .tl-rich-text {` +
 					` color: transparent !important; text-shadow: none !important;` +
 					` -webkit-text-stroke: 0 !important; paint-order: normal !important; }` +
+					(shape.meta?.clawText?.outline === 'off'
+						? ''
+						: `.${scope} .tl-rich-text { filter: ${gradientTextOutlineFilter({
+								literal: true,
+								color: (this.editor.getColorMode?.() ?? 'light') === 'dark' ? '#101011' : '#ffffff',
+							})}; }`) +
 					`</style>`
 			}
 			return React.createElement(
