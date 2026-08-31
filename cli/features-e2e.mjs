@@ -273,6 +273,64 @@ const browser = await chromium.launch({ executablePath: findBrowser(), headless:
 	check('export: raw svg carries gradient definitions', out.svgHasGradientDefs)
 	check('page raised no errors', pageErrors.length === 0, pageErrors[0] ?? '')
 
+	// The two customize dialogs are the only UI with no assertions elsewhere,
+	// and a broken import in them stays invisible until a user clicks the
+	// button. Opening each one proves the module mounts and reads the document.
+	// A selected shape is what puts the style panel on screen, and Escape does
+	// not dismiss a tldraw dialog, so each dialog gets a fresh page.
+	const showPanel = async () => {
+		await page.evaluate(() => {
+			const ed = window.__editor
+			if (!ed.getCurrentPageShapes().length) {
+				ed.createShape({ type: 'geo', x: 60, y: 60, props: { w: 160, h: 100, geo: 'rectangle' } })
+			}
+			ed.selectAll()
+		})
+		await page.waitForTimeout(400)
+	}
+	const openDialog = async (label) => {
+		await showPanel()
+		await page.getByRole('button', { name: label }).click()
+		await page.waitForTimeout(500)
+		const seen = await page.evaluate(() => {
+			const body = document.querySelector('.tlui-dialog__body')
+			const rows = body
+				? [...body.querySelectorAll('button')].filter((b) => b.textContent.trim() === 'Remove').length
+				: 0
+			const theme = window.__editor.getDocumentSettings()?.meta?.clawTheme ?? {}
+			return {
+				open: !!body,
+				rows,
+				colors: Object.keys(theme.colors ?? {}).length,
+				fonts: Object.keys(theme.fonts ?? {}).length,
+			}
+		})
+		await page.reload()
+		await page.waitForFunction(() => !!window.__editor, null, { timeout: 30000 })
+		return seen
+	}
+	const colorDialog = await openDialog('Customize colors…')
+	check(
+		'dialog: customize colours lists one row per document slot',
+		colorDialog.open && colorDialog.rows === colorDialog.colors && colorDialog.colors > 0,
+		`rows ${colorDialog.rows} of ${colorDialog.colors} slots`
+	)
+	// the document has colour slots from the ops above but no font slot, and a
+	// dialog with zero rows would pass without proving anything
+	await page.evaluate(() => {
+		const ed = window.__editor
+		const theme = ed.getDocumentSettings()?.meta?.clawTheme ?? {}
+		ed.updateDocumentSettings({
+			meta: { ...ed.getDocumentSettings().meta, clawTheme: { ...theme, fonts: { 'custom-1': { family: 'Georgia' } } } },
+		})
+	})
+	const fontDialog = await openDialog('Customize fonts…')
+	check(
+		'dialog: customize fonts lists one row per document slot',
+		fontDialog.open && fontDialog.rows === fontDialog.fonts,
+		`rows ${fontDialog.rows} of ${fontDialog.fonts} slots`
+	)
+
 	// -------------------------------------------------------------------------
 	// 2. file: the boundary that keeps claw-only concepts portable
 	// -------------------------------------------------------------------------

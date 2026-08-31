@@ -15,7 +15,7 @@ architecture was chosen.
 
 ## What is still ours (and why)
 
-Two inferences the editor cannot make, implemented in `page/src/app.jsx` `project()`:
+Two inferences the editor cannot make, implemented in `page/src/projection.js`:
 
 1. **Rectangles as screens.** tldraw only parents shapes into real frames. People draw
    screens as plain rectangles, leaving the parent tree flat. We infer containment
@@ -43,6 +43,30 @@ arrows carry `start`/`end` terminals as `{id, how: bound|inside|near, d}` plus r
 ids. Node-side code (`format.mjs`, `diff.mjs`) formats this and must not re-derive geometry.
 Bump `v` on breaking changes; `diff` compares two projections, so both sides must come from
 the same page build.
+
+## The editor page, module by module
+
+`cli/page/src` is bundled into one HTML file that serves three roles: the hidden
+executor the CLI drives, the live canvas a person edits, and a standalone viewer.
+
+| File | What lives there |
+| --- | --- |
+| `app.jsx` | boot, the `window.host` API the CLI calls, the style panel, the menus |
+| `ops.js` | every agent operation (`applyOps`) and the chain and text helpers it needs |
+| `projection.js` | the read-only outline an agent gets back: shapes, boxes, arrow ends |
+| `dialogs.jsx` | the two "Customize..." dialogs that edit the document's colour and font slots |
+| `gradients.js` | the slot model, the paint applied to canvas and export, the drag handles |
+| `theme.js` | reading and writing `meta.clawTheme`, registering slots with tldraw |
+| `rounded.js` | the corner fillet used by the rounded shape variants |
+| `lint.js` | the layout checks (`lintDocument`) the CLI reports |
+| `figma-svg.js` | rewriting exported HTML text into real SVG text Figma can read |
+| `editor-utils.js` | id shortening, rounding, plain text from rich text |
+| `common.js` | error reporting, the canvas background, hex mixing |
+
+Two rules keep this workable. Nothing here reimplements tldraw, so parsing, rendering,
+and serialization stay the editor's own code paths. And a call to a function in another
+module is a runtime error if the import is missing, which the bundler will not catch, so
+`npm run check:imports` (part of `npm test`) looks for exactly that.
 
 ## Maintenance
 

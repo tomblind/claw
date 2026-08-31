@@ -208,3 +208,13 @@ export function patchSlotLabels(messages, theme) {
 }
 
 /** Reactive view of meta.clawTheme for any component (panel or dialog). */
+
+/** Re-render a component whenever the document's claw theme changes. */
+export function useClawTheme(editor) {
+	const useVal = typeof TL.useValue === 'function' ? TL.useValue : (_name, fn) => fn()
+	return useVal(
+		'claw theme',
+		() => editor.getDocumentSettings?.()?.meta?.clawTheme ?? null,
+		[editor]
+	)
+}
