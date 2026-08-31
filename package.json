@@ -11,6 +11,7 @@
 		"deploy": "node scripts/deploy.mjs",
 		"e2e": "cd cli && node sync-e2e.mjs",
 		"e2e:features": "cd cli && node features-e2e.mjs",
-		"test": "npm run e2e && npm run e2e:features"
+		"test": "npm run check:imports && npm run e2e && npm run e2e:features",
+		"check:imports": "node scripts/check-imports.mjs"
 	}
 }

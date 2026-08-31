@@ -176,3 +176,35 @@ export const colorHexOf = (val) => {
 	return typeof solid === 'string' ? solid : '#888888'
 }
 
+export const fontFamilyOf = (val) =>
+	typeof val === 'string' ? val : val?.family ? `'${val.family}'` : 'sans-serif'
+export const fontLabelOf = (val) => (typeof val === 'string' ? val : (val?.family ?? ''))
+
+let clawMessages = null // the live translation map, captured from context
+
+/**
+ * Take the translation map from React context and refresh the slot labels in
+ * it. The map is captured because applyClawTheme runs outside React and still
+ * has to relabel slots when a theme changes.
+ */
+export function captureTranslations(messages, theme) {
+	clawMessages = messages
+	patchSlotLabels(messages, theme)
+}
+export function patchSlotLabels(messages, theme) {
+	if (!messages) return
+	try {
+		for (const slot of CUSTOM_COLOR_SLOTS) {
+			const val = theme?.colors?.[slot]
+			messages[`color-style.${slot}`] = val != null ? colorHexOf(val) : slot
+		}
+		for (const slot of CUSTOM_FONT_SLOTS) {
+			const val = theme?.fonts?.[slot]
+			messages[`font-style.${slot}`] = val != null ? fontLabelOf(val) || slot : slot
+		}
+		messages['claw.smooth-text'] = 'Smooth text outline'
+		messages['claw.export-figma'] = 'SVG for Figma'
+	} catch {}
+}
+
+/** Reactive view of meta.clawTheme for any component (panel or dialog). */
