@@ -92,7 +92,15 @@ write, called from both the editor page and the sync room).
 | custom colour / font slots | `props.color = 'custom-3'` | nearest standard colour | `meta.clawStyle = {color, colorFallback}` |
 | rounded corners | `props.geo = 'rounded-hexagon'` | `'hexagon'` | `meta.clawRadius` (the radius IS the marker) |
 | gradient slots | slot value is `{gradient, from, to}` | shape uses the midpoint colour | slot in `meta.clawTheme`, geometry in `meta.clawGradient` |
-| per-shape text outline | — | — | `meta.clawText.outline` |
+| per-shape text outline | — | — | `meta.clawText.outline = 'off'` (the outline is on otherwise) |
+
+Text outlines are drawn the smooth way by default: one vector stroke behind the
+glyphs (`-webkit-text-stroke` plus `paint-order`) instead of tldraw's six stamped
+copies, which look lumpy at the diagonals. It is a browser preference under
+Preferences, stored in `localStorage` as `claw-smooth-text`, and only an explicit
+`0` turns it off. The headless executor has no stored preference, so an agent's
+render gets the same outline the canvas shows. A single shape opts out through
+`meta.clawText.outline`, which travels with the file and is ignored elsewhere.
 
 Three rules learned the hard way:
 

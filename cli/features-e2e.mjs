@@ -331,6 +331,51 @@ const browser = await chromium.launch({ executablePath: findBrowser(), headless:
 		`rows ${fontDialog.rows} of ${fontDialog.fonts} slots`
 	)
 
+	// The smooth text outline is Claw's default: tldraw's own halo is six
+	// stamped copies of the glyphs, the smooth one is a real vector stroke.
+	// Nothing sets the preference here, so this is what a first run looks like.
+	const outline = await page.evaluate(async () => {
+		await window.host.applyOps([
+			{ add_screen: { name: 'S', size: { w: 400, h: 300 } } },
+			{ add: { screen: 'S', kind: 'label', name: 'Plain', text: 'Outline', at: { x: 20, y: 20 } } },
+			{ add: { screen: 'S', kind: 'label', name: 'NoOutline', text: 'Bare', at: { x: 20, y: 80 } } },
+		])
+		const ed = window.__editor
+		const byName = (n) => ed.getCurrentPageShapes().find((sh) => sh.meta?.clawName === n)
+		await new Promise((r) => setTimeout(r, 400))
+		const read = () => {
+			const halos = [...document.querySelectorAll('.tl-text__outline')]
+			return {
+				count: halos.length,
+				strokes: halos.map((el) => getComputedStyle(el).webkitTextStrokeWidth),
+				shadows: halos.map((el) => getComputedStyle(el).textShadow),
+			}
+		}
+		const before = read()
+		const bare = byName('NoOutline')
+		ed.updateShape({ id: bare.id, type: bare.type, meta: { ...bare.meta, clawText: { outline: 'off' } } })
+		await new Promise((r) => setTimeout(r, 400))
+		const after = read()
+		return {
+			classOn: !!ed.getContainer()?.classList.contains('claw-smooth-text'),
+			before,
+			after,
+		}
+	})
+	check('smooth text outline is on without setting the preference', outline.classOn)
+	check(
+		'smooth outline paints a real stroke, not the stamped halo',
+		outline.before.count === 2 &&
+			outline.before.strokes.every((w) => parseFloat(w) > 0) &&
+			outline.before.shadows.every((sh) => sh === 'none'),
+		`${outline.before.count} outlines, stroke ${outline.before.strokes[0] ?? 'none'}`
+	)
+	check(
+		'a shape can still turn its own outline off',
+		outline.after.count === outline.before.count - 1,
+		`${outline.before.count} -> ${outline.after.count}`
+	)
+
 	// -------------------------------------------------------------------------
 	// 2. file: the boundary that keeps claw-only concepts portable
 	// -------------------------------------------------------------------------

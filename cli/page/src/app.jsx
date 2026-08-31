@@ -777,17 +777,21 @@ function applyClawStyleDefaults(editor) {
 	}
 }
 
-// ---- smooth text outline (user preference) ---------------------------------
+// ---- smooth text outline (user preference, on by default) ------------------
 // tldraw's halo is six stamped copies of the glyphs - lumpy at the diagonals.
 // The smooth variant is a real vector stroke painted behind the fill
 // (-webkit-text-stroke + paint-order), width zoom-compensated the same way
 // tldraw compensates its shadow offsets.
+//
+// Claw defaults to the smooth outline, so only an explicit '0' turns it off.
+// That keeps the choice of anyone who already switched it off, and it applies
+// to the headless executor too, so an agent's render matches the canvas.
 const SMOOTH_TEXT_KEY = 'claw-smooth-text'
 function isSmoothText() {
 	try {
-		return localStorage.getItem(SMOOTH_TEXT_KEY) === '1'
+		return localStorage.getItem(SMOOTH_TEXT_KEY) !== '0'
 	} catch {
-		return false
+		return true
 	}
 }
 function setSmoothText(editor, on) {
