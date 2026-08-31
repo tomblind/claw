@@ -23,6 +23,14 @@ import { canvasBg, editorBg, mixHex, reportError } from './common.js'
 import { foreignObjectTextToSvgText } from './figma-svg.js'
 import { filletedPolygonPath, ROUNDABLE_VERTICES } from './rounded.js'
 import { containingFrame, lintDocument, shapePlaintext } from './lint.js'
+import { plainText, resolveShape, round, short } from './editor-utils.js'
+import {
+	applyClawTheme,
+	clawThemePatch,
+	CLAW_THEMES,
+	colorHexOf,
+	ensureCustomSlots,
+} from './theme.js'
 import {
 	clawDisplayValues,
 	gradientCss,
@@ -69,50 +77,6 @@ const EXECUTOR = new URLSearchParams(location.search).get('executor') != null
 // theme definitions it's given — and parseTldrawJsonFile (used by every
 // executor load) internally creates a store with default themes only, wiping
 // our slots from the shared enum. Re-assert after anything that parses.
-function guardSlots(styleProp, slots) {
-	try {
-		styleProp?.addValues?.(...slots)
-		// make the slots UNREMOVABLE: internal store creations (e.g. inside
-		// parseTldrawJsonFile) re-run registerColorsFromThemes with default
-		// themes, which strips unknown values BEFORE validating incoming
-		// records - a after-the-fact re-add can't save that parse
-		if (styleProp.removeValues && !styleProp.__clawGuarded) {
-			const orig = styleProp.removeValues.bind(styleProp)
-			styleProp.removeValues = (...vals) => orig(...vals.filter((v) => !slots.includes(v)))
-			styleProp.__clawGuarded = true
-		}
-	} catch {}
-}
-function ensureCustomSlots() {
-	for (const styleProp of [
-		TL.DefaultColorStyle,
-		TL.DefaultLabelColorStyle,
-		TL.geoShapeProps?.labelColor,
-		TL.arrowShapeProps?.labelColor,
-	]) {
-		guardSlots(styleProp, CUSTOM_COLOR_SLOTS)
-	}
-	guardSlots(TL.DefaultFontStyle, CUSTOM_FONT_SLOTS)
-}
-ensureCustomSlots()
-
-const CLAW_THEMES = (() => {
-	try {
-		// a COMPLETE definition (clone of the default) so nothing downstream
-		// trips on missing fields; only the extra color slots differ
-		const def = JSON.parse(JSON.stringify(TL.DEFAULT_THEME))
-		def.id = 'claw'
-		const placeholder = () => ({ solid: '#888888', semi: '#dddddd', pattern: '#bbbbbb', fill: '#888888' })
-		for (const mode of ['light', 'dark']) {
-			for (const s of CUSTOM_COLOR_SLOTS) def.colors[mode][s] = placeholder()
-		}
-		return { claw: def }
-	} catch (err) {
-		console.warn('claw theme registration unavailable', err)
-		return undefined
-	}
-})()
-
 function syncParams() {
 	if (EXECUTOR) return null
 	const params = new URLSearchParams(location.search)
@@ -155,105 +119,6 @@ const inlineAssets = {
 // deliberately untouchable, so they mean the same thing in every tldraw app.
 // Applied through tldraw's own ThemeManager, so exports/renders pick it up too.
 // ---------------------------------------------------------------------------
-let PRISTINE_THEME = null
-let lastAppliedTheme = '__unset__'
-
-
-
-function applyClawTheme(editor, { force = false } = {}) {
-	try {
-		if (typeof editor.getTheme !== 'function' || typeof editor.updateThemes !== 'function') return
-		PRISTINE_THEME ??= JSON.parse(JSON.stringify(editor.getTheme('default')))
-		const spec = editor.getDocumentSettings?.()?.meta?.clawTheme ?? null
-		const key = JSON.stringify(spec)
-		if (!force && key === lastAppliedTheme) return
-		lastAppliedTheme = key
-		const next = JSON.parse(JSON.stringify(PRISTINE_THEME))
-		for (const [name, val] of Object.entries(spec?.colors ?? {})) {
-			if (!CUSTOM_COLOR_SLOTS.includes(name)) continue // standard colors stay standard
-			for (const mode of ['light', 'dark']) {
-				let base = next.colors?.[mode]?.[name]
-				// custom slots have no default entry - synthesize one from a template
-				if (!base && CUSTOM_COLOR_SLOTS.includes(name) && next.colors?.[mode]) {
-					base = JSON.parse(JSON.stringify(next.colors[mode].black ?? {}))
-					next.colors[mode][name] = base
-				}
-				if (!base || typeof base !== 'object') continue
-				const asColor = isGradientSlot(val) ? gradientMidpoint(val) : val
-				if (typeof asColor === 'string') {
-					const val = asColor // eslint-disable-line no-shadow
-					const bg = canvasBg(mode)
-					const ink = mode === 'light' ? '#000000' : '#ffffff'
-					// a palette entry is more than a fill: frames, notes and lined
-					// fills read their own keys, and a slot cloned from black would
-					// otherwise tint geo shapes while leaving frames/notes black.
-					// Ratios follow tldraw's own palette (e.g. blue solid #4465e9 ->
-					// frameStroke #6681ec, frameFill #f9fafe).
-					Object.assign(base, {
-						solid: val,
-						semi: mixHex(val, bg, 0.7),
-						pattern: mixHex(val, bg, 0.45),
-						frameStroke: mixHex(val, bg, 0.18),
-						frameHeadingStroke: mixHex(val, bg, 0.18),
-						frameFill: mixHex(val, bg, 0.96),
-						frameHeadingFill: mixHex(val, bg, 0.96),
-						frameText: ink,
-						noteFill: mixHex(val, bg, 0.35),
-						noteText: ink,
-						linedFill: mixHex(val, bg, 0.15),
-					})
-					if ('fill' in base) base.fill = val
-				} else {
-					Object.assign(base, val[mode] ?? val)
-				}
-			}
-		}
-		// custom font slots render straight from theme.fonts[slot] (both the
-		// canvas and export embedding read it) - the standard --tl-font-* CSS
-		// vars are never touched, so draw/sans/serif/mono stay stock
-		document.getElementById('claw-theme-fonts')?.remove()
-		let fontFaceCss = ''
-		for (const [slot, val] of Object.entries(spec?.fonts ?? {})) {
-			if (!CUSTOM_FONT_SLOTS.includes(slot)) continue // standard fonts stay standard
-			const base = { fontFamily: 'sans-serif', faces: [] }
-			if (typeof val === 'string') {
-				base.fontFamily = val
-			} else if (val?.family) {
-				base.fontFamily = `'${val.family}'`
-				if (val.url) {
-					base.faces = [
-						{ family: val.family, src: { url: val.url, format: val.format ?? 'woff2' }, weight: 'normal' },
-					]
-					// belt and suspenders for the live canvas: the browser needs the
-					// face loaded even if the FontManager misses a theme-only slot
-					fontFaceCss += `@font-face{font-family:'${val.family}';src:url('${val.url}');font-display:swap}\n`
-				}
-			} else {
-				continue
-			}
-			next.fonts[slot] = base
-			// the builtin font row renders custom slots with the generic draw
-			// glyph (mask icon) - swap in a real "Aa" in the slot's own face.
-			// !important: the mask is an inline style (TldrawUiIcon), and left
-			// active it clips the ::after text into garbage
-			fontFaceCss +=
-				`[data-testid="style.font.${slot}"] .tlui-icon{-webkit-mask:none !important;mask:none !important;background:none !important;display:flex;align-items:center;justify-content:center}` +
-				`[data-testid="style.font.${slot}"] .tlui-icon::after{content:'Aa';font-family:${base.fontFamily};font-size:15px;line-height:1}\n`
-		}
-		if (fontFaceCss) {
-			const el = document.createElement('style')
-			el.id = 'claw-theme-fonts'
-			el.textContent = fontFaceCss
-			document.head.appendChild(el)
-		}
-		patchSlotLabels(clawMessages, spec)
-		editor.updateThemes({ ...editor.getThemes(), default: next })
-	} catch (err) {
-		reportError('theme', err)
-	}
-}
-
-/** PNG export via whichever API this tldraw version ships. */
 async function toPngBlob(editor, ids, opts) {
 	if (typeof editor.toImage === 'function') {
 		const result = await editor.toImage(ids, { format: 'png', ...opts })
@@ -272,24 +137,6 @@ function blobToBase64(blob) {
 		reader.onerror = () => reject(reader.error)
 		reader.readAsDataURL(blob)
 	})
-}
-
-/** Find a shape by full id, short id (prefix), or frame-name / label text. */
-function resolveShape(editor, query) {
-	const q = String(query)
-	const shapes = editor.getCurrentPageShapes()
-	const byId = shapes.find((s) => s.id === q || s.id === `shape:${q}`)
-	if (byId) return byId
-	const lower = q.toLowerCase()
-	const byName = shapes.filter((s) => (s.props?.name ?? '').toLowerCase() === lower)
-	if (byName.length === 1) return byName[0]
-	// names given to ops persist on the shape (meta.clawName) and resolve
-	// across batches and sessions
-	const byClawName = shapes.filter((s) => s.meta?.clawName === q)
-	if (byClawName.length === 1) return byClawName[0]
-	const byPrefix = shapes.filter((s) => s.id.slice(6).startsWith(q))
-	if (byPrefix.length === 1) return byPrefix[0]
-	throw new Error(`no unique shape matching "${q}"`)
 }
 
 function inspectShapeDetail(editor, query) {
@@ -2021,33 +1868,6 @@ const CONTAIN_THRESHOLD = 0.9
 const NEAR_THRESHOLD = 120
 const INSIDE_TOLERANCE = 2
 
-const short = (id) => String(id).replace(/^shape:/, '')
-const round = (n) => Math.round(n)
-
-function plainText(editor, shape) {
-	const p = shape.props ?? {}
-	if (typeof p.text === 'string' && p.text.length) return p.text
-	if (p.richText) {
-		if (typeof TL.renderPlaintextFromRichText === 'function') {
-			try {
-				const t = TL.renderPlaintextFromRichText(editor, p.richText)
-				if (t?.trim().length) return t
-			} catch {}
-		}
-		// fallback: walk the tiptap tree
-		const walk = (n) => {
-			if (!n) return ''
-			if (typeof n.text === 'string') return n.text
-			if (Array.isArray(n.content)) return n.content.map(walk).join('')
-			return ''
-		}
-		const blocks = Array.isArray(p.richText.content) ? p.richText.content : [p.richText]
-		const t = blocks.map(walk).join('\n').trim()
-		if (t.length) return t
-	}
-	return undefined
-}
-
 function projectDocument(editor) {
 	const pages = editor.getPages()
 	const currentPageId = editor.getCurrentPageId()
@@ -2427,39 +2247,6 @@ function persistSessionState(editor) {
 const fontFamilyOf = (val) =>
 	typeof val === 'string' ? val : val?.family ? `'${val.family}'` : 'sans-serif'
 const fontLabelOf = (val) => (typeof val === 'string' ? val : (val?.family ?? ''))
-const colorHexOf = (val) => {
-	if (typeof val === 'string') return val
-	if (isGradientSlot(val)) return gradientMidpoint(val)
-	const solid = val?.light?.solid ?? val?.solid
-	return typeof solid === 'string' ? solid : '#888888'
-}
-
-/**
- * The css equivalent of a shape's gradient, for html text (which cannot
- * reference an svg paint). The control points set the direction: css angles
- * measure clockwise from "up", hence atan2(dx, -dy).
- */
-/**
- * An outline for gradient text. Neither of tldraw's techniques can work here:
- * gradient text paints by clipping a background to the glyphs, and both a
- * text-shadow and a -webkit-text-stroke paint ABOVE that background, so one
- * whites out the letters and the other eats into them. A filter, by contrast,
- * renders the element first and then draws the result offset BEHIND it - so a
- * ring of offset silhouettes gives an outline that stays outside the glyphs
- * with the gradient fully visible inside.
- */
-function clawThemePatch(editor, kind, slot, value) {
-	const settings = editor.getDocumentSettings()
-	const meta = { ...(settings.meta ?? {}) }
-	const group = { ...(meta.clawTheme?.[kind] ?? {}) }
-	if (value == null) delete group[slot]
-	else group[slot] = value
-	meta.clawTheme = { ...(meta.clawTheme ?? {}), [kind]: group }
-	editor.updateDocumentSettings({ meta })
-	applyClawTheme(editor, { force: true })
-}
-
-// datalist candidates for the font form, filtered by what this device renders
 const FONT_CANDIDATES = [
 	'Arial', 'Arial Black', 'Bahnschrift', 'Calibri', 'Cambria', 'Candara',
 	'Comic Sans MS', 'Consolas', 'Constantia', 'Corbel', 'Courier New',
