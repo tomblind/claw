@@ -53,3 +53,59 @@ the same page build.
   are rejected by tldraw's own parser with a clear error rather than misread.
 - `render` fidelity is tldraw's own export — do not add drawing code to this repo. If a
   render looks wrong, it's a load problem or a tldraw bug, not a rendering gap to patch.
+
+## Claw-only concepts in a portable file
+
+Claw adds four things tldraw has no vocabulary for. All of them survive a
+round trip through a vanilla tldraw editor, because the FILE never contains a
+value tldraw would reject: props carry a legal standard value, the claw truth
+lives in record `meta`, and `lib/custom-slots.mjs` swaps between the two at
+every file boundary (`restoreCustomStyles` on read, `extractCustomStyles` on
+write, called from both the editor page and the sync room).
+
+| concept | in memory | in the file | metadata |
+|---|---|---|---|
+| custom colour / font slots | `props.color = 'custom-3'` | nearest standard colour | `meta.clawStyle = {color, colorFallback}` |
+| rounded corners | `props.geo = 'rounded-hexagon'` | `'hexagon'` | `meta.clawRadius` (the radius IS the marker) |
+| gradient slots | slot value is `{gradient, from, to}` | shape uses the midpoint colour | slot in `meta.clawTheme`, geometry in `meta.clawGradient` |
+| per-shape text outline | — | — | `meta.clawText.outline` |
+
+Three rules learned the hard way:
+
+1. **`meta.clawStyle`, never `meta.claw`.** A string-valued `meta.claw` is a
+   waypoint-chain marker from the old arrow router. v0.22–0.24.1 wrote style
+   data there and silently destroyed chain markers on every load.
+2. **A claw-only enum value must be registered in THREE places** or a live
+   canvas rejects it: the editor page (shape util config), the sync room's
+   schema (`server/rooms.mjs`), and the file transform that hides it. Missing
+   the room registration produced `INVALID_RECORD` disconnects in v0.44.0,
+   and only a live room reproduces it - standalone tests cannot.
+3. **`updateShape` MERGES `meta`.** Omitting a key does not delete it; write
+   `null` explicitly and let the file transform drop it.
+
+### Gradients
+
+A gradient lives on a colour SLOT (two colours plus linear/radial), so editing
+the slot restyles every shape using it. Each shape owns only the geometry, as
+FRACTIONS of its own box, so a resize preserves the look.
+
+Painting is split by how the pixels are produced, and the split is the reason
+it works everywhere:
+
+- **Vector shapes** get their resolved fill/stroke replaced with a reference to
+  their own gradient definition, via tldraw's `getCustomDisplayValues` hook.
+  Canvas, PNG and SVG export all read that hook, so one mechanism covers them.
+- **Fill styles are not "on/off".** tldraw maps each fill style to a different
+  palette key of the same colour, so a gradient derives per-style stops
+  (`fill` full strength, `solid` a pale wash, `lined-fill` between). `semi` and
+  `pattern` deliberately keep tldraw's own treatment.
+- **Text** is HTML and cannot reference an SVG paint, so it clips a css
+  gradient to the glyphs. That forces the text's own fill transparent, which
+  in turn breaks both of tldraw's outline techniques (a text-shadow or a
+  text-stroke paints ABOVE the clipped fill: one whites the letters out, the
+  other eats into them). Gradient text therefore draws its outline with an SVG
+  filter that dilates the glyph once - a chain of css drop-shadows compounds
+  and comes out far too heavy.
+- **The Figma export** rewrites text into real SVG `<text>`; a transparent run
+  resolves to the shape's gradient rather than to transparent, or the text
+  imports invisible.

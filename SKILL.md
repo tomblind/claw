@@ -168,6 +168,14 @@ rework:
   `size.h` creates the exact-size box plus a separate centered overlay
   label. To change a chip's text later, `set_text` the box ref — it
   redirects to the overlay label and re-centers automatically.
+- **Visual controls exist beyond colour and size** — reach for them instead
+  of faking an effect with extra shapes. `rotate` turns a shape or a group
+  (degrees, around its own centre); `format` applies bold, italic,
+  underline, strike, code or highlight to a whole text or one substring;
+  `radius` rounds the corners of any convex shape; a frame takes a `color`
+  like any other shape; and a theme colour slot can hold a linear or radial
+  **gradient**, which paints fills, outlines and text alike. `claw ops` has
+  the exact syntax for each.
 - **Overlap is z-order, not luck.** Shapes stack in creation order, so a
   badge added before its card hides behind it. Fix it with `order`
   (`to: front | back | forward | backward`, or `to: above|below` with a

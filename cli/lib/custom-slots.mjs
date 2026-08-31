@@ -38,8 +38,6 @@ export const BASE_GEO_BY_ROUNDED = Object.fromEntries(
 	Object.entries(ROUNDED_GEO_BY_BASE).map(([base, rounded]) => [rounded, base])
 )
 export const ROUNDED_GEOS = Object.values(ROUNDED_GEO_BY_BASE)
-/** kept for callers that only deal with boxes */
-export const ROUNDED_GEO = ROUNDED_GEO_BY_BASE.rectangle
 
 export const CUSTOM_COLOR_SLOTS = Array.from({ length: 24 }, (_, i) => `custom-${i + 1}`)
 export const CUSTOM_FONT_SLOTS = Array.from({ length: 8 }, (_, i) => `custom-${i + 1}`)

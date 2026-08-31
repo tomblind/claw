@@ -147,6 +147,12 @@ function reportError(stage, err) {
 let PRISTINE_THEME = null
 let lastAppliedTheme = '__unset__'
 
+/** The canvas background for a colour mode - what an outline or a washed-out
+ * fill is mixed toward. One definition; four copies drifted apart before. */
+const CANVAS_BG = { light: '#ffffff', dark: '#101011' }
+const canvasBg = (mode) => CANVAS_BG[mode === 'dark' ? 'dark' : 'light']
+const editorBg = (editor) => canvasBg(editor?.getColorMode?.() ?? 'light')
+
 const mixHex = (hex, other, t) => {
 	const p = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16))
 	const [a, b] = [p(hex), p(other)]
@@ -277,7 +283,7 @@ function paintGradients(editor) {
 			}
 		}
 		if (needOutlineFilter) {
-			const bg = (editor.getColorMode?.() ?? 'light') === 'dark' ? '#101011' : '#ffffff'
+			const bg = editorBg(editor)
 			defs.push(gradientOutlineFilterMarkup(GRADIENT_OUTLINE_ID, bg))
 		}
 		const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
@@ -317,7 +323,7 @@ function applyClawTheme(editor, { force = false } = {}) {
 				const asColor = isGradientSlot(val) ? gradientMidpoint(val) : val
 				if (typeof asColor === 'string') {
 					const val = asColor // eslint-disable-line no-shadow
-					const bg = mode === 'light' ? '#ffffff' : '#101011'
+					const bg = canvasBg(mode)
 					const ink = mode === 'light' ? '#000000' : '#ffffff'
 					// a palette entry is more than a fill: frames, notes and lined
 					// fills read their own keys, and a slot cloned from black would
@@ -4028,7 +4034,7 @@ function gradientVariantsFor(editor, shape) {
 	const out = [{ suffix: 'color', from: def.from, to: def.to, def }]
 	const t = GRADIENT_FILL_STRENGTH[shape.props?.fill]
 	if (t != null) {
-		const bg = (editor.getColorMode?.() ?? 'light') === 'dark' ? '#101011' : '#ffffff'
+		const bg = editorBg(editor)
 		out.push({
 			suffix: 'fill',
 			from: t ? mixHex(def.from, bg, t) : def.from,
@@ -4125,7 +4131,7 @@ const withClawGradientExport = (Util) =>
 			// along with its definition
 			const textDef = gradientDefFor(this.editor, shape, shape.type === 'text' ? 'color' : 'labelColor')
 			let scope = null
-			const outlineBg = (this.editor.getColorMode?.() ?? 'light') === 'dark' ? '#101011' : '#ffffff'
+			const outlineBg = editorBg(this.editor)
 			if (textDef) {
 				const css = gradientTextCss(textDef, points, this.editor.getShapeGeometry(shape)?.bounds)
 				// every declaration needs !important: tldraw inlines the element's
