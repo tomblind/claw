@@ -572,6 +572,53 @@ const browser = await chromium.launch({ executablePath: findBrowser(), headless:
 		anch.lint.some((i) => i.kind === 'anchor-collapses' && /under 220px/.test(i.detail)),
 		anch.lint.map((i) => i.kind).join(' ') || 'none'
 	)
+	// tldraw 5.3.0 clips a shape inside NESTED frames to a triangle when a
+	// frame's edge is flush with its ancestor's, which "stretch to 100%"
+	// produces constantly. Claw nudges each frame's clip outward by a hair per
+	// level of nesting so the edges cross properly. If tldraw fixes the
+	// intersection, this still passes; if the nudge regresses, it does not.
+	const clips = await page.evaluate(async () => {
+		const ed = window.__editor
+		await window.host.applyOps([
+			{ add_screen: { name: 'ClipOuter', at: { x: 11000, y: 0 }, size: { w: 700, h: 900 } } },
+			{ add_screen: { name: 'ClipInner', at: { x: 12000, y: 0 }, size: { w: 700, h: 800 } } },
+		])
+		const outer = ed.getCurrentPageShapes().find((s) => s.props?.name === 'ClipOuter')
+		const inner = ed.getCurrentPageShapes().find((s) => s.props?.name === 'ClipInner')
+		// flush on the left and right: exactly what a full-width child looks like
+		ed.reparentShapes([inner.id], outer.id)
+		ed.updateShape({ id: inner.id, type: 'frame', x: 0, y: 50 })
+		await window.host.applyOps([
+			{ add: { screen: 'ClipInner', kind: 'box', at: { x: 10, y: 10 }, size: { w: 300, h: 200 }, name: 'ClipBox' } },
+			// and one that genuinely hangs outside, to prove clipping still bites
+			{ add: { screen: 'ClipInner', kind: 'box', at: { x: 600, y: 700 }, size: { w: 300, h: 300 }, name: 'ClipOut' } },
+		])
+		const { svg } = await window.host.exportSvg({ frame: 'ClipInner', figmaText: false })
+		const corners = []
+		for (const m of svg.matchAll(/<clipPath id="([^"]+)"[^>]*>(.*?)<\/clipPath>/gs)) {
+			const d = (m[2].match(/d="([^"]+)"/) || [])[1] ?? ''
+			corners.push((d.match(/[ML]/g) || []).length)
+		}
+		const outBox = ed.getCurrentPageShapes().find((s) => s.meta?.clawName === 'ClipOut')
+		const masked = ed.getShapeMaskedPageBounds(outBox.id)
+		const full = ed.getShapePageBounds(outBox.id)
+		return {
+			corners,
+			// the overhanging box must still be trimmed by the frame
+			clipped: masked ? Math.round(masked.w) < Math.round(full.w) : false,
+		}
+	})
+	check(
+		'clip: a shape in nested frames gets a four-corner clip, not a triangle',
+		clips.corners.length > 0 && clips.corners.every((c) => c === 4),
+		clips.corners.join(',')
+	)
+	check(
+		'clip: a shape overhanging a nested frame is still clipped',
+		clips.clipped,
+		String(clips.clipped)
+	)
+
 	// Lines are built from points, not a width and height, so a rule can only
 	// size one by scaling it. Scaling happens about the centre, so the position
 	// has to be re-applied after.

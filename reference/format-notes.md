@@ -111,6 +111,26 @@ Preferences, stored in `localStorage` as `claw-smooth-text`, and only an explici
 render gets the same outline the canvas shows. A single shape opts out through
 `meta.clawText.outline`, which travels with the file and is ignored elsewhere.
 
+### The nested-frame clip workaround
+
+tldraw 5.3.0 clips a shape to a TRIANGLE instead of a rectangle when it sits
+inside nested frames whose edges are flush. `Editor._getShapeMaskCache`
+intersects every ancestor frame's clip rectangle with `intersectPolygonPolygon`,
+which collects each polygon's corners that lie INSIDE the other plus any edge
+crossings. A corner exactly ON the other boundary is neither, and collinear
+edges produce no crossing, so a flush edge loses two corners.
+
+A full-width child produces flush edges constantly, so this is not an edge
+case for responsive layouts. `withNestedFrameClipFix` in `app.jsx` overrides
+the frame util's `getClipPath` to expand each frame's clip by 0.01px per level
+of nesting, so a child's clip is always a hair larger than its parent's and the
+edges cross properly. The nudge has to scale with depth: expanding every frame
+equally would leave flush edges flush.
+
+Reproduced against stock tldraw with no claw code, so it is upstream's. Remove
+the workaround when it is fixed there; the two `clip:` checks in the feature
+suite cover both the fix and that clipping still trims an overhanging shape.
+
 Three rules learned the hard way:
 
 1. **`meta.clawStyle`, never `meta.claw`.** A string-valued `meta.claw` is a

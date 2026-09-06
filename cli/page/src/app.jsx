@@ -787,6 +787,51 @@ function withAnchorLock(Util) {
 	}
 }
 
+/**
+ * Work around a tldraw 5.3.0 defect: a shape inside NESTED frames can be
+ * clipped to a triangle instead of a rectangle, cutting it on a diagonal.
+ *
+ * The editor masks a shape by intersecting every ancestor frame's clip
+ * rectangle (Editor._getShapeMaskCache), and intersectPolygonPolygon builds
+ * the result from each polygon's corners that lie INSIDE the other plus any
+ * edge crossings. A corner exactly ON the other boundary counts as neither,
+ * and two collinear edges produce no crossing, so when a nested frame's edge
+ * is flush with its ancestor's - which is what "stretch to 100%" produces -
+ * those corners are dropped and a four-corner rectangle becomes a triangle.
+ *
+ * Nudging every frame's clip outward by the same amount would keep flush
+ * edges flush, so the nudge grows with nesting depth: a child frame's clip is
+ * always a hair larger than its parent's, the edges properly cross, and the
+ * intersection comes out as the four-corner rectangle it should be. A
+ * hundredth of a pixel is far below anything visible and costs only that much
+ * clip slack.
+ *
+ * Remove this once tldraw fixes the intersection; the check in the feature
+ * suite will start failing for the right reason if the behaviour changes.
+ */
+const NESTED_FRAME_CLIP_NUDGE = 0.01
+function withNestedFrameClipFix(Util) {
+	return class extends Util {
+		getClipPath(shape) {
+			const verts = super.getClipPath?.(shape)
+			if (!verts || verts.length !== 4) return verts
+			let depth = 0
+			try {
+				depth = this.editor.getShapeAncestors(shape.id).length
+			} catch {
+				return verts
+			}
+			if (depth === 0) return verts
+			const pad = depth * NESTED_FRAME_CLIP_NUDGE
+			const cx = (verts[0].x + verts[2].x) / 2
+			const cy = (verts[0].y + verts[2].y) / 2
+			return verts.map(
+				(v) => new v.constructor(v.x + (v.x > cx ? pad : -pad), v.y + (v.y > cy ? pad : -pad))
+			)
+		}
+	}
+}
+
 const CLAW_SHAPE_UTILS = [
 	withAnchorLock(withClawGradientExport(withClawTextOutline(TL.TextShapeUtil))),
 	withAnchorLock(
@@ -823,7 +868,7 @@ const CLAW_SHAPE_UTILS = [
 	// frames carry a real color prop, but tldraw keeps it off the style system
 	// until this option turns it on (it then registers the colour style, so the
 	// style panel, the `style` op and claw's custom colour slots all reach it)
-	withAnchorLock(TL.FrameShapeUtil.configure({ showColors: true })),
+	withAnchorLock(withNestedFrameClipFix(TL.FrameShapeUtil.configure({ showColors: true }))),
 	// no group util here: tldraw treats "group" as a core type and refuses a
 	// replacement. A group keeps its handles, which is harmless, because
 	// resizing one scales its CHILDREN rather than the group, and any child
