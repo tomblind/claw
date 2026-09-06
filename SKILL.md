@@ -289,6 +289,15 @@ stay inside the height when there is not, keeping a 20px margin.
   by eye and then say how it behaves: `fill` (+`inset`), `fixed` (keep the
   size, pin to the nearest edge), `center`, `stretch-x`, `stretch-y`,
   `top-bar`, `bottom-bar`.
+- **Shapes built from points** (lines, freehand draw) are sized by scaling,
+  since they have no width and height to set. An axis with no extent, such as
+  the height of a perfectly straight line, cannot be scaled into one and is
+  left as it is.
+- **A group can be positioned by a rule but not sized by one.** Its size is
+  whatever its contents span, and tldraw only resizes one by scaling those
+  contents, which is a zoom rather than a layout. The panel shows only the
+  position rows for a group, and `lint` reports a size mode other than `fixed`
+  on one.
 - **An anchored shape cannot be resized by hand.** Its resize handles are
   withdrawn, because a drag has no single right meaning once a rule owns the
   size: on a stretch axis it would land in `sizeOffset` and then grow oddly

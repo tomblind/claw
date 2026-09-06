@@ -22,12 +22,13 @@ import {
 import {
 	anchorParent,
 	installLiveAnchors,
-	localBox,
+	relativeBox,
 	presetRule,
 	resolveAnchorReport,
 	resolveContainer,
 	ruleOf,
 	ruleText,
+	sizeIsDriven,
 } from './anchors.js'
 import { canvasBg, editorBg, mixHex, reportError } from './common.js'
 import { foreignObjectTextToSvgText } from './figma-svg.js'
@@ -823,6 +824,10 @@ const CLAW_SHAPE_UTILS = [
 	// until this option turns it on (it then registers the colour style, so the
 	// style panel, the `style` op and claw's custom colour slots all reach it)
 	withAnchorLock(TL.FrameShapeUtil.configure({ showColors: true })),
+	// no group util here: tldraw treats "group" as a core type and refuses a
+	// replacement. A group keeps its handles, which is harmless, because
+	// resizing one scales its CHILDREN rather than the group, and any child
+	// carrying a rule has that size change refused by the store guard.
 ]
 
 /**
@@ -1125,6 +1130,7 @@ function ClawAnchorControls() {
 				count: shapes.length,
 				allDynamic: shapes.every((s) => ruleOf(s)),
 				rule: shapes.length === 1 ? ruleOf(shapes[0]) : null,
+				sizeIsDriven: shapes.every(sizeIsDriven),
 				// the text switch only means something for a shape that HAS text:
 				// its own, or the separate overlay label a fixed-size box carries
 				hasText: shapes.some(
@@ -1177,7 +1183,7 @@ function ClawAnchorControls() {
 				// Seed the number a mode needs from the box as drawn, so switching
 				// mode is never a silent no-op waiting for a second edit.
 				if (field === 'mode') {
-					const b = localBox(editor, shape)
+					const b = relativeBox(editor, shape, anchorParent(editor, shape))
 					const size = axis === 'x' ? b.w : b.h
 					const other = axis === 'x' ? b.h : b.w
 					if ((value === 'fixed' || value === 'shrink') && !(next.size > 0)) {
@@ -1323,8 +1329,9 @@ function ClawAnchorControls() {
 			{rule && state.count === 1 && (
 				<div style={{ display: 'flex', flexDirection: 'column', gap: 2, padding: '0 8px 2px' }}>
 					{POSITION_ROWS.map(positionRow)}
-					{axisSection('x')}
-					{axisSection('y')}
+					{/* a group is sized by its contents, so only position applies */}
+					{state.sizeIsDriven && axisSection('x')}
+					{state.sizeIsDriven && axisSection('y')}
 				</div>
 			)}
 			{state.allDynamic && state.hasText && (

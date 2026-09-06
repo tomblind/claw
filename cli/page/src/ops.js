@@ -354,8 +354,9 @@ function mergeAxis(existing, incoming, axis) {
 	if (mode === 'aspect' && !(out.ratio > 0)) {
 		throw new Error(`anchor ${axis}: aspect mode needs a positive "ratio" (a multiple of the other axis)`)
 	}
-	if ((mode === 'fixed' || mode === 'shrink') && !(out.size > 0)) {
-		throw new Error(`anchor ${axis}: ${mode} mode needs a positive "size" in pixels`)
+	// zero is a legitimate size: a line has no thickness across its own axis
+	if ((mode === 'fixed' || mode === 'shrink') && !(out.size >= 0)) {
+		throw new Error(`anchor ${axis}: ${mode} mode needs a "size" in pixels`)
 	}
 	return out
 }

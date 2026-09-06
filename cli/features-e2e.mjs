@@ -572,6 +572,144 @@ const browser = await chromium.launch({ executablePath: findBrowser(), headless:
 		anch.lint.some((i) => i.kind === 'anchor-collapses' && /under 220px/.test(i.detail)),
 		anch.lint.map((i) => i.kind).join(' ') || 'none'
 	)
+	// Lines are built from points, not a width and height, so a rule can only
+	// size one by scaling it. Scaling happens about the centre, so the position
+	// has to be re-applied after.
+	const lines = await page.evaluate(async () => {
+		const ed = window.__editor
+		await window.host.applyOps([
+			{ add_screen: { name: 'Lines', at: { x: 7000, y: 0 }, size: { w: 400, h: 400 } } },
+		])
+		const frame = ed.getCurrentPageShapes().find((s) => s.props?.name === 'Lines')
+		const mk = (id, y, x2, y2) =>
+			ed.createShape({
+				id,
+				type: 'line',
+				parentId: frame.id,
+				x: 40,
+				y,
+				meta: { clawName: id.slice(6) },
+				props: {
+					points: {
+						a1: { id: 'a1', index: 'a1', x: 0, y: 0 },
+						a2: { id: 'a2', index: 'a2', x: x2, y: y2 },
+					},
+				},
+			})
+		mk('shape:eflat', 60, 200, 0)
+		mk('shape:ediag', 120, 200, 100)
+		const rel = (id) => {
+			const pb = ed.getShapePageBounds(id)
+			const f = ed.getShapePageBounds(frame.id)
+			return {
+				x: Math.round(pb.x - f.x),
+				y: Math.round(pb.y - f.y),
+				w: Math.round(pb.w),
+				h: Math.round(pb.h),
+			}
+		}
+		const span = { mode: 'stretch', percent: 1, sizeOffset: -40, anchor: 0, pivot: 0, offset: 20 }
+		await window.host.applyOps([
+			{ anchor: { id: 'eflat', x: span } },
+			{ anchor: { id: 'ediag', x: span } },
+		])
+		const at400 = { flat: rel('shape:eflat'), diag: rel('shape:ediag') }
+		await window.host.applyOps([{ resize: { id: frame.id.slice(6), w: 800 } }])
+		const at800 = { flat: rel('shape:eflat'), diag: rel('shape:ediag') }
+		// a height rule a flat line cannot satisfy must leave it intact
+		await window.host.applyOps([
+			{
+				anchor: {
+					id: 'eflat',
+					y: { mode: 'stretch', percent: 0.5, sizeOffset: 0, anchor: 0, pivot: 0, offset: 60 },
+				},
+			},
+		])
+		return { at400, at800, flatAfterHeightRule: rel('shape:eflat') }
+	})
+	check(
+		'anchor: a line follows a stretch rule by scaling',
+		sameBox(lines.at400.flat, { x: 20, y: 60, w: 360, h: 0 }) &&
+			sameBox(lines.at800.flat, { x: 20, y: 60, w: 760, h: 0 }),
+		JSON.stringify(lines.at800.flat)
+	)
+	check(
+		'anchor: a diagonal line keeps the axis its rule does not touch',
+		lines.at800.diag.w === 760 && lines.at800.diag.h === 100,
+		JSON.stringify(lines.at800.diag)
+	)
+	check(
+		'anchor: a flat line survives a height rule it cannot satisfy',
+		sameBox(lines.flatAfterHeightRule, { x: 20, y: 60, w: 760, h: 0 }),
+		JSON.stringify(lines.flatAfterHeightRule)
+	)
+
+	// Groups. A group keeps PAGE coordinates while parented to a frame and
+	// compensates with an offset on its geometry, so reading shape.x treated
+	// the whole board as its parent. Every box here is measured from rendered
+	// page bounds relative to the frame, which is the one measure that means
+	// the same thing for every shape type.
+	const grouped = await page.evaluate(async () => {
+		const ed = window.__editor
+		// deliberately far from the origin: at 0,0 the bug is invisible
+		await window.host.applyOps([
+			{ add_screen: { name: 'Grp', at: { x: 6000, y: 400 }, size: { w: 400, h: 400 } } },
+			{ add: { screen: 'Grp', kind: 'card', at: { x: 60, y: 80 }, size: { w: 120, h: 60 }, name: 'GA' } },
+			{ add: { screen: 'Grp', kind: 'card', at: { x: 200, y: 80 }, size: { w: 120, h: 60 }, name: 'GB' } },
+		])
+		const find = (n) => ed.getCurrentPageShapes().find((s) => s.meta?.clawName === n)
+		const frame = ed.getCurrentPageShapes().find((s) => s.props?.name === 'Grp')
+		ed.select(find('GA').id, find('GB').id)
+		ed.groupShapes(ed.getSelectedShapeIds())
+		const group = ed.getCurrentPageShapes().find((s) => s.type === 'group')
+		const gid = group.id.slice(6)
+		const fid = frame.id.slice(6)
+		const rel = () => {
+			const b = ed.getShapePageBounds(group.id)
+			const f = ed.getShapePageBounds(frame.id)
+			return {
+				x: Math.round(b.x - f.x),
+				y: Math.round(b.y - f.y),
+				w: Math.round(b.w),
+				h: Math.round(b.h),
+			}
+		}
+		const res = { drawn: rel() }
+		await window.host.applyOps([{ anchor: { id: gid, preset: 'fixed' } }])
+		res.pinned = rel()
+		res.offset = ed.getShape(group.id).meta.clawAnchor.x.offset
+		await window.host.applyOps([{ resize: { id: fid, w: 800 } }])
+		res.pinnedWide = rel()
+		await window.host.applyOps([{ anchor: { id: gid, x: { anchor: 1, pivot: 1, offset: -20 } } }])
+		res.rightEdge = rel()
+		res.lint = (await window.host.lint()).issues.filter((i) => i.kind === 'anchor-group-size')
+		await window.host.applyOps([{ anchor: { id: gid, x: { mode: 'stretch', percent: 1 } } }])
+		res.lintAfterStretch = (await window.host.lint()).issues.filter(
+			(i) => i.kind === 'anchor-group-size'
+		)
+		return res
+	})
+	check(
+		'anchor: a group measures against its frame, not the board',
+		grouped.offset === 60 && sameBox(grouped.pinned, grouped.drawn),
+		`offset ${grouped.offset}, ${JSON.stringify(grouped.pinned)}`
+	)
+	check(
+		'anchor: a pinned group holds its place when the screen widens',
+		sameBox(grouped.pinnedWide, { x: 60, y: 80, w: 260, h: 60 }),
+		JSON.stringify(grouped.pinnedWide)
+	)
+	check(
+		'anchor: a group hung off the right edge tracks it',
+		sameBox(grouped.rightEdge, { x: 520, y: 80, w: 260, h: 60 }),
+		JSON.stringify(grouped.rightEdge)
+	)
+	check(
+		'lint: a size mode on a group is reported, since only position applies',
+		grouped.lint.length === 0 && grouped.lintAfterStretch.length > 0,
+		`${grouped.lint.length} then ${grouped.lintAfterStretch.length}`
+	)
+
 	// Fit: a stretch axis shrinks until its aspect partner sits inside the
 	// parent. The partner's anchor and pivot decide which of its edges move,
 	// so the bound depends on placement, not just size.
@@ -1036,6 +1174,124 @@ const browser = await chromium.launch({ executablePath: findBrowser(), headless:
 		'panel: a fitted axis returns to full size when the ratio is put back',
 		fedBack.w === fedStart.w && fedBumped.w < fedStart.w,
 		`${fedStart.w} -> ${fedBumped.w} -> ${fedBack.w}`
+	)
+	// Testing a layout must be free: resize the screen, undo, and the rules
+	// must be byte-identical. A rebase is only meaningful when something other
+	// than the resolver moved a shape, so an automated pass must never rewrite
+	// one from geometry that is mid-flight.
+	const undoRules = await page.evaluate(async () => {
+		const ed = window.__editor
+		await window.host.applyOps([
+			{ add_screen: { name: 'Undo', at: { x: 8000, y: 0 }, size: { w: 400, h: 400 } } },
+			{ add: { screen: 'Undo', kind: 'card', at: { x: 20, y: 20 }, size: { w: 360, h: 60 }, name: 'UBar' } },
+			{ add: { screen: 'Undo', kind: 'card', at: { x: 40, y: 120 }, size: { w: 120, h: 60 }, name: 'UPin' } },
+			{ anchor: { id: 'UBar', preset: 'fill', inset: 20 } },
+			{ anchor: { id: 'UPin', preset: 'fixed' } },
+		])
+		const read = () =>
+			JSON.stringify(
+				['UBar', 'UPin'].map((n) => {
+					const s = ed.getCurrentPageShapes().find((x) => x.meta?.clawName === n)
+					return s.meta.clawAnchor
+				})
+			)
+		const frame = ed.getCurrentPageShapes().find((s) => s.props?.name === 'Undo')
+		const before = read()
+		ed.markHistoryStoppingPoint()
+		ed.updateShape({ id: frame.id, type: 'frame', props: { w: 900 } })
+		await new Promise((r) => setTimeout(r, 120))
+		const wide = read()
+		ed.undo()
+		await new Promise((r) => setTimeout(r, 120))
+		return {
+			same: before === read(),
+			unchangedDuringResize: before === wide,
+			frameW: Math.round(ed.getShape(frame.id).props.w),
+		}
+	})
+	check(
+		'live: resizing a screen to test a layout does not touch the rules',
+		undoRules.unchangedDuringResize,
+		JSON.stringify(undoRules)
+	)
+	check(
+		'live: undoing that resize restores the rules exactly',
+		undoRules.same && undoRules.frameW === 400,
+		JSON.stringify(undoRules)
+	)
+	// The case from daily-jigsaw: a board that fits inside its screen, holding
+	// grid lines with zero thickness. Squeeze the screen until the fit binds,
+	// then undo. Undo restores only what a person did; the resolver derives
+	// the rest again, so no rule is rewritten from a half-restored state.
+	const jigsaw = await page.evaluate(async () => {
+		const ed = window.__editor
+		await window.host.applyOps([
+			{ add_screen: { name: 'Game', at: { x: 9000, y: 0 }, size: { w: 720, h: 1280 } } },
+			{ add_screen: { name: 'Board', at: { x: 9020, y: 80 }, size: { w: 680, h: 551 } } },
+		])
+		const game = ed.getCurrentPageShapes().find((s) => s.props?.name === 'Game')
+		const board = ed.getCurrentPageShapes().find((s) => s.props?.name === 'Board')
+		ed.reparentShapes([board.id], game.id)
+		ed.updateShape({ id: board.id, type: 'frame', x: 20, y: 80 })
+		// zero-thickness grid lines, evenly spaced, with no offsets at all
+		for (let i = 0; i < 3; i++) {
+			ed.createShape({
+				id: `shape:jig${i}`,
+				type: 'line',
+				parentId: board.id,
+				x: 0,
+				y: 100 + i * 100,
+				meta: { clawName: `jig${i}` },
+				props: {
+					points: {
+						a1: { id: 'a1', index: 'a1', x: 0, y: 0 },
+						a2: { id: 'a2', index: 'a2', x: 680, y: 0 },
+					},
+				},
+			})
+		}
+		await window.host.applyOps([
+			{
+				anchor: {
+					id: board.id.slice(6),
+					x: { mode: 'stretch', percent: 1, sizeOffset: -40, anchor: 0.5, pivot: 0.5, offset: 0, fit: true, fitOffset: -40 },
+					y: { mode: 'aspect', ratio: 0.81, anchor: 0, pivot: 0, offset: 80 },
+				},
+			},
+			...[0, 1, 2].map((i) => ({
+				anchor: {
+					id: `jig${i}`,
+					x: { mode: 'stretch', percent: 1 },
+					y: { mode: 'fixed', size: 0, anchor: (i + 1) * 0.25 },
+				},
+			})),
+		])
+		const rules = () =>
+			JSON.stringify(
+				[0, 1, 2].map((i) => {
+					const r = ed.getShape(`shape:jig${i}`).meta.clawAnchor
+					return [r.x.offset ?? 0, r.x.sizeOffset ?? 0, r.y.offset ?? 0, r.y.sizeOffset ?? 0]
+				})
+			)
+		const boardW = () => Math.round(ed.getShapePageBounds(board.id).w)
+		const before = rules()
+		const wBefore = boardW()
+		ed.markHistoryStoppingPoint()
+		ed.updateShape({ id: game.id, type: 'frame', props: { h: 500 } })
+		await new Promise((r) => setTimeout(r, 200))
+		const wSqueezed = boardW()
+		ed.undo()
+		await new Promise((r) => setTimeout(r, 200))
+		return {
+			same: before === rules(),
+			fitEngaged: wSqueezed < wBefore,
+			restored: boardW() === wBefore,
+		}
+	})
+	check(
+		'live: undo after a fit-driven resize leaves the grid rules untouched',
+		jigsaw.fitEngaged && jigsaw.same && jigsaw.restored,
+		JSON.stringify(jigsaw)
 	)
 	check('live editing raised no page errors', pageErrors.length === 0, pageErrors[0] ?? '')
 	await page.close()

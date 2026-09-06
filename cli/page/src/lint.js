@@ -10,8 +10,9 @@ import {
 	axisSpec,
 	collapseExtent,
 	innerBox,
-	localBox,
+	relativeBox,
 	resolveShapeRule,
+	sizeIsDriven,
 	ruleOf,
 } from './anchors.js'
 
@@ -293,9 +294,15 @@ export function lintDocument(editor) {
 		for (const axis of AXES) {
 			const spec = specs[axis]
 			if (!spec) continue
+			if (!sizeIsDriven(s) && spec.mode !== 'fixed') {
+				add(
+					'anchor-group-size',
+					`${describe(s)} asks for ${spec.mode} on ${axis}, but a group is sized by its contents - the rule can only position it`
+				)
+			}
 			const collapse = collapseExtent(spec)
 			if (collapse != null) {
-				const parentExtent = axis === 'x' ? innerBox(parent).w : innerBox(parent).h
+				const parentExtent = axis === 'x' ? innerBox(parent, editor).w : innerBox(parent, editor).h
 				if (collapse > parentExtent * 0.5) {
 					add(
 						'anchor-collapses',
@@ -308,7 +315,7 @@ export function lintDocument(editor) {
 		// is not, something moved the shape without the rule being updated
 		try {
 			const expected = resolveShapeRule(editor, s, rule, parent, { apply: false })
-			const now = localBox(editor, s)
+			const now = relativeBox(editor, s, parent)
 			if (expected && !expected.error) {
 				const drift = Math.max(
 					Math.abs(expected.box.x - now.x),

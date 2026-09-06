@@ -62,6 +62,13 @@ export const MODE_FIELDS = {
 
 /** Shapes whose box is set through props.w / props.h. */
 const SIZED_TYPES = new Set(['geo', 'image', 'frame', 'embed', 'video'])
+/**
+ * Shapes built from points rather than a width and height. They have no size
+ * to assign, but tldraw can scale them, which is the only way a rule can size
+ * one. Scaling happens about the shape's centre, so the position has to be
+ * re-applied afterwards.
+ */
+const SCALED_TYPES = new Set(['line', 'draw', 'highlight'])
 
 /**
  * Depth of an in-progress resolve.
@@ -108,7 +115,12 @@ export function axisSpec(rule, axis, shape = null) {
 		percent: finite(raw.percent, 1),
 		sizeOffset: finite(raw.sizeOffset, 0),
 		ratio: finite(raw.ratio, null),
-		min: Math.max(0.01, finite(raw.min, 1)),
+		// Floors default to nothing. A line has zero extent across its own
+		// thickness and that is legitimate, so forcing every axis to at least
+		// 1px left such a shape permanently a pixel away from its own rule.
+		// Shapes that need a real size still get one: writeBox floors those at
+		// 1 when it sets props.w / props.h.
+		min: Math.max(0, finite(raw.min, 0)),
 		fit: raw.fit === true,
 		fitOffset: finite(raw.fitOffset, 0),
 	}
@@ -154,27 +166,49 @@ export function fitLimit(spec, otherSpec, otherExtent) {
 	return Math.min(...bounds)
 }
 
-/** The box a container offers its children: its own size, in its own space. */
-export function innerBox(container) {
-	return {
-		w: finite(container?.props?.w, null) ?? 0,
-		h: finite(container?.props?.h, null) ?? 0,
-	}
+/**
+ * The box a container offers its children.
+ *
+ * Frames and boxes carry their size in props. A group does not - its size is
+ * whatever its contents span - so fall back to its rendered bounds.
+ */
+export function innerBox(container, editor = null) {
+	const w = finite(container?.props?.w, null)
+	const h = finite(container?.props?.h, null)
+	if (w != null && h != null) return { w, h }
+	const b = editor && container ? editor.getShapePageBounds(container.id) : null
+	return { w: w ?? finite(b?.w, 0) ?? 0, h: h ?? finite(b?.h, 0) ?? 0 }
 }
 
 /**
- * Current local box of a shape. Geometry bounds give the size because they are
- * the RENDERED extent for every type (a text shape's props.w is pre-scale, a
- * geo's is not).
+ * Where a shape sits inside its parent, and how big it is, both measured from
+ * rendered page bounds.
+ *
+ * `shape.x` is NOT usable here. For most types it is the top-left in parent
+ * space, but a group keeps PAGE coordinates while parented to a frame and
+ * compensates with an offset on its geometry, so reading it treated a group as
+ * though the whole board were its parent. Page bounds are the one measure that
+ * means the same thing for every type.
  */
-export function localBox(editor, shape) {
-	const b = editor.getShapeGeometry(shape.id)?.bounds
+export function localBox(editor, shape, parent = null) {
+	const b = editor.getShapePageBounds(shape.id)
+	const origin = parent ? editor.getShapePageBounds(parent.id) : null
 	return {
-		x: shape.x,
-		y: shape.y,
+		x: finite(b?.x, 0) ?? 0,
+		y: finite(b?.y, 0) ?? 0,
 		w: Math.max(0, finite(b?.w, 0) ?? 0),
 		h: Math.max(0, finite(b?.h, 0) ?? 0),
+		// page-space origin of the parent, so a resolved position can be turned
+		// back into a move without caring what space the shape stores
+		originX: finite(origin?.x, 0) ?? 0,
+		originY: finite(origin?.y, 0) ?? 0,
 	}
+}
+
+/** The same box expressed relative to the parent, which is what rules speak. */
+export function relativeBox(editor, shape, parent) {
+	const b = localBox(editor, shape, parent)
+	return { x: b.x - b.originX, y: b.y - b.originY, w: b.w, h: b.h }
 }
 
 /** The size a mode asks for, before the floor is applied. */
@@ -221,6 +255,9 @@ export function collapseExtent(spec) {
 	return at > 0 ? at : null
 }
 
+/** A group's size comes from its contents; a rule can only position it. */
+export const sizeIsDriven = (shape) => shape?.type !== 'group'
+
 /** Does this shape hold anything the resolver should walk into? */
 export function hasAnyChildren(editor, shape) {
 	try {
@@ -233,8 +270,45 @@ export function hasAnyChildren(editor, shape) {
 	}
 }
 
-/** Write a box onto a shape, respecting what its type allows to be set. */
-function writeBox(editor, shape, box, { scale = null, wrapWidth = null } = {}) {
+/**
+ * Put a shape's rendered box where the rule says, respecting what its type
+ * allows to be set.
+ *
+ * Position is applied as a MOVE from where the shape currently renders, not as
+ * an assignment to `x`/`y`, because those are not the top-left for every type
+ * (see localBox). A group has no size of its own either, so it is scaled
+ * around its top-left instead.
+ */
+function writeBox(editor, shape, box, { scale = null, wrapWidth = null, parent = null } = {}) {
+	const current = localBox(editor, shape, parent)
+	const dx = box.x + current.originX - current.x
+	const dy = box.y + current.originY - current.y
+	// A group has no size of its own - it is whatever its contents span - and
+	// tldraw only resizes one by scaling its children through a resize
+	// session, which is a zoom rather than a layout. So a rule positions a
+	// group and never sizes it; `groupSizeIsFixed` reports that to lint.
+	if (shape.type === 'group') {
+		editor.updateShape({ id: shape.id, type: shape.type, x: shape.x + dx, y: shape.y + dy })
+		return
+	}
+	if (SCALED_TYPES.has(shape.type)) {
+		// an axis with no extent (a perfectly straight line) cannot be scaled
+		// into one, so it is left alone rather than divided by zero
+		const sx = current.w > 0.01 ? Math.max(0.01, box.w / current.w) : 1
+		const sy = current.h > 0.01 ? Math.max(0.01, box.h / current.h) : 1
+		if (Math.abs(sx - 1) > 0.001 || Math.abs(sy - 1) > 0.001) {
+			editor.resizeShape(shape.id, { x: sx, y: sy })
+		}
+		const moved = editor.getShape(shape.id)
+		const after = localBox(editor, moved, parent)
+		editor.updateShape({
+			id: shape.id,
+			type: shape.type,
+			x: moved.x + (box.x + after.originX - after.x),
+			y: moved.y + (box.y + after.originY - after.y),
+		})
+		return
+	}
 	const props = {}
 	if (SIZED_TYPES.has(shape.type)) {
 		props.w = Math.max(1, box.w)
@@ -254,8 +328,8 @@ function writeBox(editor, shape, box, { scale = null, wrapWidth = null } = {}) {
 	editor.updateShape({
 		id: shape.id,
 		type: shape.type,
-		x: box.x,
-		y: box.y,
+		x: shape.x + dx,
+		y: shape.y + dy,
 		...(Object.keys(props).length ? { props } : {}),
 	})
 }
@@ -326,10 +400,10 @@ function resolveShapeRuleInner(editor, shape, rule, parent, { apply, parentSize 
 	if (specs.x?.mode === 'aspect' && specs.y?.mode === 'aspect') {
 		throw new Error('both axes are aspect mode - one axis needs a size to derive from')
 	}
-	const box = localBox(editor, shape)
+	const box = relativeBox(editor, shape, parent)
 	// `parentSize` answers "where would this land if the screen were N wide"
 	// without touching the document - what `claw resolve --sizes` reports
-	const parentBox = parentSize ?? innerBox(parent)
+	const parentBox = parentSize ?? innerBox(parent, editor)
 	const scaledText = shape.type === 'text' && (rule.text ?? 'scale') === 'scale'
 
 	// the aspect axis needs the other one settled first
@@ -360,6 +434,21 @@ function resolveShapeRuleInner(editor, shape, rule, parent, { apply, parentSize 
 		w: solved.x ? solved.x.size : box.w,
 		h: solved.y ? solved.y.size : box.h,
 	}
+	// An axis with no extent cannot be scaled into one, so report the size the
+	// shape will really have. Otherwise a flat line looks permanently off its
+	// own rule and every geometry change looks like someone dragged it.
+	if (SCALED_TYPES.has(shape.type)) {
+		if (solved.x && box.w <= 0.01) target.w = box.w
+		if (solved.y && box.h <= 0.01) target.h = box.h
+	}
+	// a group keeps the size its contents give it, so the pivot has to work
+	// against that rather than against a size it will never take
+	if (shape.type === 'group') {
+		if (solved.x) target.x = solved.x.pos + (solved.x.size - box.w) * specs.x.pivot
+		if (solved.y) target.y = solved.y.pos + (solved.y.size - box.h) * specs.y.pivot
+		target.w = box.w
+		target.h = box.h
+	}
 
 	// Text that scales is drawn like a uniformly scaled picture of its design
 	// layout: one factor, identical line breaks, and whatever slack the other
@@ -384,6 +473,7 @@ function resolveShapeRuleInner(editor, shape, rule, parent, { apply, parentSize 
 		writeBox(editor, shape, target, {
 			scale,
 			wrapWidth: wrapWidthFor(shape, solved.x, scaledText),
+			parent,
 		})
 		if (!scaledText && (rule.text ?? 'scale') === 'scale' && factor != null) {
 			scaleOverlayLabel(editor, shape, factor)
@@ -410,12 +500,34 @@ function resolveShapeRuleInner(editor, shape, rule, parent, { apply, parentSize 
  * container settles its own box before its children read it.
  */
 export function resolveContainer(editor, container, { apply = true } = {}) {
-	if (apply) resolving++
+	if (!apply) return resolveContainerInner(editor, container, { apply })
+	resolving++
 	try {
-		return resolveContainerInner(editor, container, { apply })
+		return runDerived(editor, () => resolveContainerInner(editor, container, { apply }))
 	} finally {
-		if (apply) resolving--
+		resolving--
 	}
+}
+
+/**
+ * Run the resolver's writes outside undo history.
+ *
+ * Resolved geometry is DERIVED: it is a function of the rules and the
+ * container's size, so it can always be recomputed and never needs restoring.
+ * Recording it made undo restore half of a resolve - a child put back while
+ * its container stayed where it was - and a rebase reading that mid-state saw
+ * a shape wildly off its rule and wrote the discrepancy in as an offset.
+ *
+ * Keeping it out of history means an undo restores only what a person did, and
+ * the next resolve derives everything else from the rules again.
+ */
+function runDerived(editor, fn) {
+	if (typeof editor.run !== 'function') return fn()
+	let out
+	editor.run(() => {
+		out = fn()
+	}, { history: 'ignore' })
+	return out
 }
 
 function resolveContainerInner(editor, container, { apply }) {
@@ -475,8 +587,8 @@ export function anchorParent(editor, shape) {
 export function rebaseOffsets(editor, shape, parent) {
 	const rule = ruleOf(shape)
 	if (!rule || !parent) return null
-	const box = localBox(editor, shape)
-	const parentBox = innerBox(parent)
+	const box = relativeBox(editor, shape, parent)
+	const parentBox = innerBox(parent, editor)
 	const next = { ...rule }
 	for (const axis of AXES) {
 		const spec = axisSpec(rule, axis, shape)
@@ -501,6 +613,35 @@ export function rebaseOffsets(editor, shape, parent) {
 		meta: { ...(shape.meta ?? {}), clawAnchor: next },
 	})
 	return next
+}
+
+/**
+ * Is this shape somewhere its own rule does not put it?
+ *
+ * A resolve leaves a shape exactly where its rule says, and rebasing from that
+ * position is a fixed point: it writes back the numbers it started with. So a
+ * rebase is only ever meaningful when something OTHER than the resolver moved
+ * the shape, which is precisely a hand drag. Checking first means an automated
+ * pass - a resize, an undo, a redo, a remote edit - can never quietly rewrite
+ * a rule from geometry that is mid-flight.
+ */
+export function isOffRule(editor, shape, parent) {
+	const rule = ruleOf(shape)
+	if (!rule || !parent) return false
+	let expected
+	try {
+		expected = resolveShapeRule(editor, shape, rule, parent, { apply: false })
+	} catch {
+		return false
+	}
+	if (!expected || expected.error) return false
+	const now = relativeBox(editor, shape, parent)
+	return (
+		Math.abs(expected.box.x - now.x) > 0.5 ||
+		Math.abs(expected.box.y - now.y) > 0.5 ||
+		Math.abs(expected.box.w - now.w) > 0.5 ||
+		Math.abs(expected.box.h - now.h) > 0.5
+	)
 }
 
 /** The design box text scaling measures from. */
@@ -530,8 +671,8 @@ export const PRESETS = [
 
 /** Build a rule from a preset, measured against the shape as it is now. */
 export function presetRule(editor, shape, parent, preset, { inset = 0 } = {}) {
-	const box = localBox(editor, shape)
-	const p = innerBox(parent)
+	const box = relativeBox(editor, shape, parent)
+	const p = innerBox(parent, editor)
 	const dims = (axis) => ({
 		extent: axis === 'x' ? p.w : p.h,
 		lo: axis === 'x' ? box.x : box.y,
@@ -632,7 +773,7 @@ function resolveAnchorReportInner(editor, { container, sizes }) {
 			out.warnings.push(`${labelOf(target)} has no anchored shapes inside it - nothing to resolve`)
 			continue
 		}
-		const design = innerBox(target)
+		const design = innerBox(target, editor)
 		const entry = {
 			id: target.id,
 			name: labelOf(target),
@@ -783,7 +924,11 @@ export function installLiveAnchors(editor) {
 				const shape = editor.getShape(id)
 				if (!shape || !ruleOf(shape)) continue
 				const parent = anchorParent(editor, shape)
-				if (parent) rebaseOffsets(editor, shape, parent)
+				// only a shape that has actually drifted off its rule was moved
+				// by a person; everything else is the resolver's own work
+				if (parent && isOffRule(editor, shape, parent)) {
+					rebaseOffsets(editor, shape, parent)
+				}
 			}
 			for (const id of containers) {
 				const container = editor.getShape(id)
