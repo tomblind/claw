@@ -146,6 +146,20 @@ function blobToBase64(blob) {
 	})
 }
 
+/**
+ * Serialize the document to .tldr text with tldraw's own writer.
+ *
+ * memory -> file: custom style slots are swapped for standard fallbacks plus
+ * meta.clawStyle, so the saved file opens in any tldraw editor. No catch here:
+ * writing custom-N to disk would silently break that guarantee.
+ */
+async function serializeDocument(editor) {
+	const text = await TL.serializeTldrawJson(editor)
+	const file = JSON.parse(text)
+	if (Array.isArray(file.records)) extractCustomStyles(file.records)
+	return JSON.stringify(file)
+}
+
 function inspectShapeDetail(editor, query) {
 	const s = resolveShape(editor, query)
 	const b = editor.getShapePageBounds(s.id)
@@ -212,7 +226,24 @@ function idsForExport(editor, frame) {
 
 function setupHost(editor) {
 	const inSyncRoom = syncParams() != null
+	/**
+	 * What an EMPTY document serializes to, captured here at mount while the
+	 * editor is provably still empty. `new` builds every fresh canvas from it.
+	 *
+	 * It must not be captured later, on demand: the core asks for it when the
+	 * executor connects, and an executor reconnects with its document intact
+	 * whenever the core restarts while the app window stays open (`claw stop`,
+	 * or the deploy cycle). Serializing at that moment captured whatever canvas
+	 * was last loaded, and every subsequent `claw new` silently wrote those
+	 * shapes into the new file.
+	 */
+	const emptyTemplate = serializeDocument(editor).catch(() => null)
 	window.host = {
+		/** The empty-document template, captured at mount. See above. */
+		async emptyTemplate() {
+			return await emptyTemplate
+		},
+
 		/** Parse + migrate a .tldr file with tldraw's own loader, then load it. */
 		async load(json) {
 			if (inSyncRoom) {
@@ -338,13 +369,7 @@ function setupHost(editor) {
 
 		/** Serialize the current document back to .tldr text (tldraw's own writer). */
 		async serialize() {
-			const text = await TL.serializeTldrawJson(editor)
-			// memory -> file: swap custom style slots for standard fallbacks +
-			// meta.claw, so the saved file opens in any tldraw editor. No catch:
-			// writing custom-N to disk would silently break that guarantee.
-			const file = JSON.parse(text)
-			if (Array.isArray(file.records)) extractCustomStyles(file.records)
-			return JSON.stringify(file)
+			return await serializeDocument(editor)
 		},
 
 		/**

@@ -162,10 +162,22 @@ function attachExecutor(ws) {
 		log('executor disconnected')
 	})
 	log('executor connected')
-	// capture what an empty document serializes to (used by `new` and /api/create)
+	// Capture what an empty document serializes to (used by `new` and
+	// /api/create). The executor captured this at ITS mount, while its editor
+	// was provably empty, and hands back that stored value - never a fresh
+	// serialize of whatever it holds now. An executor reconnects with its
+	// document intact whenever the core restarts while the app window stays
+	// open (`claw stop`, the deploy cycle), and serializing at that moment used
+	// to bake the last-loaded canvas into every subsequent `claw new`.
 	if (!emptyTldr) {
 		withExecutor(async (call) => {
-			emptyTldr = await call('serialize', [])
+			const template = await call('emptyTemplate', [])
+			const shapes = (JSON.parse(template).records ?? []).filter((r) => r.typeName === 'shape')
+			if (shapes.length) {
+				// belt and braces: never accept a populated document as "empty"
+				throw new Error(`template had ${shapes.length} shape(s) in it`)
+			}
+			emptyTldr = template
 			log('empty-document template captured')
 		}).catch((err) => log(`empty-template capture failed: ${err.message}`))
 	}
@@ -205,6 +217,13 @@ const host = {
 		withExecutor(async (call) => {
 			await call('load', [tldr])
 			return await call('inspect', [ref])
+		}),
+	// preview only: the executor's copy is mutated to try each size and the
+	// document is never serialized back, so nothing reaches the file
+	resolveAnchors: (tldr, opts) =>
+		withExecutor(async (call) => {
+			await call('load', [tldr])
+			return await call('resolveAnchors', [opts])
 		}),
 	apply: (tldr, ops) =>
 		withExecutor(async (call) => {
@@ -303,6 +322,14 @@ const api = {
 	'POST /api/lint': async (body) => {
 		touch()
 		return await host.lint(required(body, 'tldr'))
+	},
+
+	'POST /api/resolve': async (body) => {
+		touch()
+		return await host.resolveAnchors(required(body, 'tldr'), {
+			container: body.container ?? null,
+			sizes: Array.isArray(body.sizes) ? body.sizes : [],
+		})
 	},
 
 	'POST /api/inspect': async (body) => {
