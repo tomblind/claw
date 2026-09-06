@@ -32,6 +32,25 @@ export function plainText(editor, shape) {
 }
 
 
+/**
+ * The separate text shape that a fixed-size box carries as its label (the
+ * pattern `add` uses so a box never grows to fit its own text). Null when the
+ * box has no such child.
+ */
+export function overlayLabelOf(editor, shape) {
+	if (!shape || shape.type !== 'geo') return null
+	try {
+		return (
+			editor
+				.getSortedChildIdsForParent(shape.id)
+				.map((cid) => editor.getShape(cid))
+				.find((c) => c?.type === 'text') ?? null
+		)
+	} catch {
+		return null
+	}
+}
+
 /** Find a shape by full id, short id (prefix), or frame-name / label text. */
 export function resolveShape(editor, query) {
 	const q = String(query)

@@ -376,6 +376,321 @@ const browser = await chromium.launch({ executablePath: findBrowser(), headless:
 		`${outline.before.count} -> ${outline.after.count}`
 	)
 
+	// Responsive anchors. Every number below is hand-computed from the rule,
+	// so a regression in the resolver shows up as a wrong box rather than as
+	// "something moved". Frame F is 400x600 at design size.
+	const anch = await page.evaluate(async () => {
+		const ed = window.__editor
+		const find = (nm) => ed.getCurrentPageShapes().find((s) => s.meta?.clawName === nm)
+		const box = (nm) => {
+			const s = find(nm)
+			if (!s) return null
+			const b = ed.getShapeGeometry(s.id).bounds
+			return { x: Math.round(s.x), y: Math.round(s.y), w: Math.round(b.w), h: Math.round(b.h) }
+		}
+		const labelScale = (nm) => {
+			const s = find(nm)
+			if (!s) return null
+			const kid = ed
+				.getSortedChildIdsForParent(s.id)
+				.map((c) => ed.getShape(c))
+				.find((c) => c?.type === 'text')
+			return kid?.props?.scale ?? null
+		}
+		const res = {}
+		await window.host.applyOps([
+			{ add_screen: { name: 'Fit', at: { x: 2000, y: 0 }, size: { w: 400, h: 600 } } },
+			{ add: { screen: 'Fit', kind: 'box', at: { x: 10, y: 10 }, size: { w: 380, h: 60 }, name: 'FitBar' } },
+			{ add: { screen: 'Fit', kind: 'box', at: { x: 20, y: 100 }, size: { w: 360, h: 100 }, name: 'FitTile' } },
+			{ add: { screen: 'Fit', kind: 'box', at: { x: 280, y: 450 }, size: { w: 110, h: 40 }, name: 'FitMini' } },
+			{ add: { screen: 'Fit', kind: 'button', text: 'GO', at: { x: 20, y: 250 }, size: { w: 160, h: 60 }, name: 'FitBtn' } },
+			{ add: { screen: 'Fit', kind: 'label', text: 'Words', at: { x: 20, y: 520 }, name: 'FitWords' } },
+			// full width, fixed height, pinned to the top
+			{ anchor: { id: 'FitBar', preset: 'top-bar' } },
+			// full width at a 20px inset, height derived from that width at 2:1
+			{
+				anchor: {
+					id: 'FitTile',
+					x: { mode: 'stretch', percent: 1, sizeOffset: -40, offset: 20 },
+					y: { mode: 'aspect', ratio: 0.5, offset: 100 },
+				},
+			},
+			// half the parent's width, capped at 200 and floored at 100, hung
+			// off the right edge by its own right edge
+			{
+				anchor: {
+					id: 'FitMini',
+					x: { mode: 'shrink', size: 200, percent: 0.5, sizeOffset: -10, min: 100, anchor: 1, pivot: 1, offset: -10 },
+					y: { mode: 'fixed', size: 40, anchor: 1, pivot: 1, offset: -110 },
+				},
+			},
+			// half the width, fixed height: text must NOT scale, because a bar
+			// that keeps its height has no room to grow into
+			{
+				anchor: {
+					id: 'FitBtn',
+					x: { mode: 'stretch', percent: 0.5, sizeOffset: -40, offset: 20 },
+					y: { mode: 'fixed', size: 60, offset: 250 },
+				},
+			},
+			{ anchor: { id: 'FitWords', preset: 'fixed', text: 'fixed' } },
+		])
+		res.design = {
+			bar: box('FitBar'),
+			tile: box('FitTile'),
+			mini: box('FitMini'),
+			btn: box('FitBtn'),
+			words: box('FitWords'),
+			btnLabel: labelScale('FitBtn'),
+		}
+		// double the width: stretch and aspect follow
+		await window.host.applyOps([{ resize: { id: 'Fit', w: 800 } }])
+		res.wide = {
+			bar: box('FitBar'),
+			tile: box('FitTile'),
+			mini: box('FitMini'),
+			btn: box('FitBtn'),
+			words: box('FitWords'),
+			btnLabel: labelScale('FitBtn'),
+		}
+		// below FitMini's floor
+		await window.host.applyOps([{ resize: { id: 'Fit', w: 200 } }])
+		res.narrow = { mini: box('FitMini') }
+		// a move inside the same batch as a resize must rebase from the box the
+		// shape ENDS UP with, not the stale one it had at the old parent size
+		const moved = await window.host.applyOps([
+			{ resize: { id: 'Fit', w: 400 } },
+			{ move: { id: 'FitTile', by: { dx: 0, dy: 30 } } },
+		])
+		res.afterMove = { tile: box('FitTile'), report: moved.report }
+		res.rule = find('FitTile')?.meta?.clawAnchor ?? null
+		res.preview = await window.host.resolveAnchors({
+			container: 'Fit',
+			sizes: [{ w: 400, h: 600 }, { w: 900, h: 600 }],
+		})
+		res.previewRestored = box('FitBar')
+		// A screen that grows on BOTH axes: this is where text scaling engages,
+		// and it is the game-HUD case (everything gets bigger together).
+		await window.host.applyOps([
+			{ add_screen: { name: 'Hud', at: { x: 3000, y: 0 }, size: { w: 200, h: 200 } } },
+			{ add: { screen: 'Hud', kind: 'button', text: 'PLAY', at: { x: 20, y: 20 }, size: { w: 160, h: 60 }, name: 'HudBtn' } },
+			{ add: { screen: 'Hud', kind: 'label', text: 'Score', at: { x: 20, y: 140 }, name: 'HudText' } },
+			{ anchor: { id: 'HudBtn', preset: 'fill', inset: 20 } },
+			{
+				anchor: {
+					id: 'HudText',
+					x: { mode: 'stretch', percent: 1, sizeOffset: -40, offset: 20 },
+					y: { mode: 'stretch', percent: 0.5, sizeOffset: -10, anchor: 0.5, offset: 0 },
+				},
+			},
+		])
+		res.hudDesign = {
+			btn: box('HudBtn'),
+			btnLabel: labelScale('HudBtn'),
+			text: box('HudText'),
+			textScale: find('HudText')?.props?.scale ?? null,
+			textWidth: find('HudText')?.props?.w ?? null,
+		}
+		await window.host.applyOps([{ resize: { id: 'Hud', w: 400, h: 400 } }])
+		res.hudBig = {
+			btn: box('HudBtn'),
+			btnLabel: labelScale('HudBtn'),
+			text: box('HudText'),
+			textScale: find('HudText')?.props?.scale ?? null,
+			textWidth: find('HudText')?.props?.w ?? null,
+		}
+		res.lint = (await window.host.lint()).issues.filter((i) => i.kind.startsWith('anchor'))
+		res.serialized = await window.host.serialize()
+		return res
+	})
+	const sameBox = (a, b) => a && b && a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h
+	check(
+		'anchor: top-bar spans the parent and keeps its height',
+		sameBox(anch.design.bar, { x: 0, y: 10, w: 400, h: 60 }) &&
+			sameBox(anch.wide.bar, { x: 0, y: 10, w: 800, h: 60 }),
+		JSON.stringify(anch.wide.bar)
+	)
+	check(
+		'anchor: aspect mode derives height from the resolved width',
+		sameBox(anch.design.tile, { x: 20, y: 100, w: 360, h: 180 }) &&
+			sameBox(anch.wide.tile, { x: 20, y: 100, w: 760, h: 380 }),
+		JSON.stringify(anch.wide.tile)
+	)
+	check(
+		'anchor: shrink grows with the parent until it reaches its fixed size',
+		sameBox(anch.design.mini, { x: 200, y: 450, w: 190, h: 40 }) &&
+			sameBox(anch.wide.mini, { x: 590, y: 450, w: 200, h: 40 }),
+		JSON.stringify(anch.wide.mini)
+	)
+	check(
+		'anchor: a minimum size stops the box collapsing',
+		anch.narrow.mini?.w === 100,
+		JSON.stringify(anch.narrow.mini)
+	)
+	check(
+		'anchor: text does NOT scale when only one axis grows',
+		anch.design.btnLabel === 1 && anch.wide.btnLabel === 1,
+		`${anch.design.btnLabel} -> ${anch.wide.btnLabel}`
+	)
+	check(
+		'anchor: a box label scales by the box factor when both axes grow',
+		sameBox(anch.hudDesign.btn, { x: 20, y: 20, w: 160, h: 160 }) &&
+			sameBox(anch.hudBig.btn, { x: 20, y: 20, w: 360, h: 360 }) &&
+			Math.abs(anch.hudBig.btnLabel / anch.hudDesign.btnLabel - 360 / 160) < 0.01,
+		`label ${anch.hudDesign.btnLabel} -> ${anch.hudBig.btnLabel}`
+	)
+	check(
+		'anchor: scaled text keeps its wrap width, so its line breaks never change',
+		anch.hudBig.textScale > anch.hudDesign.textScale &&
+			anch.hudBig.textWidth === anch.hudDesign.textWidth,
+		`scale ${anch.hudDesign.textScale} -> ${anch.hudBig.textScale}, width ${anch.hudDesign.textWidth} -> ${anch.hudBig.textWidth}`
+	)
+	check(
+		'anchor: a pinned label holds its place when the screen grows',
+		sameBox(anch.design.words, anch.wide.words) && anch.design.words?.x === 20,
+		JSON.stringify(anch.wide.words)
+	)
+	check(
+		'anchor: a move in the same batch as a resize rebases from the settled box',
+		sameBox(anch.afterMove.tile, { x: 20, y: 130, w: 360, h: 180 }),
+		JSON.stringify(anch.afterMove.tile)
+	)
+	check(
+		'anchor: a move rewrites offsets and leaves anchors alone',
+		anch.rule?.x?.mode === 'stretch' && anch.rule?.x?.percent === 1 && anch.rule?.y?.offset === 130,
+		JSON.stringify(anch.rule?.y)
+	)
+	check(
+		'resolve: previewing other sizes reports them and restores the document',
+		anch.preview.containers?.[0]?.sizes?.length === 2 &&
+			anch.preview.containers[0].sizes[1].shapes.some((s) => s.box.w === 900) &&
+			sameBox(anch.previewRestored, { x: 0, y: 10, w: 400, h: 60 }),
+		JSON.stringify(anch.previewRestored)
+	)
+	check(
+		'lint: a minimum-size collapse is reported with the parent size it happens at',
+		anch.lint.some((i) => i.kind === 'anchor-collapses' && /under 220px/.test(i.detail)),
+		anch.lint.map((i) => i.kind).join(' ') || 'none'
+	)
+	// Fit: a stretch axis shrinks until its aspect partner sits inside the
+	// parent. The partner's anchor and pivot decide which of its edges move,
+	// so the bound depends on placement, not just size.
+	const fit = await page.evaluate(async () => {
+		const ed = window.__editor
+		const box = () => {
+			const s = ed.getCurrentPageShapes().find((x) => x.meta?.clawName === 'AspectTile')
+			const b = ed.getShapeGeometry(s.id).bounds
+			return { x: Math.round(s.x), y: Math.round(s.y), w: Math.round(b.w), h: Math.round(b.h) }
+		}
+		await window.host.applyOps([
+			{ add_screen: { name: 'AspectBox', at: { x: 5000, y: 0 }, size: { w: 400, h: 300 } } },
+			{ add: { screen: 'AspectBox', kind: 'card', at: { x: 0, y: 0 }, size: { w: 100, h: 100 }, name: 'AspectTile' } },
+			{
+				anchor: {
+					id: 'AspectTile',
+					x: { mode: 'stretch', percent: 1, sizeOffset: 0, anchor: 0.5, pivot: 0.5 },
+					y: { mode: 'aspect', ratio: 0.5625, anchor: 0.5, pivot: 0.5 },
+				},
+			},
+		])
+		const res = { roomy: box() }
+		await window.host.applyOps([{ resize: { id: 'AspectBox', h: 150 } }])
+		res.overflowing = box()
+		await window.host.applyOps([{ anchor: { id: 'AspectTile', x: { fit: true } } }])
+		res.fitted = box()
+		await window.host.applyOps([{ anchor: { id: 'AspectTile', x: { fitOffset: -20 } } }])
+		res.padded = box()
+		// pivot 0 on the partner: its leading edge cannot move, so only the
+		// trailing bound applies and shrinking is not wasted on the other
+		await window.host.applyOps([
+			{ anchor: { id: 'AspectTile', y: { anchor: 0, pivot: 0 }, x: { fitOffset: 0 } } },
+		])
+		res.topPinned = box()
+		// no aspect partner: the flag has nothing to compute against
+		await window.host.applyOps([{ anchor: { id: 'AspectTile', y: { mode: 'fixed', size: 500 } } }])
+		res.inert = box()
+		return res
+	})
+	check(
+		'fit: an aspect partner that already fits is left alone',
+		sameBox(fit.roomy, { x: 0, y: 37, w: 400, h: 225 }),
+		JSON.stringify(fit.roomy)
+	)
+	check(
+		'fit: without the flag the partner overflows',
+		fit.overflowing.h === 225 && fit.overflowing.y < 0,
+		JSON.stringify(fit.overflowing)
+	)
+	check(
+		'fit: the sized axis shrinks until the partner exactly fits',
+		sameBox(fit.fitted, { x: 67, y: 0, w: 266, h: 150 }),
+		JSON.stringify(fit.fitted)
+	)
+	check(
+		'fit: the allowance keeps a margin on both edges',
+		sameBox(fit.padded, { x: 102, y: 20, w: 195, h: 110 }),
+		JSON.stringify(fit.padded)
+	)
+	check(
+		'fit: a bound the partner cannot satisfy by shrinking is skipped',
+		sameBox(fit.topPinned, { x: 67, y: 0, w: 266, h: 150 }),
+		JSON.stringify(fit.topPinned)
+	)
+	check(
+		'fit: the flag is inert when the other axis is not aspect',
+		fit.inert.w === 400,
+		JSON.stringify(fit.inert)
+	)
+
+	// Two bugs that only show up on shapes the earlier cases happen to avoid.
+	const edge = await page.evaluate(async () => {
+		const ed = window.__editor
+		const box = (n) => {
+			const s = ed.getCurrentPageShapes().find((x) => x.meta?.clawName === n)
+			return { x: Math.round(s.x), y: Math.round(s.y) }
+		}
+		// a screen whose children are ALL text: the container scan used to skip
+		// it, so its anchored label never resolved
+		await window.host.applyOps([
+			{ add_screen: { name: 'TextOnly', at: { x: 4000, y: 0 }, size: { w: 400, h: 400 } } },
+			{ add: { screen: 'TextOnly', kind: 'label', text: 'Centred', at: { x: 10, y: 10 }, name: 'Solo' } },
+			{
+				anchor: {
+					id: 'Solo',
+					x: { mode: 'fixed', size: 90, anchor: 0.5, pivot: 0.5 },
+					y: { mode: 'fixed', size: 32, anchor: 0.5, pivot: 0.5 },
+					text: 'fixed',
+				},
+			},
+		])
+		const settled = box('Solo')
+		// and moving a centre-aligned shape must not walk it on later resolves
+		await window.host.applyOps([{ move: { id: 'Solo', by: { dx: 40, dy: 0 } } }])
+		const moved = box('Solo')
+		const trail = []
+		for (let i = 0; i < 3; i++) {
+			await window.host.applyOps([{ resolve: {} }])
+			trail.push(box('Solo').x)
+		}
+		return { settled, moved, trail }
+	})
+	check(
+		'anchor: a screen whose children are all text still resolves',
+		edge.settled.x !== 10 && edge.settled.y !== 10,
+		JSON.stringify(edge.settled)
+	)
+	check(
+		'anchor: a centred shape stays where it is moved to, across repeated resolves',
+		edge.trail.every((x) => x === edge.moved.x),
+		`moved to ${edge.moved.x}, then ${edge.trail.join(',')}`
+	)
+
+	check(
+		'portable: anchor rules travel in shape metadata',
+		JSON.parse(anch.serialized).records.filter((r) => r.meta?.clawAnchor).length === 7,
+		`${JSON.parse(anch.serialized).records.filter((r) => r.meta?.clawAnchor).length} of 7`
+	)
+
 	// -------------------------------------------------------------------------
 	// 2. file: the boundary that keeps claw-only concepts portable
 	// -------------------------------------------------------------------------
@@ -420,6 +735,309 @@ const browser = await chromium.launch({ executablePath: findBrowser(), headless:
 	}, out.serialized)
 	check('portable: rounding is restored on load', restored.rounded === CONVEX.length, `${restored.rounded}`)
 	check('portable: custom slots are restored on load', restored.custom > 0, `${restored.custom}`)
+	await page.close()
+}
+
+// ---------------------------------------------------------------------------
+// 2b. live editing with real pointer input: anchors have to hold up under
+// dragging, which is the whole point of them. Two opposite behaviours are
+// checked here — resizing a container moves its anchored children, while
+// dragging an anchored child rewrites its offsets instead of snapping back.
+// ---------------------------------------------------------------------------
+{
+	const page = await browser.newPage({ viewport: { width: 1200, height: 900 } })
+	const pageErrors = []
+	page.on('pageerror', (e) => pageErrors.push(String(e.message)))
+	await page.goto(PAGE)
+	await page.waitForFunction(() => !!window.__editor && !!window.host, null, { timeout: 30000 })
+
+	await page.evaluate(async () => {
+		await window.host.applyOps([
+			{ add_screen: { name: 'S', at: { x: 0, y: 0 }, size: { w: 300, h: 300 } } },
+			{ add: { screen: 'S', kind: 'box', at: { x: 20, y: 20 }, size: { w: 260, h: 60 }, name: 'Bar' } },
+			{ add: { screen: 'S', kind: 'button', at: { x: 20, y: 120 }, size: { w: 100, h: 60 }, name: 'Chip' } },
+			{
+				anchor: {
+					id: 'Bar',
+					x: { mode: 'stretch', percent: 1, sizeOffset: -40, offset: 20 },
+					y: { mode: 'fixed', size: 60, offset: 20 },
+				},
+			},
+			{ anchor: { id: 'Chip', preset: 'fixed' } },
+		])
+		// park the camera so page coordinates map 1:1 onto screen coordinates
+		window.__editor.setCamera({ x: 200, y: 200, z: 1 }, { immediate: true })
+		window.__editor.selectNone()
+		return null
+	})
+	const liveBoxes = () =>
+		page.evaluate(() => {
+			const ed = window.__editor
+			const find = (nm) => ed.getCurrentPageShapes().find((s) => s.meta?.clawName === nm)
+			const b = (nm) => {
+				const s = find(nm)
+				const g = ed.getShapeGeometry(s.id).bounds
+				return { x: Math.round(s.x), y: Math.round(s.y), w: Math.round(g.w), h: Math.round(g.h) }
+			}
+			const frame = ed.getCurrentPageShapes().find((s) => s.type === 'frame')
+			return {
+				frameW: Math.round(frame.props.w),
+				Bar: b('Bar'),
+				Chip: b('Chip'),
+				chipRule: find('Chip').meta?.clawAnchor?.x ?? null,
+			}
+		})
+
+	// drag the frame's bottom-right handle 200px to the right
+	await page.evaluate(() => {
+		const ed = window.__editor
+		// select() returns the editor, which cannot cross the bridge
+		ed.select(ed.getCurrentPageShapes().find((s) => s.type === 'frame').id)
+		return null
+	})
+	await page.waitForTimeout(150)
+	await page.mouse.move(500, 500)
+	await page.mouse.down()
+	await page.mouse.move(600, 500, { steps: 8 })
+	await page.mouse.move(700, 500, { steps: 8 })
+	await page.mouse.up()
+	await page.waitForTimeout(400)
+	const dragged = await liveBoxes()
+	check(
+		'live: dragging a screen wider moves its anchored children',
+		dragged.frameW === 500 && dragged.Bar.w === 460 && dragged.Chip.x === 20,
+		`frame ${dragged.frameW}, bar ${dragged.Bar.w}, chip x ${dragged.Chip.x}`
+	)
+
+	// drag the pinned child by hand
+	await page.evaluate(() => {
+		window.__editor.selectNone()
+		return null
+	})
+	await page.mouse.move(270, 350)
+	await page.mouse.down()
+	await page.mouse.move(300, 370, { steps: 6 })
+	await page.mouse.move(310, 370, { steps: 6 })
+	await page.mouse.up()
+	await page.waitForTimeout(400)
+	const moved = await liveBoxes()
+	check(
+		'live: dragging an anchored shape rewrites its offsets, keeping its anchors',
+		moved.Chip.x === 60 && moved.chipRule?.offset === 60 && moved.chipRule?.anchor === 0,
+		`chip x ${moved.Chip.x}, offset ${moved.chipRule?.offset}`
+	)
+
+	// resize again: the hand-placed child must stay where it was put
+	await page.evaluate(() => {
+		const ed = window.__editor
+		const frame = ed.getCurrentPageShapes().find((s) => s.type === 'frame')
+		ed.updateShape({ id: frame.id, type: 'frame', props: { w: 700 } })
+		return null
+	})
+	await page.waitForTimeout(400)
+	const again = await liveBoxes()
+	check(
+		'live: a hand move survives the next resize',
+		again.Chip.x === 60 && again.Bar.w === 660,
+		`chip x ${again.Chip.x}, bar ${again.Bar.w}`
+	)
+	// A resize is an ordinary edit, so one undo has to put both the container
+	// and the children the resolver moved back. If the resolver's writes landed
+	// outside the drag's history entry, this would take two presses.
+	await page.keyboard.press('Control+z')
+	await page.waitForTimeout(300)
+	const undone = await liveBoxes()
+	check(
+		'live: one undo reverts the resize and the children it moved',
+		undone.frameW === 500 && undone.Bar.w === 460,
+		`frame ${undone.frameW}, bar ${undone.Bar.w}`
+	)
+	// The style-panel controls are the only anchor UI, so they need to fit the
+	// ~150px column and actually drive the rule. An unusable field here is the
+	// difference between a feature and a decoration.
+	await page.evaluate(() => {
+		const ed = window.__editor
+		ed.select(ed.getCurrentPageShapes().find((s) => s.meta?.clawName === 'Bar').id)
+		return null
+	})
+	await page.waitForTimeout(400)
+	const toolbar = await page.evaluate(() => {
+		const root = document.querySelector('.claw-anchor')
+		if (!root) return null
+		const box = root.getBoundingClientRect()
+		const fields = {}
+		let overflowing = 0
+		let tiny = 0
+		for (const el of root.querySelectorAll('input, select, button')) {
+			const id = el.getAttribute('data-testid')
+			const r = el.getBoundingClientRect()
+			if (r.right > box.right + 1) overflowing++
+			if (el.tagName === 'INPUT' && el.type === 'number' && r.width < 28) tiny++
+			if (id) fields[id] = el.value
+		}
+		return { width: Math.round(box.width), fields, overflowing, tiny }
+	})
+	check(
+		'panel: the anchor controls fit the style panel with usable number fields',
+		toolbar && toolbar.overflowing === 0 && toolbar.tiny === 0,
+		toolbar ? `${toolbar.width}px, ${toolbar.overflowing} overflowing, ${toolbar.tiny} too narrow` : 'no controls'
+	)
+	check(
+		'panel: the fields show the rule that is actually stored',
+		toolbar?.fields['claw-anchor-x-mode'] === 'stretch' &&
+			toolbar?.fields['claw-anchor-x-percent'] === '1' &&
+			toolbar?.fields['claw-anchor-x-sizeOffset'] === '-40' &&
+			toolbar?.fields['claw-anchor-x-offset'] === '20',
+		JSON.stringify(toolbar?.fields ?? null)
+	)
+	await page.fill('[data-testid="claw-anchor-x-offset"]', '40')
+	await page.waitForTimeout(400)
+	const typed = await page.evaluate(() => {
+		const ed = window.__editor
+		const bar = ed.getCurrentPageShapes().find((s) => s.meta?.clawName === 'Bar')
+		return { x: Math.round(bar.x), offset: bar.meta?.clawAnchor?.x?.offset ?? null }
+	})
+	check(
+		'panel: typing an offset moves the shape',
+		typed.x === 40 && typed.offset === 40,
+		`x ${typed.x}, stored ${typed.offset}`
+	)
+	// the Dynamic Layout switch is the on/off for the whole feature
+	const barBox = () =>
+		page.evaluate(() => {
+			const ed = window.__editor
+			const bar = ed.getCurrentPageShapes().find((s) => s.meta?.clawName === 'Bar')
+			const b = ed.getShapeGeometry(bar.id).bounds
+			return {
+				x: Math.round(bar.x),
+				y: Math.round(bar.y),
+				w: Math.round(b.w),
+				h: Math.round(b.h),
+				rule: bar.meta?.clawAnchor ?? null,
+			}
+		})
+	const before = await barBox()
+	await page.click('[data-testid="claw-anchor-dynamic"]')
+	await page.waitForTimeout(400)
+	const off = await barBox()
+	check('panel: the Dynamic Layout switch removes the rule', off.rule == null, JSON.stringify(off.rule))
+	await page.click('[data-testid="claw-anchor-dynamic"]')
+	await page.waitForTimeout(400)
+	const on = await barBox()
+	check(
+		'panel: switching Dynamic Layout back on keeps the box exactly where it was',
+		on.rule != null && on.x === off.x && on.y === off.y && on.w === off.w && on.h === off.h,
+		`${off.w}x${off.h} @${off.x},${off.y} -> ${on.w}x${on.h} @${on.x},${on.y}`
+	)
+	check(
+		'panel: turning it on pins the shape rather than stretching it',
+		on.rule?.x?.mode === 'fixed' && on.rule?.y?.mode === 'fixed',
+		JSON.stringify(on.rule?.x)
+	)
+	void before
+	// A shape whose size comes from a rule has no resize handles: a drag has no
+	// single right meaning there. Everything else must still work - the screen
+	// is still resizable (that is how rules are tested), the resolver still
+	// sizes the shape, and a hand MOVE still rebases its offset.
+	const locks = await page.evaluate(() => {
+		const ed = window.__editor
+		const can = (n) => {
+			const s = ed.getCurrentPageShapes().find((x) => x.meta?.clawName === n)
+			return ed.getShapeUtil(s).canResize(s)
+		}
+		const frame = ed.getCurrentPageShapes().find((s) => s.type === 'frame')
+		return {
+			anchored: can('Bar'),
+			screen: ed.getShapeUtil(frame).canResize(frame),
+		}
+	})
+	check(
+		'live: an anchored shape cannot be resized by hand, its screen still can',
+		locks.anchored === false && locks.screen === true,
+		JSON.stringify(locks)
+	)
+	// The gate above only withdraws the handles. Prove the size actually holds
+	// through a real corner drag, and through a multi-shape selection resize,
+	// which takes a different path and would otherwise slip past it.
+	const sizeOfBar = () =>
+		page.evaluate(() => {
+			const s = window.__editor.getCurrentPageShapes().find((x) => x.meta?.clawName === 'Bar')
+			const b = window.__editor.getShapeGeometry(s.id).bounds
+			return { w: Math.round(b.w), h: Math.round(b.h) }
+		})
+	const barBefore = await sizeOfBar()
+	const corner = await page.evaluate(() => {
+		const ed = window.__editor
+		const s = ed.getCurrentPageShapes().find((x) => x.meta?.clawName === 'Bar')
+		ed.select(s.id)
+		const b = ed.getShapePageBounds(s.id)
+		const p = ed.pageToScreen({ x: b.x + b.w, y: b.y + b.h })
+		return { x: p.x, y: p.y }
+	})
+	await page.waitForTimeout(250)
+	await page.mouse.move(corner.x - 2, corner.y - 2)
+	await page.waitForTimeout(120)
+	await page.mouse.move(corner.x, corner.y)
+	await page.waitForTimeout(120)
+	await page.mouse.down()
+	await page.mouse.move(corner.x + 40, corner.y + 40, { steps: 8 })
+	await page.mouse.move(corner.x + 90, corner.y + 70, { steps: 8 })
+	await page.mouse.up()
+	await page.waitForTimeout(400)
+	const barAfter = await sizeOfBar()
+	check(
+		'live: dragging the corner of an anchored shape does not resize it',
+		barAfter.w === barBefore.w && barAfter.h === barBefore.h,
+		`${barBefore.w}x${barBefore.h} -> ${barAfter.w}x${barAfter.h}`
+	)
+
+	// Editing a rule in the panel must not feed the RESULT back into the rule.
+	// With fit active the result is the capped size, so a rebase there turned
+	// the cap into the rule and destroyed the number the author had typed.
+	await page.evaluate(async () => {
+		const ed = window.__editor
+		await window.host.applyOps([
+			{ add_screen: { name: 'Feedback', at: { x: 0, y: 900 }, size: { w: 400, h: 300 } } },
+			{ add: { screen: 'Feedback', kind: 'card', at: { x: 0, y: 0 }, size: { w: 100, h: 100 }, name: 'Fed' } },
+			{
+				anchor: {
+					id: 'Fed',
+					x: {
+						mode: 'stretch', percent: 1, sizeOffset: -20,
+						anchor: 0.5, pivot: 0.5, offset: 0, fit: true, fitOffset: -10,
+					},
+					y: { mode: 'aspect', ratio: 0.5, anchor: 0.5, pivot: 0.5, offset: 0 },
+				},
+			},
+		])
+		ed.select(ed.getCurrentPageShapes().find((s) => s.meta?.clawName === 'Fed').id)
+		return null
+	})
+	await page.waitForTimeout(400)
+	const readFed = () =>
+		page.evaluate(() => {
+			const s = window.__editor.getCurrentPageShapes().find((x) => x.meta?.clawName === 'Fed')
+			const b = window.__editor.getShapeGeometry(s.id).bounds
+			return { w: Math.round(b.w), sizeOffset: s.meta.clawAnchor.x.sizeOffset }
+		})
+	const fedStart = await readFed()
+	await page.fill('[data-testid="claw-anchor-y-ratio"]', '0.75')
+	await page.waitForTimeout(500)
+	const fedBumped = await readFed()
+	await page.fill('[data-testid="claw-anchor-y-ratio"]', '0.5')
+	await page.waitForTimeout(500)
+	const fedBack = await readFed()
+	check(
+		'panel: editing a rule does not write the resolved size back into it',
+		fedBumped.sizeOffset === -20 && fedBack.sizeOffset === -20,
+		`${fedStart.sizeOffset} -> ${fedBumped.sizeOffset} -> ${fedBack.sizeOffset}`
+	)
+	check(
+		'panel: a fitted axis returns to full size when the ratio is put back',
+		fedBack.w === fedStart.w && fedBumped.w < fedStart.w,
+		`${fedStart.w} -> ${fedBumped.w} -> ${fedBack.w}`
+	)
+	check('live editing raised no page errors', pageErrors.length === 0, pageErrors[0] ?? '')
 	await page.close()
 }
 

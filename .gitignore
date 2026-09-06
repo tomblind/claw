@@ -9,5 +9,6 @@ app/.tmp/
 .claw-daemon.json
 cli/.tldr-browser.json
 *.log
+*.log.[0-9]
 
 # note: cli/page/dist IS committed - the skill ships the prebuilt editor page

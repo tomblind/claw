@@ -19,11 +19,21 @@ import {
 	BASE_GEO_BY_ROUNDED,
 	ROUNDED_GEO_BY_BASE,
 } from '../../lib/custom-slots.mjs'
+import {
+	anchorParent,
+	installLiveAnchors,
+	localBox,
+	presetRule,
+	resolveAnchorReport,
+	resolveContainer,
+	ruleOf,
+	ruleText,
+} from './anchors.js'
 import { canvasBg, editorBg, mixHex, reportError } from './common.js'
 import { foreignObjectTextToSvgText } from './figma-svg.js'
 import { filletedPolygonPath, ROUNDABLE_VERTICES } from './rounded.js'
 import { containingFrame, lintDocument, shapePlaintext } from './lint.js'
-import { plainText, resolveShape, round, short } from './editor-utils.js'
+import { overlayLabelOf, plainText, resolveShape, round, short } from './editor-utils.js'
 import { projectDocument } from './projection.js'
 import { ClawColorControls, ClawFontControls } from './dialogs.jsx'
 import { applyOps, isWaypointShape, rich, unchainArrow, walkChain } from './ops.js'
@@ -181,12 +191,14 @@ function inspectShapeDetail(editor, query) {
 				? { name, solid: palette[name].solid, semi: palette[name].semi }
 				: { name }
 	const frame = containingFrame(editor, s)
+	const rule = ruleOf(s)
 	return {
 		id: s.id,
 		type: s.type,
 		name: s.meta?.clawName ?? s.props?.name ?? null,
 		text: shapePlaintext(editor, s) || null,
 		frame: frame ? frame.props?.name || frame.id.slice(6, 14) : null,
+		anchor: rule ? { text: ruleText(rule, s), rule } : null,
 		bounds: b
 			? { x: Math.round(b.minX), y: Math.round(b.minY), w: Math.round(b.w), h: Math.round(b.h) }
 			: null,
@@ -385,6 +397,17 @@ function setupHost(editor) {
 		/** Heuristic visual checks - text-only stand-in for render-eyeballing. */
 		async lint() {
 			return lintDocument(editor)
+		},
+
+		/**
+		 * Resolve anchored shapes and report the boxes, optionally at container
+		 * sizes the document does not currently have. This is the cheap way to
+		 * check a responsive layout: text, not a render, and nothing is written
+		 * back (the executor reloads the document for the next call).
+		 */
+		async resolveAnchors({ container = null, sizes = [] } = {}) {
+			const target = container ? resolveShape(editor, String(container)) : null
+			return resolveAnchorReport(editor, { container: target, sizes })
 		},
 
 		/** Full resolved detail for one shape (focused level of context). */
@@ -591,6 +614,10 @@ function onMount(editor) {
 		if (EXECUTOR) {
 			neutralizeArrowZClamp(editor)
 			startExecutor()
+		} else {
+			// Human editing only: the op path resolves anchors itself, and a
+			// second resolver running inside the executor would fight it.
+			installLiveAnchors(editor)
 		}
 		if (SYNC) persistSessionState(editor)
 	} catch (err) {
@@ -666,6 +693,7 @@ function CustomStylePanel(props) {
 					{fontRelevant && <ClawFontControls />}
 					<ClawTextOutlineControl />
 					<ClawCornerRadiusControl />
+					<ClawAnchorControls />
 				</div>
 			</TL.DefaultStylePanel>
 		)
@@ -695,6 +723,9 @@ function CustomStylePanel(props) {
 				<TL.StylePanelArrowKindPicker />
 				<TL.StylePanelArrowheadPicker />
 				<TL.StylePanelSplinePicker />
+			</div>
+			<div className="tlui-style-panel__section">
+				<ClawAnchorControls />
 			</div>
 		</TL.DefaultStylePanel>
 	)
@@ -732,9 +763,33 @@ function withClawTextOutline(Util) {
 		}
 	}
 }
+/**
+ * A shape whose size is decided by an anchor rule cannot be resized by hand.
+ *
+ * There is no single right answer to what a drag should change: on a stretch
+ * axis it has to land in the size offset, which then grows oddly with the
+ * parent, and on a fitted axis the cap can undo it the moment it is applied.
+ * Rather than pick one and be wrong half the time, the handles are withdrawn
+ * and the numbers in the panel are the way to change a size.
+ *
+ * Moving is untouched, because a drag there has exactly one meaning: it moves
+ * the position offset, and nothing else in the rule has to change.
+ *
+ * This only withdraws the interactive handles. The resolver, the `resize` op
+ * and `claw layout` all write through updateShape, which does not consult it.
+ */
+function withAnchorLock(Util) {
+	return class extends Util {
+		canResize(shape) {
+			return shape?.meta?.clawAnchor ? false : super.canResize(shape)
+		}
+	}
+}
+
 const CLAW_SHAPE_UTILS = [
-	withClawGradientExport(withClawTextOutline(TL.TextShapeUtil)),
-	withClawGradientExport(
+	withAnchorLock(withClawGradientExport(withClawTextOutline(TL.TextShapeUtil))),
+	withAnchorLock(
+		withClawGradientExport(
 		withClawTextOutline(
 			TL.GeoShapeUtil.configure({
 				getCustomDisplayValues: (editor, shape) => clawDisplayValues(editor, shape),
@@ -755,6 +810,7 @@ const CLAW_SHAPE_UTILS = [
 				),
 			})
 		)
+	)
 	),
 	withClawGradientExport(
 		withClawTextOutline(
@@ -766,7 +822,7 @@ const CLAW_SHAPE_UTILS = [
 	// frames carry a real color prop, but tldraw keeps it off the style system
 	// until this option turns it on (it then registers the colour style, so the
 	// style panel, the `style` op and claw's custom colour slots all reach it)
-	TL.FrameShapeUtil.configure({ showColors: true }),
+	withAnchorLock(TL.FrameShapeUtil.configure({ showColors: true })),
 ]
 
 /**
@@ -835,6 +891,88 @@ function ensureStaticCss() {
 	-webkit-text-stroke: calc(min(0.5, 1 / var(--tl-zoom, 1)) * 4px) var(--tl-color-background);
 	paint-order: stroke fill;
 }
+/* The anchor controls live in the ~150px style panel, so the number fields
+   have to give up their spinner arrows: the arrows alone are wider than the
+   space a three-character value needs. */
+.claw-anchor input {
+	appearance: textfield;
+	-moz-appearance: textfield;
+	min-width: 0;
+	font-size: 11px;
+	padding: 1px 3px;
+	/* right-aligned so the digits line up down the column, and narrow: the
+	   panel is ~150px and two of these share a row with two glyphs */
+	text-align: right;
+	flex: 0 0 36px;
+	width: 36px;
+	background: var(--tl-color-panel);
+	color: var(--tl-color-text-1);
+	border: 1px solid var(--tl-color-muted-1);
+	border-radius: 4px;
+}
+.claw-anchor input::-webkit-outer-spin-button,
+.claw-anchor input::-webkit-inner-spin-button {
+	appearance: none;
+	margin: 0;
+}
+.claw-anchor select {
+	min-width: 0;
+	width: 100%;
+	font-size: 11px;
+	padding: 1px 2px;
+	background: var(--tl-color-panel);
+	color: var(--tl-color-text-1);
+	border: 1px solid var(--tl-color-muted-1);
+	border-radius: 4px;
+}
+.claw-anchor button {
+	font-size: 11px;
+	padding: 2px 4px;
+	cursor: pointer;
+	background: var(--tl-color-panel);
+	color: var(--tl-color-text-1);
+	border: 1px solid var(--tl-color-muted-1);
+	border-radius: 4px;
+}
+.claw-anchor button:hover { background: var(--tl-color-muted-2); }
+.claw-anchor-key {
+	font-size: 11px;
+	color: var(--tl-color-text-1);
+	text-align: center;
+	flex: 0 0 12px;
+}
+.claw-anchor-icon {
+	font-size: 11px;
+	color: var(--tl-color-text-3);
+	text-align: center;
+	flex: 0 0 14px;
+	cursor: help;
+}
+/* the Fixed Text switch */
+.claw-anchor-switch {
+	position: relative;
+	width: 34px;
+	height: 18px;
+	border-radius: 9px;
+	background: var(--tl-color-muted-1);
+	border: none;
+	padding: 0;
+	flex: 0 0 auto;
+	transition: background 120ms;
+}
+.claw-anchor-switch[data-on='true'] { background: var(--tl-color-selected); }
+.claw-anchor-switch::after {
+	content: '';
+	position: absolute;
+	top: 2px;
+	left: 2px;
+	width: 14px;
+	height: 14px;
+	border-radius: 50%;
+	background: var(--tl-color-panel);
+	transition: transform 120ms;
+}
+.claw-anchor-switch[data-on='true']::after { transform: translateX(16px); }
 `
 	document.head.appendChild(el)
 }
@@ -886,6 +1024,323 @@ function ClawCornerRadiusControl() {
 				style={{ flex: 1, minWidth: 0 }}
 			/>
 			<span style={{ fontSize: 11, minWidth: 22, textAlign: 'right' }}>{state.radius}</span>
+		</div>
+	)
+}
+
+/**
+ * One number field in the anchor rows.
+ *
+ * It keeps what you typed while you type it. A plain controlled number input
+ * cannot: an intermediate value like "-" or "." is reported as an empty
+ * string, so committing on every keystroke wrote 0 and re-rendered the field
+ * out from under you, which made a negative offset impossible to enter. The
+ * draft holds the raw text, only parseable values reach the rule, and blur
+ * discards anything that never became a number.
+ */
+function AnchorNumber({ value, step, title, testId, onCommit }) {
+	const [draft, setDraft] = React.useState(null)
+	const shown = draft ?? (value ?? '')
+	return (
+		<input
+			type="text"
+			inputMode="decimal"
+			step={step}
+			title={title}
+			value={shown}
+			placeholder="0"
+			data-testid={testId}
+			onChange={(e) => {
+				const raw = e.target.value
+				setDraft(raw)
+				if (/^-?(\d+\.?\d*|\.\d+)$/.test(raw)) onCommit(Number(raw))
+			}}
+			onBlur={() => setDraft(null)}
+			onKeyDown={(e) => {
+				if (e.key === 'Enter') e.currentTarget.blur()
+			}}
+		/>
+	)
+}
+
+/**
+ * Responsive anchors in the style panel.
+ *
+ * Layout follows design/claw-responsive-objects.tldr ("Toolbar Additions"):
+ * the three position numbers are shared rows at the top, each carrying its x
+ * and y, then one section per axis for what decides that axis's size. Only
+ * the fields the selected mode reads are shown, so the section is two rows for
+ * stretch and one for fixed or aspect.
+ *
+ * Single-letter keys and small glyphs, because the panel is ~150px wide and
+ * every label costs space a number needs; what each one means lives in its
+ * tooltip.
+ */
+const MODE_OPTIONS = [
+	['fixed', 'Fixed'],
+	['stretch', 'Stretch'],
+	['shrink', 'Shrink'],
+	['aspect', 'Aspect'],
+]
+/**
+ * Glyph, label and step per size field. The glyphs are the project's agreed
+ * symbol set (design/claw-responsive-objects.tldr), and the label is the whole
+ * tooltip: the panel is a reference for someone who already knows the model,
+ * not a place to explain it.
+ */
+const SIZE_FIELDS = {
+	percent: ['⟜', 'Percent', 0.05],
+	sizeOffset: ['⇥', 'Size Offset', 1],
+	size: ['↔', 'Size', 1],
+	ratio: ['x', 'Ratio', 0.05],
+}
+/**
+ * Which field sits in which slot, per mode: a fixed grid of rows and columns
+ * so a field never moves when the mode changes. `null` leaves a slot empty and
+ * a row with nothing in it is dropped, which is what keeps a mode down to the
+ * fields it actually reads.
+ */
+const SIZE_SLOTS = {
+	fixed: [[null, null], [null, 'size'], [null, null]],
+	stretch: [['percent', 'sizeOffset'], [null, null], [null, null]],
+	shrink: [['percent', 'sizeOffset'], [null, 'size'], [null, null]],
+	aspect: [[null, null], [null, null], [null, 'ratio']],
+}
+/** The three shared position rows: glyph, field, label, step. */
+const POSITION_ROWS = [
+	['⌖', 'anchor', 'Anchor', 0.05],
+	['⊙', 'pivot', 'Pivot', 0.05],
+	['⇲', 'offset', 'Offset', 1],
+]
+
+function ClawAnchorControls() {
+	const editor = TL.useEditor()
+	const useVal = typeof TL.useValue === 'function' ? TL.useValue : (_n, fn) => fn()
+	const state = useVal(
+		'claw anchors',
+		() => {
+			const shapes = editor.getSelectedShapes().filter((s) => anchorParent(editor, s))
+			if (!shapes.length) return null
+			return {
+				count: shapes.length,
+				allDynamic: shapes.every((s) => ruleOf(s)),
+				rule: shapes.length === 1 ? ruleOf(shapes[0]) : null,
+				// the text switch only means something for a shape that HAS text:
+				// its own, or the separate overlay label a fixed-size box carries
+				hasText: shapes.some(
+					(s) => s.type === 'text' || !!overlayLabelOf(editor, s) || !!shapePlaintext(editor, s)
+				),
+			}
+		},
+		[editor]
+	)
+	// nothing selected that sits inside a screen: a rule would have no parent
+	// box to follow, so the control would only mislead
+	if (!state) return null
+
+	const eligible = () => editor.getSelectedShapes().filter((s) => anchorParent(editor, s))
+	const write = (shape, rule) => {
+		const parent = anchorParent(editor, shape)
+		if (!parent) return
+		editor.updateShape({
+			id: shape.id,
+			type: shape.type,
+			meta: { ...(shape.meta ?? {}), clawAnchor: rule },
+		})
+		resolveContainer(editor, parent, { apply: true })
+	}
+	/**
+	 * Turning it on starts from the box the author already drew, pinned where
+	 * it sits: the shape does not move, and every rule from there is a matter
+	 * of changing a mode or a number. Turning it off drops the rule.
+	 */
+	const toggleDynamic = () => {
+		const turnOn = !state.allDynamic
+		editor.run(() => {
+			for (const shape of eligible()) {
+				if (!turnOn) {
+					write(shape, null)
+					continue
+				}
+				if (ruleOf(shape)) continue
+				const parent = anchorParent(editor, shape)
+				if (parent) write(shape, presetRule(editor, shape, parent, 'fixed'))
+			}
+		})
+	}
+	const patchAxis = (axis, field, value) => {
+		editor.run(() => {
+			for (const shape of eligible()) {
+				const rule = ruleOf(shape)
+				if (!rule) continue
+				const next = { ...(rule[axis] ?? {}), [field]: value }
+				// Seed the number a mode needs from the box as drawn, so switching
+				// mode is never a silent no-op waiting for a second edit.
+				if (field === 'mode') {
+					const b = localBox(editor, shape)
+					const size = axis === 'x' ? b.w : b.h
+					const other = axis === 'x' ? b.h : b.w
+					if ((value === 'fixed' || value === 'shrink') && !(next.size > 0)) {
+						next.size = Math.round(size)
+					}
+					if (value === 'aspect' && !(next.ratio > 0)) {
+						next.ratio = other > 0 ? Math.round((size / other) * 100) / 100 : 1
+					}
+				}
+				write(shape, { ...rule, [axis]: next })
+			}
+		})
+	}
+	const setTextMode = () => {
+		editor.run(() => {
+			for (const shape of eligible()) {
+				const rule = ruleOf(shape)
+				if (!rule) continue
+				write(shape, { ...rule, text: rule.text === 'fixed' ? 'scale' : 'fixed' })
+			}
+		})
+	}
+
+	const Icon = TL.TldrawUiIcon
+	const rule = state.rule
+	const rowStyle = { display: 'flex', alignItems: 'center', gap: 3, padding: '1px 0' }
+	const num = (axis, field, step, title) => {
+		const a = rule?.[axis] ?? {}
+		return (
+			<AnchorNumber
+				key={`${axis}-${field}`}
+				value={a[field]}
+				step={step}
+				title={title}
+				testId={`claw-anchor-${axis}-${field}`}
+				onCommit={(v) => patchAxis(axis, field, v)}
+			/>
+		)
+	}
+	// one row per position number, carrying both axes
+	const positionRow = ([glyph, field, label, step]) => (
+		<div key={field} style={rowStyle}>
+			<span className="claw-anchor-icon" title={label}>
+				{glyph}
+			</span>
+			<span className="claw-anchor-key" title={label}>
+				x
+			</span>
+			{num('x', field, step, label)}
+			<span style={{ flex: 1 }} />
+			<span className="claw-anchor-key" title={label}>
+				y
+			</span>
+			{num('y', field, step, label)}
+		</div>
+	)
+	const axisSection = (axis) => {
+		const a = rule?.[axis] ?? {}
+		const mode = a.mode ?? 'stretch'
+		const other = rule?.[axis === 'x' ? 'y' : 'x'] ?? {}
+		// the flag can only do something against an aspect partner, and a
+		// checkbox that cannot act is worse than no checkbox
+		const canFit =
+			(mode === 'stretch' || mode === 'shrink') && other.mode === 'aspect' && other.ratio > 0
+		return (
+			<div key={axis} style={{ display: 'flex', flexDirection: 'column', gap: 2, paddingTop: 4 }}>
+				<div style={{ fontSize: 10, color: 'var(--tl-color-text-3)' }}>
+					{axis === 'x' ? 'Width' : 'Height'}
+				</div>
+				<div style={rowStyle}>
+					<select
+						value={mode}
+						title="Size Mode"
+						data-testid={`claw-anchor-${axis}-mode`}
+						onChange={(e) => patchAxis(axis, 'mode', e.target.value)}
+					>
+						{MODE_OPTIONS.map(([v, label]) => (
+							<option key={v} value={v}>
+								{label}
+							</option>
+						))}
+					</select>
+				</div>
+				{SIZE_SLOTS[mode].map((slots, i) =>
+					slots.some(Boolean) ? (
+						<div key={`size${i}`} style={rowStyle}>
+							{slots.map((field, col) => {
+								if (!field) return <span key={col} style={{ flex: 1 }} />
+								const [glyph, tip, step] = SIZE_FIELDS[field]
+								return (
+									<React.Fragment key={col}>
+										<span className="claw-anchor-icon" title={tip}>
+											{glyph}
+										</span>
+										{num(axis, field, step, tip)}
+										{col === 0 && <span style={{ flex: 1 }} />}
+									</React.Fragment>
+								)
+							})}
+						</div>
+					) : null
+				)}
+				{canFit && (
+					<div style={rowStyle}>
+						<input
+							type="checkbox"
+							checked={a.fit === true}
+							title="Aspect Fit"
+							data-testid={`claw-anchor-${axis}-fit`}
+							onChange={(e) => patchAxis(axis, 'fit', e.target.checked)}
+							style={{ margin: 0 }}
+						/>
+						<span style={{ fontSize: 11 }}>Fit</span>
+						<span style={{ flex: 1 }} />
+						{a.fit === true && (
+							<>
+								<span className="claw-anchor-icon" title="Aspect Size Offset">
+									{'⇥'}
+								</span>
+								{num(axis, 'fitOffset', 1, 'Aspect Size Offset')}
+							</>
+						)}
+					</div>
+				)}
+			</div>
+		)
+	}
+
+	return (
+		<div className="claw-anchor" style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+			<TL.TldrawUiButton
+				type="normal"
+				data-testid="claw-anchor-dynamic"
+				onClick={toggleDynamic}
+				title="Follow the screen when it is resized"
+				style={{ justifyContent: 'flex-start', gap: 6 }}
+			>
+				{Icon ? (
+					<Icon small icon={state.allDynamic ? 'toggle-on' : 'toggle-off'} label="Dynamic Layout" />
+				) : null}
+				<span style={{ fontSize: 11 }}>Dynamic Layout</span>
+			</TL.TldrawUiButton>
+			{rule && state.count === 1 && (
+				<div style={{ display: 'flex', flexDirection: 'column', gap: 2, padding: '0 8px 2px' }}>
+					{POSITION_ROWS.map(positionRow)}
+					{axisSection('x')}
+					{axisSection('y')}
+				</div>
+			)}
+			{state.allDynamic && state.hasText && (
+				<TL.TldrawUiButton
+					type="normal"
+					data-testid="claw-anchor-text-fixed"
+					onClick={setTextMode}
+					title="Keep the text at its authored size and let it re-wrap, instead of scaling it with the box"
+					style={{ justifyContent: 'flex-start', gap: 6 }}
+				>
+					{Icon ? (
+						<Icon small icon={rule?.text === 'fixed' ? 'toggle-on' : 'toggle-off'} label="Fixed Text" />
+					) : null}
+					<span style={{ fontSize: 11 }}>Fixed Text</span>
+				</TL.TldrawUiButton>
+			)}
 		</div>
 	)
 }

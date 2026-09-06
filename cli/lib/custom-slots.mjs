@@ -156,11 +156,13 @@ export function extractCustomStyles(records) {
 	for (const r of records) {
 		if (r.typeName !== 'shape') continue
 		if (BASE_GEO_BY_ROUNDED[r.props?.geo]) r.props.geo = BASE_GEO_BY_ROUNDED[r.props.geo]
-		// a reset gradient nulls its key (tldraw merges meta, so it cannot be
-		// deleted in place) - don't carry the null into the file
-		if (r.meta && r.meta.clawGradient == null && 'clawGradient' in r.meta) {
-			const { clawGradient: _drop, ...rest } = r.meta
-			r.meta = rest
+		// Clearing any claw metadata key means writing null (tldraw MERGES meta,
+		// so a key cannot be deleted in place) - don't carry those nulls into
+		// the file. Applies to every claw* key: gradients, anchor rules, and
+		// whatever comes next.
+		if (r.meta) {
+			const live = Object.entries(r.meta).filter(([k, v]) => !(k.startsWith('claw') && v == null))
+			if (live.length !== Object.keys(r.meta).length) r.meta = Object.fromEntries(live)
 		}
 		let claw = null
 		for (const key of STYLE_KEYS) {

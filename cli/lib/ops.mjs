@@ -29,6 +29,11 @@ const OPS = {
 	unchain_all: { required: [], optional: [] },
 	fix_crossings: { required: [], optional: [] },
 	resize: { required: ['id'], optional: ['w', 'h'] },
+	anchor: {
+		required: ['id'],
+		optional: ['x', 'y', 'preset', 'inset', 'text', 'rebase', 'clear'],
+	},
+	resolve: { required: [], optional: ['id'] },
 	connect: { required: ['from', 'to'], optional: ['label', 'color', 'kind'] },
 	route: { required: ['id'], optional: ['fromAnchor', 'toAnchor', 'mid', 'kind', 'bend', 'labelAt', 'laneX', 'laneY'] },
 	chain: { required: ['id'], optional: ['points', 'fromAnchor', 'toAnchor'] },
@@ -205,6 +210,53 @@ label text, or the "name" given to an earlier op in the same batch.
       On a TEXT shape, "w" sets a fixed width and turns on WRAPPING (long
       copy flows to multiple lines; no more hand-inserted newlines); resize
       with no "w" restores auto-size. w/h are clamped to >= 1 everywhere.
+  {"anchor": {"id": "SearchBar", "preset": "top-bar"}}
+      RESPONSIVENESS: how this shape's box follows its parent screen's size.
+      Each axis states WHERE the box sits and HOW BIG it is, separately:
+        position = anchor x parentSize + offset - pivot x size
+          "anchor"  a fraction of the PARENT (0 start, 0.5 middle, 1 end)
+          "pivot"   a fraction of THIS BOX - which of its points lands on
+                    the anchor (0 leading edge, 0.5 middle, 1 trailing edge)
+          "offset"  pixels, applied after both
+        size comes from "mode":
+          fixed     size
+          stretch   percent x parentSize + sizeOffset
+          shrink    min(size, percent x parentSize + sizeOffset) - a ceiling,
+                    for "this wide, but never wider than the screen allows"
+          aspect    ratio x otherAxisSize
+        "min" is a floor applied to whatever the mode produced (default 1).
+        "fit": true on a stretch or shrink axis whose PARTNER is aspect
+        shrinks THIS axis until the partner's box sits inside the parent,
+        with "fitOffset" as the allowance (negative keeps a margin). It
+        accounts for where the partner sits, not just its size, so a partner
+        pinned to one edge is brought inside from the other.
+      So a card inset 16px on both sides, 80px tall, 12px down the screen:
+        {"anchor": {"id": "Card",
+           "x": {"mode": "stretch", "percent": 1, "sizeOffset": -32, "offset": 16},
+           "y": {"mode": "fixed", "size": 80, "offset": 12}}}
+      and a 16:9 tile that spans the width:
+        {"anchor": {"id": "Tile",
+           "x": {"mode": "stretch", "percent": 1, "sizeOffset": -32, "offset": 16},
+           "y": {"mode": "aspect", "ratio": 0.5625}}}
+      Aspect on BOTH axes is an error - one axis must have a size to derive
+      from. Anchors resolve every time the parent is resized: by hand in the
+      editor, by a resize op, or by claw layout.
+      "text": "scale" (default) makes a box's text scale with the box like a
+      picture, so it looks identical and never re-wraps; "fixed" keeps the
+      font size and lets the text re-wrap and overflow instead.
+      Presets write every number from the box you already drew, so you can
+      place a shape by eye and then say how it should behave:
+        fill (+ "inset": N) | fixed (keep size, pin to nearest edge) |
+        center | stretch-x | stretch-y | top-bar | bottom-bar
+      "rebase": true re-records the design size that text scaling measures
+      from. "clear": true removes the rule. MOVING or RESIZING an anchored
+      shape rewrites the numbers its mode reads and keeps its anchor and
+      pivot - direct manipulation always wins over the stored rule.
+      Check the result at other sizes with \`claw resolve\` - no render needed.
+  {"resolve": {}}
+      Re-resolve every anchored shape against its container ("id" limits it to
+      one container's subtree). Rarely needed by hand: every apply resolves
+      anchors at the end of the batch.
   {"connect": {"from": "BonusRound", "to": "Title", "label": "done"}}   (bound both ends)
       Bind "from" to the TRIGGERING ELEMENT when you know it (the button/row
       that causes the transition), not the whole screen - the arrow starts at

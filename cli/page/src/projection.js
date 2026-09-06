@@ -3,6 +3,7 @@
  * what frame contains it, and every arrow with the shapes its ends attach to.
  * Read-only - it never touches the document, it only describes it.
  */
+import { ruleOf, ruleText } from './anchors.js'
 import { plainText, round, short } from './editor-utils.js'
 import { isWaypointShape, walkChain } from './ops.js'
 
@@ -171,9 +172,11 @@ function projectPage(editor, page, warnings) {
 		.map((s) => {
 			const b = bounds.get(s.id)
 			const text = plainText(editor, s)
+			const rule = ruleOf(s)
 			return {
 				id: short(s.id),
 				type: s.type,
+				anchor: rule ? ruleText(rule, s) : undefined,
 				geo: s.props?.geo ?? undefined,
 				name: s.props?.name ?? undefined,
 				text: text ?? undefined,

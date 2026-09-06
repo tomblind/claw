@@ -21,7 +21,8 @@ node ~/.claude/skills/claw/cli/claw.mjs <command> <file.tldr>
 |---|---|
 | `outline <file>` | **Start here.** Pages, nested frames, and counts of everything else. Cheapest way to see what exists. `--all` lists every shape, `--json` for machine form. |
 | `flows <file>` | The arrow graph alone — what connects to what. Essential for screen-flow docs. `--from <id>` to filter. |
-| `lint <file>` | **Run after every apply.** Heuristic visual checks as text: shapes outside their frame, overlapping boxes, labels wider than their chip, arrows cutting through unrelated screens, unreadable label contrast. Catches most of what you'd render to look for, at ~1% of the context cost. |
+| `lint <file>` | **Run after every apply.** Heuristic visual checks as text: shapes outside their frame, overlapping boxes, labels wider than their chip, arrows cutting through unrelated screens, unreadable label contrast, anchor rules that collapse at small sizes. Catches most of what you'd render to look for, at ~1% of the context cost. |
+| `resolve <file>` | **Where anchored shapes land, at any screen size.** `--sizes 390x844,834x1112` resolves a screen at sizes the document doesn't have, so a responsive layout can be checked at five sizes for one command instead of five renders. Read-only. See *Responsive layout*. |
 | `inspect <file> <ref>` | Everything about one shape: full props, bounds, containing frame, resolved styling (real hex values and font family, custom slots included). The zoom-in companion to `outline` when implementing a specific component. |
 | `render <file>` | **Pixel-accurate PNG from the real tldraw editor.** `--frame <id\|name>` renders one screen; `--around <ref> --pad N` is a tight crop of one shape (the cheap self-check while building). **Read the PNG** — layout is spatial and the text output can't convey it. |
 | `export <file> [-o out.svg]` | **SVG built for Figma.** tldraw puts text in `<foreignObject>`, which Figma's importer ignores (shapes arrive, every word vanishes), so each block is rewritten as real SVG `<text>` measured from the browser's own layout. `--frame <ref>` exports one screen, `--raw` emits tldraw's SVG untouched. Fonts travel by name, so Figma substitutes any it doesn't have installed. |
@@ -207,6 +208,109 @@ rework:
 - **`outline --json` includes the arrows** (ids, labels, endpoints, roots) —
   no text-scraping needed to script arrow ops.
 
+### Responsive layout (anchors)
+
+A drawing records one size. `anchor` records what happens at every other
+size, so an agent implementing the screen is told how it scales instead of
+guessing from a single fixed arrangement. **When a canvas carries anchor
+rules, they are the responsiveness specification — implement them, don't
+re-derive layout intent from the coordinates.**
+
+Each axis says WHERE the box sits and HOW BIG it is, as two separate
+statements:
+
+```
+position = anchor × parentSize + offset − pivot × size
+```
+
+- **`anchor`** is a fraction of the PARENT: 0 its start, 0.5 its middle, 1 its
+  end.
+- **`pivot`** is a fraction of THIS BOX: which of its own points lands on the
+  anchor. 0 its leading edge, 0.5 its middle, 1 its trailing edge.
+- **`offset`** is pixels, applied after both.
+
+So "centred" is anchor 0.5 with pivot 0.5, and "16px in from the right edge"
+is anchor 1, pivot 1, offset −16, at any parent size.
+
+Size comes from a per-axis `mode`:
+
+| mode | size |
+|---|---|
+| `fixed` | `size` |
+| `stretch` | `percent × parentSize + sizeOffset` |
+| `shrink` | `min(size, percent × parentSize + sizeOffset)` |
+| `aspect` | `ratio × otherAxisSize` |
+
+`shrink` is the ceiling: "400px wide, but never wider than the screen minus
+32". `min` is the floor, applied to whatever the mode produced, and defaults
+to 1. Aspect on both axes is an error, since neither would have a size to
+derive from. Nothing sizes a container from its children.
+
+```json
+{"anchor": {"id": "Tile",
+   "x": {"mode": "stretch", "percent": 1, "sizeOffset": -32, "offset": 16},
+   "y": {"mode": "aspect", "ratio": 0.5625}}}
+```
+
+That tile spans the width at a 16px inset and keeps a 16:9 shape at every
+screen size.
+
+**`fit`** goes on a `stretch` or `shrink` axis whose partner is `aspect`. It
+shrinks *this* axis until the partner's box sits inside the parent, with
+`fitOffset` as the allowance (negative keeps a margin). The flag lives on the
+axis being sized, so no axis reaches across to size another, and it reads only
+static facts about its partner, so resolution stays one pass.
+
+It accounts for where the partner sits, not just how big it is. The partner's
+anchor and pivot decide which of its edges move as this axis grows, and an
+edge that does not move with the size cannot be helped by shrinking, so that
+bound is skipped rather than failing everything. A partner pinned to the top
+with pivot 0 is the everyday case: its top edge stays where it is and only its
+bottom edge is brought inside.
+
+```json
+{"anchor": {"id": "Video",
+   "x": {"mode": "stretch", "percent": 1, "anchor": 0.5, "pivot": 0.5,
+         "fit": true, "fitOffset": -20},
+   "y": {"mode": "aspect", "ratio": 0.5625, "anchor": 0.5, "pivot": 0.5}}}
+```
+
+That is a 16:9 video filling the width when there is room and shrinking to
+stay inside the height when there is not, keeping a 20px margin.
+
+- **Anchors resolve every time a container's size changes**: a resize op,
+  `claw layout`, or the user dragging the screen's handle in the editor.
+- **`text`** is `scale` by default: a box's text scales with the box like a
+  picture, so it looks identical and its line breaks never change. `fixed`
+  keeps the font size and lets the text re-wrap instead. Text only grows when
+  **both** axes grow (the factor is the smaller ratio), so a full-width bar
+  that keeps its height keeps its text size, which is what you want.
+- **Presets write every number from what is already drawn**, so place a shape
+  by eye and then say how it behaves: `fill` (+`inset`), `fixed` (keep the
+  size, pin to the nearest edge), `center`, `stretch-x`, `stretch-y`,
+  `top-bar`, `bottom-bar`.
+- **An anchored shape cannot be resized by hand.** Its resize handles are
+  withdrawn, because a drag has no single right meaning once a rule owns the
+  size: on a stretch axis it would land in `sizeOffset` and then grow oddly
+  with the parent, and on a fitted axis the cap can undo it immediately. Sizes
+  are changed through the numbers. Moving is unaffected, and a hand move
+  rewrites the position `offset` and keeps the anchor and pivot.
+- **The `resize` op still works on an anchored shape** and rewrites the number
+  its mode reads, so `claw layout` and agent edits are unaffected.
+- **A resize is an ordinary edit.** There is no preview mode: the new size is
+  the new size, and undo restores it like any other change. If the user leaves
+  a screen at a test size, `diff` reports it as a real change, because it is.
+
+Check the result without rendering:
+
+```
+claw resolve design/ui.tldr --frame Home --sizes 390x844,834x1112,1440x900
+```
+
+It prints each shape's resolved box per size and flags overflow and clamped
+minimums. Anchoring **only some** children of a screen is the common mistake
+(the rest stay put on resize); `lint` names the ones without a rule.
+
 Write an ops file (JSON array, applied in order) and run it:
 
 ```json
@@ -225,7 +329,7 @@ claw apply design/ui.tldr ops.json      # or --dry-run to preview the report
 claw new design/flow.tldr spec.json     # same vocabulary on an empty canvas
 ```
 
-`claw ops` prints the full reference (`add_screen`, `add` with kinds `card|button|label|note|box|image`, `set_text`, `style`, `move`, `resize`, `connect`, `rename`, `delete`). References accept ids, short ids, frame names, label text, or `name`s given earlier in the same batch.
+`claw ops` prints the full reference (`add_screen`, `add` with kinds `card|button|label|note|box|image`, `set_text`, `style`, `move`, `resize`, `anchor`, `resolve`, `connect`, `rename`, `delete`). References accept ids, short ids, frame names, label text, or `name`s given earlier in the same batch.
 
 **Real visuals — images and SVG.** `{"add": {"kind": "image", ...}}` places an image shape: pass `svg` with inline SVG markup (generate mockup art directly — no file needed), or `src` with a path to a png/jpg/gif/webp/svg file (resolved relative to the ops file). Size comes from `size`, else the SVG viewBox, else the image's own pixels. Use this when a flow diagram or mockup needs visual fidelity beyond boxes and labels — e.g. one SVG mock per screen inside its frame.
 

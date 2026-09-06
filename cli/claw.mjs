@@ -3,10 +3,10 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, writeFileSync } from 'node:fs'
 import { basename, dirname, extname, join } from 'node:path'
 import { diff } from './lib/diff.mjs'
-import { flowsText, outlineText } from './lib/format.mjs'
+import { flowsText, outlineText, resolveText } from './lib/format.mjs'
 import { readTldr, TldrError } from './lib/load.mjs'
 import { opsHelp, readOps } from './lib/ops.mjs'
-import { applyToFile, inspectFileShape, lintFile, newFromOps, projectFile, projectPair, renderFile } from './lib/query.mjs'
+import { applyToFile, inspectFileShape, lintFile, newFromOps, projectFile, projectPair, renderFile, resolveAnchorsFile } from './lib/query.mjs'
 
 import { VERSION } from './lib/version.mjs'
 
@@ -31,6 +31,13 @@ USAGE
       overlapping siblings, labels wider than their box, connected arrows
       cutting through unrelated screens, unreadable label-on-fill contrast.
       Run after apply; far cheaper than rendering to look for problems.
+
+  claw resolve <file.tldr> [--frame <ref>] [--sizes 390x844,834x1112] [--json]
+      Where every anchored shape lands, as text. With --sizes it resolves the
+      screen at sizes the document does not currently have, so a responsive
+      layout can be checked at five sizes for the cost of one command instead
+      of five renders. Read-only: nothing is written, at any size.
+      Flags overflow and shapes that hit their minimum size.
 
   claw inspect <file.tldr> <shape ref> [--json]
       Everything about one shape: full props, page bounds, containing frame,
@@ -154,6 +161,22 @@ function parseArgs(argv) {
 		}
 	}
 	return { positional, flags }
+}
+
+/** `--sizes 390x844,834x1112` -> [{w,h}, ...]. */
+function parseSizes(flag) {
+	if (!flag || flag === true) return []
+	return String(flag)
+		.split(',')
+		.map((part) => part.trim())
+		.filter(Boolean)
+		.map((part) => {
+			const m = /^(\d+)\s*[x×]\s*(\d+)$/i.exec(part)
+			if (!m) {
+				throw new TldrError(`--sizes takes WxH values, e.g. 390x844,834x1112 (got "${part}")`, 1)
+			}
+			return { w: Number(m[1]), h: Number(m[2]) }
+		})
 }
 
 function emitWarnings(projection) {
@@ -323,6 +346,19 @@ async function main() {
 			return 0
 		}
 
+		case 'resolve': {
+			const frame = flags.frame && flags.frame !== true ? String(flags.frame) : null
+			const sizes = parseSizes(flags.sizes)
+			const result = await resolveAnchorsFile(raw, { container: frame, sizes })
+			if (flags.json) {
+				process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
+				return 0
+			}
+			process.stdout.write(`${resolveText(result, sizes)}\n`)
+			for (const w of result.warnings ?? []) process.stderr.write(`WARN: ${w}\n`)
+			return 0
+		}
+
 		case 'inspect': {
 			const shapeRef = positional[2]
 			if (!shapeRef) throw new TldrError('inspect: missing <shape ref> (id, short id, name, or label text)', 1)
@@ -336,6 +372,13 @@ async function main() {
 			if (shape.text) lines.push(`  text: ${JSON.stringify(shape.text)}`)
 			if (shape.frame) lines.push(`  frame: ${shape.frame}`)
 			if (shape.bounds) lines.push(`  bounds: ${shape.bounds.w}x${shape.bounds.h} @${shape.bounds.x},${shape.bounds.y}`)
+			if (shape.anchor) {
+				lines.push(`  anchor: ${shape.anchor.text}`)
+				if (shape.anchor.rule?.base) {
+					const b = shape.anchor.rule.base
+					lines.push(`  anchor design size: ${b.w}x${b.h} (what text scaling measures from)`)
+				}
+			}
 			if (shape.rotation) lines.push(`  rotation: ${shape.rotation}`)
 			if (shape.opacity !== 1) lines.push(`  opacity: ${shape.opacity}`)
 			const r = shape.resolved ?? {}

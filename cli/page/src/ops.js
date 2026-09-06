@@ -20,8 +20,22 @@ import {
 	CUSTOM_FONT_SLOTS,
 	ROUNDED_GEO_BY_BASE,
 } from '../../lib/custom-slots.mjs'
+import {
+	anchorParent,
+	AXES,
+	baseOf,
+	documentHasAnchors,
+	MODE_FIELDS,
+	MODES,
+	presetRule,
+	rebaseOffsets,
+	resolveAll,
+	resolveContainer,
+	ruleOf,
+	ruleText,
+} from './anchors.js'
 import { reportError } from './common.js'
-import { plainText, resolveShape, round, short } from './editor-utils.js'
+import { overlayLabelOf, plainText, resolveShape, round, short } from './editor-utils.js'
 import { applyClawTheme, ensureCustomSlots } from './theme.js'
 import { containingFrame, shapePlaintext } from './lint.js'
 
@@ -39,10 +53,7 @@ export const TEXT_MARKS = ['bold', 'italic', 'underline', 'strike', 'code', 'hig
  */
 export function textTargetOf(editor, shape) {
 	if (shape.type === 'geo' && !shapePlaintext(editor, shape)) {
-		const overlay = editor
-			.getSortedChildIdsForParent(shape.id)
-			.map((cid) => editor.getShape(cid))
-			.find((c) => c?.type === 'text')
+		const overlay = overlayLabelOf(editor, shape)
 		if (overlay) return { target: overlay, chipBox: shape }
 	}
 	return { target: shape, chipBox: null }
@@ -304,6 +315,51 @@ export function unchainArrow(editor, head) {
 	}
 }
 
+/**
+ * Validate and merge one axis of an `anchor` op onto whatever rule the shape
+ * already has, so a later op can change just the mode or just the minimum.
+ */
+function mergeAxis(existing, incoming, axis) {
+	if (incoming == null || typeof incoming !== 'object' || Array.isArray(incoming)) {
+		throw new Error(`anchor "${axis}" must be an object`)
+	}
+	// position is always the same three numbers; the size fields depend on mode
+	const allowed = new Set([
+		'mode',
+		'anchor',
+		'pivot',
+		'offset',
+		'min',
+		'fit',
+		'fitOffset',
+		...Object.values(MODE_FIELDS).flat(),
+	])
+	const out = { ...(existing ?? {}) }
+	for (const [key, value] of Object.entries(incoming)) {
+		if (!allowed.has(key)) {
+			throw new Error(`anchor ${axis}: unknown field "${key}" (allowed: ${[...allowed].join(', ')})`)
+		}
+		if (key === 'mode') {
+			if (!MODES.includes(value)) {
+				throw new Error(`anchor ${axis}.mode must be one of ${MODES.join(' | ')}`)
+			}
+		} else if (key === 'fit') {
+			if (typeof value !== 'boolean') throw new Error(`anchor ${axis}.fit must be true or false`)
+		} else if (typeof value !== 'number' || !Number.isFinite(value)) {
+			throw new Error(`anchor ${axis}.${key} must be a finite number`)
+		}
+		out[key] = value
+	}
+	const mode = out.mode ?? 'stretch'
+	if (mode === 'aspect' && !(out.ratio > 0)) {
+		throw new Error(`anchor ${axis}: aspect mode needs a positive "ratio" (a multiple of the other axis)`)
+	}
+	if ((mode === 'fixed' || mode === 'shrink') && !(out.size > 0)) {
+		throw new Error(`anchor ${axis}: ${mode} mode needs a positive "size" in pixels`)
+	}
+	return out
+}
+
 export async function applyOps(editor, ops) {
 	ensureCustomSlots() // defensive: anything that parsed a file may have stripped them
 	// sanitize numeric geometry before anything executes: reject non-finite
@@ -353,6 +409,30 @@ export async function applyOps(editor, ops) {
 		}
 	}
 	const pageBoundsOf = (shape) => editor.getShapePageBounds(shape.id)
+
+	/**
+	 * Moving or resizing an anchored shape means the author changed where it
+	 * sits, not how it responds - so its offsets are rewritten from the new box
+	 * and its anchors are left alone. Without this, the resolve pass at the end
+	 * of the batch would simply undo the move.
+	 */
+	const rebaseAnchored = (id) => {
+		const fresh = editor.getShape(id)
+		if (!fresh || !ruleOf(fresh)) return null
+		const parent = anchorParent(editor, fresh)
+		if (!parent) return null
+		const next = rebaseOffsets(editor, fresh, parent)
+		return next ? ruleText(next, fresh) : null
+	}
+
+	/** Settle everything anchored inside one container. Returns how many moved. */
+	const resolveSubtree = (id) => {
+		const fresh = editor.getShape(id)
+		if (!fresh) return 0
+		const results = resolveContainer(editor, fresh, { apply: true })
+		for (const r of results) touched.updated.push(r.id)
+		return results.filter((r) => r.changed && !r.error).length
+	}
 
 	for (let i = 0; i < ops.length; i++) {
 		const op = ops[i]
@@ -602,7 +682,11 @@ export async function applyOps(editor, ops) {
 					} else throw new Error('move needs `to: {x,y}` or `by: {dx,dy}`')
 					editor.updateShape({ id: target.id, type: target.type, x: nx, y: ny })
 					touched.updated.push(target.id)
-					report.push(`move ${short(target.id)} -> @${round(nx)},${round(ny)}`)
+					const rebased = rebaseAnchored(target.id)
+					report.push(
+						`move ${short(target.id)} -> @${round(nx)},${round(ny)}` +
+							(rebased ? ` (anchor offsets follow: ${rebased})` : '')
+					)
 					break
 				}
 
@@ -638,7 +722,90 @@ export async function applyOps(editor, ops) {
 						},
 					})
 					touched.updated.push(target.id)
-					report.push(`resize ${short(target.id)} -> ${rw ?? target.props.w}x${rh ?? target.props.h}`)
+					const rebasedSize = rebaseAnchored(target.id)
+					// Resolve this container's subtree NOW, not just at the end of
+					// the batch: a later op in the same batch that moves one of
+					// these children would otherwise rebase its offsets from the
+					// box the child had at the OLD container size, permanently
+					// baking the stale geometry into the rule.
+					const followed = resolveSubtree(target.id)
+					report.push(
+						`resize ${short(target.id)} -> ${rw ?? target.props.w}x${rh ?? target.props.h}` +
+							(rebasedSize ? ` (anchor offsets follow: ${rebasedSize})` : '') +
+							(followed ? ` (${followed} anchored child(ren) followed)` : '')
+					)
+					break
+				}
+
+				case 'anchor': {
+					const target = ref(args.id)
+					if (args.clear) {
+						// tldraw MERGES meta, so a key is cleared by writing null
+						editor.updateShape({
+							id: target.id,
+							type: target.type,
+							meta: { ...(target.meta ?? {}), clawAnchor: null },
+						})
+						touched.updated.push(target.id)
+						report.push(`anchor ${short(target.id)} -> rule removed`)
+						break
+					}
+					const parent = anchorParent(editor, target)
+					if (!parent) {
+						throw new Error(
+							'anchor needs a shape inside a frame or box - a page-level shape has no parent box to follow. Put it in a screen first.'
+						)
+					}
+					let rule = { ...(ruleOf(target) ?? {}) }
+					if (args.preset != null) {
+						rule = {
+							...rule,
+							...presetRule(editor, target, parent, String(args.preset), {
+								inset: args.inset != null ? Number(args.inset) : 0,
+							}),
+						}
+					}
+					for (const axis of AXES) {
+						if (args[axis] == null) continue
+						rule[axis] = mergeAxis(rule[axis], args[axis], axis)
+					}
+					if (args.text != null) {
+						if (args.text !== 'scale' && args.text !== 'fixed') {
+							throw new Error(`text must be "scale" or "fixed", got ${JSON.stringify(args.text)}`)
+						}
+						rule.text = args.text
+					}
+					if (!rule.x && !rule.y) {
+						throw new Error(
+							'anchor needs a `preset`, or an `x` / `y` axis rule (mode, anchor, pivot, offset, and the size fields its mode reads)'
+						)
+					}
+					// the design box text scaling measures from: recorded on first
+					// use, re-recorded only when asked
+					if (!rule.base || args.rebase) rule.base = baseOf(editor, target)
+					editor.updateShape({
+						id: target.id,
+						type: target.type,
+						meta: { ...(target.meta ?? {}), clawAnchor: rule },
+					})
+					touched.updated.push(target.id)
+					report.push(`anchor ${short(target.id)} -> ${ruleText(rule, target)}`)
+					break
+				}
+
+				case 'resolve': {
+					const target = args.id != null ? ref(args.id) : null
+					const results = target
+						? resolveContainer(editor, target, { apply: true })
+						: resolveAll(editor, { apply: true })
+					const failed = results.filter((r) => r.error)
+					const moved = results.filter((r) => r.changed && !r.error)
+					for (const r of results) touched.updated.push(r.id)
+					report.push(
+						`resolve ${target ? short(target.id) : 'page'} -> ${results.length - failed.length} anchored shape(s), ${moved.length} moved` +
+							(failed.length ? `, ${failed.length} failed` : '')
+					)
+					for (const f of failed) report.push(`  ! ${short(f.id)}: ${f.error}`)
 					break
 				}
 
@@ -1448,6 +1615,25 @@ export async function applyOps(editor, ops) {
 			throw new Error(`op ${i + 1} (${kind}): ${err.message}`)
 		}
 	}
+	// Anchored shapes follow their container, so any batch that changed a
+	// container's size leaves them stale. Resolving at the end covers every
+	// path (resize, layout, a fresh add into an anchored screen) without the
+	// author having to remember an op. Costs one scan and does nothing at all
+	// on a document with no anchor rules.
+	if (documentHasAnchors(editor)) {
+		const resolved = resolveAll(editor, { apply: true })
+		const moved = resolved.filter((r) => r.changed && !r.error)
+		const failed = resolved.filter((r) => r.error)
+		if (moved.length || failed.length) {
+			report.push(
+				`anchors resolved -> ${moved.length} shape(s) followed their container` +
+					(failed.length ? `, ${failed.length} could not resolve` : '')
+			)
+			for (const f of failed) report.push(`  ! ${short(f.id)}: ${f.error}`)
+			for (const r of moved) touched.updated.push(r.id)
+		}
+	}
+
 	// Invariant: connected (bound) arrows render above every screen — a
 	// transition vanishing behind a frame is never wanted. bringToFront can't
 	// do this: tldraw's ArrowBindingUtil clamps a bound arrow to sit BELOW the

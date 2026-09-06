@@ -59,6 +59,7 @@ executor the CLI drives, the live canvas a person edits, and a standalone viewer
 | `theme.js` | reading and writing `meta.clawTheme`, registering slots with tldraw |
 | `rounded.js` | the corner fillet used by the rounded shape variants |
 | `lint.js` | the layout checks (`lintDocument`) the CLI reports |
+| `anchors.js` | responsive anchors: the rule model, the resolver, and the live editing rules (a hand move rebases the offset, a hand resize is refused) |
 | `figma-svg.js` | rewriting exported HTML text into real SVG text Figma can read |
 | `editor-utils.js` | id shortening, rounding, plain text from rich text |
 | `common.js` | error reporting, the canvas background, hex mixing |
@@ -80,7 +81,7 @@ module is a runtime error if the import is missing, which the bundler will not c
 
 ## Claw-only concepts in a portable file
 
-Claw adds four things tldraw has no vocabulary for. All of them survive a
+Claw adds five things tldraw has no vocabulary for. All of them survive a
 round trip through a vanilla tldraw editor, because the FILE never contains a
 value tldraw would reject: props carry a legal standard value, the claw truth
 lives in record `meta`, and `lib/custom-slots.mjs` swaps between the two at
@@ -93,6 +94,14 @@ write, called from both the editor page and the sync room).
 | rounded corners | `props.geo = 'rounded-hexagon'` | `'hexagon'` | `meta.clawRadius` (the radius IS the marker) |
 | gradient slots | slot value is `{gradient, from, to}` | shape uses the midpoint colour | slot in `meta.clawTheme`, geometry in `meta.clawGradient` |
 | per-shape text outline | — | — | `meta.clawText.outline = 'off'` (the outline is on otherwise) |
+| responsive anchors | — | — | `meta.clawAnchor` (and `meta.clawBase` on a scaled overlay label) |
+
+Anchors need no props transform at all: the rule is pure metadata and the
+resolved geometry is ordinary `x`/`y`/`w`/`h`, so a vanilla editor opens an
+anchored canvas, shows the layout at its current size, and preserves the rules
+it does not understand. What a vanilla editor CAN do is move an anchored shape
+without updating its rule, which is why `lint` carries an `anchor-stale` check
+that reports the gap between where a shape sits and where its rule puts it.
 
 Text outlines are drawn the smooth way by default: one vector stroke behind the
 glyphs (`-webkit-text-stroke` plus `paint-order`) instead of tldraw's six stamped
@@ -113,7 +122,9 @@ Three rules learned the hard way:
    the room registration produced `INVALID_RECORD` disconnects in v0.44.0,
    and only a live room reproduces it - standalone tests cannot.
 3. **`updateShape` MERGES `meta`.** Omitting a key does not delete it; write
-   `null` explicitly and let the file transform drop it.
+   `null` explicitly and let the file transform drop it. `extractCustomStyles`
+   strips every null-valued `claw*` key on the way out, so those nulls never
+   reach the file.
 
 ### Gradients
 

@@ -35,6 +35,10 @@ export async function lintFile(tldrText) {
 	return await call('/api/lint', { tldr: tldrText })
 }
 
+export async function resolveAnchorsFile(tldrText, { container = null, sizes = [] } = {}) {
+	return await call('/api/resolve', { tldr: tldrText, container, sizes })
+}
+
 export async function inspectFileShape(tldrText, ref) {
 	return (await call('/api/inspect', { tldr: tldrText, ref })).shape
 }

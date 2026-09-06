@@ -63,15 +63,19 @@ export function outlineText(projection, path, { all = false } = {}) {
 			const label = labelFor(s, page, { withId: false })
 			if (!label.startsWith(s.type + '#')) bits.push(label)
 			if (s.w != null) bits.push(`${s.w}x${s.h}`, `@${s.x},${s.y}`)
+			if (s.anchor) bits.push(`[anchor ${s.anchor}]`)
 			return bits.join(' ')
 		}
 		const summarize = (shapes) => {
 			const counts = new Map()
 			for (const s of shapes) counts.set(s.type, (counts.get(s.type) ?? 0) + 1)
-			return [...counts.entries()]
-				.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-				.map(([t, n]) => `${n} ${t}`)
-				.join(', ')
+			const anchored = shapes.filter((s) => s.anchor).length
+			return (
+				[...counts.entries()]
+					.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+					.map(([t, n]) => `${n} ${t}`)
+					.join(', ') + (anchored ? ` (${anchored} anchored — --all for the rules)` : '')
+			)
 		}
 
 		const walk = (shapes, depth) => {
@@ -115,6 +119,63 @@ export function outlineText(projection, path, { all = false } = {}) {
 		)
 	}
 	if (!all && totalShapes) lines.push(`(--all to list every shape, --json for machine form)`)
+	return lines.join('\n')
+}
+
+// ---------------------------------------------------------------------------
+// resolve (responsive anchors)
+// ---------------------------------------------------------------------------
+
+/**
+ * Where anchored shapes land, per container and per requested size. The
+ * point of the text form is that checking five screen sizes costs one command
+ * and a few lines, instead of five renders that stay in context forever.
+ */
+export function resolveText(result, requestedSizes = []) {
+	const containers = result?.containers ?? []
+	if (!containers.length) {
+		return 'no anchored shapes in this document — set rules with the `anchor` op (see `claw ops`)'
+	}
+	const lines = []
+	let problems = 0
+	for (const c of containers) {
+		lines.push(`${c.name}  design ${c.design.w}x${c.design.h}`)
+		for (const size of c.sizes) {
+			const isDesign = size.w === c.design.w && size.h === c.design.h
+			lines.push(`  at ${size.w}x${size.h}${isDesign && !requestedSizes.length ? ' (current)' : ''}:`)
+			for (const s of size.shapes) {
+				if (s.error) {
+					problems++
+					lines.push(`    ${String(s.name).padEnd(16)} ! ${s.error}`)
+					continue
+				}
+				const flags = []
+				if (s.overflow) {
+					problems++
+					flags.push(`overflows by ${s.overflow}px`)
+				}
+				for (const n of s.notes ?? []) {
+					problems++
+					flags.push(n)
+				}
+				if (s.scale != null && Math.abs(s.scale - 1) > 0.01) flags.push(`text ×${s.scale.toFixed(2)}`)
+				// with no size given this doubles as a check that the stored
+				// geometry still matches the rules
+				if (!requestedSizes.length && s.changed) {
+					flags.push(`stored as ${s.before.w}x${s.before.h} @${s.before.x},${s.before.y}`)
+				}
+				lines.push(
+					`    ${String(s.name).padEnd(16)} ${`${s.box.w}x${s.box.h}`.padEnd(10)} @${s.box.x},${s.box.y}` +
+						(flags.length ? `   ${flags.join('; ')}` : '')
+				)
+			}
+		}
+	}
+	lines.push(
+		problems
+			? `${problems} problem(s) flagged above — overflow and minimum-size clamps are what break a layout at an untested size`
+			: 'no overflow or clamped sizes at the sizes checked'
+	)
 	return lines.join('\n')
 }
 

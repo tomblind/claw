@@ -4,6 +4,16 @@
  * checks trade precision for costing ~nothing.
  */
 import * as TL from 'tldraw'
+import {
+	anchorParent,
+	AXES,
+	axisSpec,
+	collapseExtent,
+	innerBox,
+	localBox,
+	resolveShapeRule,
+	ruleOf,
+} from './anchors.js'
 
 export const shapePlaintext = (editor, s) => {
 	try {
@@ -255,6 +265,84 @@ export function lintDocument(editor) {
 					`arrow ${describe(s)} travels ${Math.round(inside)}px inside its own frame "${frameName(editor.getShape(fid))}" - reroute it out the nearest edge`
 				)
 			}
+		}
+	}
+
+	// anchor rules: the mistakes that only show up at a size the author has
+	// not dragged the container to yet
+	const anchoredParents = new Map()
+	for (const s of shapes) {
+		const rule = ruleOf(s)
+		if (!rule) continue
+		const parent = anchorParent(editor, s)
+		if (!parent) {
+			add(
+				'anchor-no-parent',
+				`${describe(s)} has an anchor rule but sits on the page, not inside a screen - there is no parent box for it to follow`
+			)
+			continue
+		}
+		anchoredParents.set(parent.id, (anchoredParents.get(parent.id) ?? 0) + 1)
+		const specs = { x: axisSpec(rule, 'x', s), y: axisSpec(rule, 'y', s) }
+		if (specs.x?.mode === 'aspect' && specs.y?.mode === 'aspect') {
+			add(
+				'anchor-both-aspect',
+				`${describe(s)} is aspect mode on both axes - neither axis has a size to derive from`
+			)
+		}
+		for (const axis of AXES) {
+			const spec = specs[axis]
+			if (!spec) continue
+			const collapse = collapseExtent(spec)
+			if (collapse != null) {
+				const parentExtent = axis === 'x' ? innerBox(parent).w : innerBox(parent).h
+				if (collapse > parentExtent * 0.5) {
+					add(
+						'anchor-collapses',
+						`${describe(s)} hits its minimum ${axis === 'x' ? 'width' : 'height'} of ${spec.min} once "${frameName(parent)}" is under ${Math.round(collapse)}px ${axis === 'x' ? 'wide' : 'tall'}, and overflows below that`
+					)
+				}
+			}
+		}
+		// the stored geometry should already be what the rule produces; when it
+		// is not, something moved the shape without the rule being updated
+		try {
+			const expected = resolveShapeRule(editor, s, rule, parent, { apply: false })
+			const now = localBox(editor, s)
+			if (expected && !expected.error) {
+				const drift = Math.max(
+					Math.abs(expected.box.x - now.x),
+					Math.abs(expected.box.y - now.y),
+					Math.abs(expected.box.w - now.w),
+					Math.abs(expected.box.h - now.h)
+				)
+				if (drift > 2) {
+					add(
+						'anchor-stale',
+						`${describe(s)} sits ${Math.round(drift)}px from where its anchor rule puts it - it was moved without the rule following (run an apply, or re-anchor it)`
+					)
+				}
+			}
+		} catch (err) {
+			add('anchor-invalid', `${describe(s)}: ${err.message}`)
+		}
+	}
+	// a container where only some children respond to a resize is nearly
+	// always an oversight, so name the ones that will stay put
+	for (const [parentId, count] of anchoredParents) {
+		const parent = editor.getShape(parentId)
+		if (!parent) continue
+		const kids = editor
+			.getSortedChildIdsForParent(parentId)
+			.map((cid) => editor.getShape(cid))
+			.filter((c) => c && c.type !== 'arrow' && !ruleOf(c))
+		// a box's own overlay label is carried by the box, not anchored itself
+		const stray = kids.filter((c) => !(c.type === 'text' && parent.type === 'geo'))
+		if (count && stray.length) {
+			add(
+				'anchor-partial',
+				`"${frameName(parent)}" has ${count} anchored child(ren) and ${stray.length} without a rule (${stray.slice(0, 3).map(describe).join(', ')}${stray.length > 3 ? ', …' : ''}) - those will not move when it resizes`
+			)
 		}
 	}
 
