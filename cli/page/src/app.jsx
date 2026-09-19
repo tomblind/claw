@@ -40,7 +40,13 @@ import { filletedPolygonPath, ROUNDABLE_VERTICES } from './rounded.js'
 import { containingFrame, lintDocument, shapePlaintext } from './lint.js'
 import { overlayLabelOf, plainText, resolveShape, round, short } from './editor-utils.js'
 import { projectDocument } from './projection.js'
-import { ClawColorControls, ClawFontControls } from './dialogs.jsx'
+import {
+	CLAW_INSERT_CHAR_DIALOG,
+	ClawColorControls,
+	ClawFontControls,
+	ClawInsertCharControl,
+} from './dialogs.jsx'
+import { expandShortcodeAtCaret, loadChars, setChars } from './chars.js'
 import { applyOps, isWaypointShape, rich, unchainArrow, walkChain } from './ops.js'
 import {
 	applyClawTheme,
@@ -259,6 +265,16 @@ function setupHost(editor) {
 		/** The empty-document template, captured at mount. See above. */
 		async emptyTemplate() {
 			return await emptyTemplate
+		},
+
+		/**
+		 * Supply the insert-character table instead of letting the picker fetch
+		 * it from the core. For an embedder serving the page itself, and for the
+		 * test suite, which loads the page off disk where a fetch cannot reach
+		 * the core at all.
+		 */
+		setChars(data) {
+			return setChars(data).chars.length
 		},
 
 		/** Parse + migrate a .tldr file with tldraw's own loader, then load it. */
@@ -696,6 +712,7 @@ function CustomStylePanel(props) {
 				<div className="tlui-style-panel__section">
 					{colorRelevant && <ClawColorControls />}
 					{fontRelevant && <ClawFontControls />}
+					<ClawInsertCharControl />
 					<ClawTextOutlineControl />
 					<ClawCornerRadiusControl />
 					<ClawAnchorControls />
@@ -718,6 +735,7 @@ function CustomStylePanel(props) {
 			<div className="tlui-style-panel__section">
 				<TL.StylePanelFontPicker />
 				{fontRelevant && <ClawFontControls />}
+				<ClawInsertCharControl />
 				<ClawTextOutlineControl />
 				<TL.StylePanelTextAlignPicker />
 				<TL.StylePanelLabelAlignPicker />
@@ -1183,6 +1201,53 @@ function ensureStaticCss() {
 	text-align: center;
 	flex: 0 0 14px;
 	cursor: help;
+}
+/* Insert character: a search box over a grid of big glyphs. The dialog is
+   380px, so the grid fits nine columns of a comfortably clickable size. */
+.claw-char-search {
+	width: 100%;
+	box-sizing: border-box;
+	font-size: 13px;
+	padding: 5px 8px;
+	background: var(--tl-color-panel);
+	color: var(--tl-color-text-1);
+	border: 1px solid var(--tl-color-muted-1);
+	border-radius: 6px;
+}
+.claw-char-heading {
+	font-size: 11px;
+	color: var(--tl-color-text-3);
+	padding: 8px 2px 4px;
+}
+.claw-char-grid {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 2px;
+	/* about eight rows before it scrolls, so the dialog never grows past the
+	   window on a search that matches hundreds of things */
+	max-height: 320px;
+	overflow-y: auto;
+}
+.claw-char {
+	width: 38px;
+	height: 38px;
+	flex: 0 0 38px;
+	/* the emoji font has no say in the box; only in what it draws inside it */
+	font-size: 20px;
+	line-height: 1;
+	padding: 0;
+	cursor: pointer;
+	background: transparent;
+	color: var(--tl-color-text-1);
+	border: 1px solid transparent;
+	border-radius: 6px;
+}
+.claw-char:hover { background: var(--tl-color-muted-2); }
+.claw-char:focus-visible { border-color: var(--tl-color-selected); outline: none; }
+.claw-char-said {
+	font-size: 11px;
+	color: var(--tl-color-text-3);
+	padding: 0 4px;
 }
 /* the Fixed Text switch */
 .claw-anchor-switch {
@@ -1844,6 +1909,96 @@ function ClawMainMenu() {
 
 const APP_COMPONENTS = { StylePanel: CustomStylePanel, MainMenu: ClawMainMenu }
 
+/**
+ * Expand `:tada:` into its emoji as it is typed.
+ *
+ * Renders nothing. It exists to hold a listener on whichever text editor is
+ * currently open, which tldraw creates and destroys as shapes are edited, and
+ * which is reachable only from inside the editor's own React context.
+ *
+ * The character table is asked for as soon as any text is edited rather than
+ * when the first colon appears, so it has arrived by the time a code is
+ * finished. Until it has, a shortcode is simply left as the text it is.
+ */
+/**
+ * Claw's own entries in tldraw's action list, which is what gives them a
+ * keyboard shortcut and a line in the shortcuts dialog.
+ *
+ * Insert character earns one because the moment you want it is mid-sentence,
+ * and reaching for the style panel then means leaving the text you are typing.
+ * ctrl+shift+E is free in tldraw's own bindings.
+ */
+const INSERT_CHAR_KBD = 'cmd+shift+e,ctrl+shift+e'
+const CLAW_OVERRIDES = {
+	actions(editor, actions, helpers) {
+		actions['claw-insert-char'] = {
+			id: 'claw-insert-char',
+			label: 'Insert character',
+			kbd: INSERT_CHAR_KBD,
+			onSelect() {
+				helpers.addDialog({ component: CLAW_INSERT_CHAR_DIALOG })
+			},
+		}
+		return actions
+	},
+}
+
+/**
+ * The same shortcut again, for the one case tldraw's action list cannot serve.
+ *
+ * tldraw switches every keyboard shortcut off while a shape is being edited
+ * (areShortcutsDisabled), so that typing a letter types it rather than picking
+ * a tool. That is right for the rest of them and wrong for this one: needing a
+ * character is something that happens mid-word. So the key is also watched
+ * directly, and only while editing, which is precisely when the action above
+ * has stood down. Outside editing this does nothing and the action handles it,
+ * so the dialog never opens twice.
+ *
+ * Renders nothing; it exists to hold the listener inside the editor's context.
+ */
+function ClawInsertCharShortcut() {
+	const editor = TL.useEditor()
+	const dialogs = typeof TL.useDialogs === 'function' ? TL.useDialogs() : null
+	React.useEffect(() => {
+		if (!dialogs) return
+		const onKey = (e) => {
+			if (e.altKey || !e.shiftKey || !(e.ctrlKey || e.metaKey)) return
+			if ((e.key ?? '').toLowerCase() !== 'e') return
+			if (editor.getEditingShapeId() === null) return
+			e.preventDefault()
+			e.stopPropagation()
+			dialogs.addDialog({ component: CLAW_INSERT_CHAR_DIALOG })
+		}
+		// capture: the text editor is focused and would otherwise see it first
+		window.addEventListener('keydown', onKey, true)
+		return () => window.removeEventListener('keydown', onKey, true)
+	}, [editor, dialogs])
+	return null
+}
+
+function ClawShortcodeWatcher() {
+	const editor = TL.useEditor()
+	const useVal = typeof TL.useValue === 'function' ? TL.useValue : (_n, fn) => fn()
+	const rt = useVal('rich text editor', () => editor.getRichTextEditor?.() ?? null, [editor])
+	React.useEffect(() => {
+		if (!rt) return
+		let table = null
+		let live = true
+		loadChars().then((t) => {
+			if (live) table = t
+		})
+		const onUpdate = () => {
+			if (table) expandShortcodeAtCaret(rt, table)
+		}
+		rt.on('update', onUpdate)
+		return () => {
+			live = false
+			rt.off('update', onUpdate)
+		}
+	}, [rt])
+	return null
+}
+
 function StandaloneApp() {
 	return (
 		<div style={{ position: 'fixed', inset: 0 }}>
@@ -1853,7 +2008,11 @@ function StandaloneApp() {
 				themes={CLAW_THEMES}
 				shapeUtils={CLAW_SHAPE_UTILS}
 				overlayUtils={CLAW_OVERLAY_UTILS}
-			/>
+				overrides={CLAW_OVERRIDES}
+			>
+				<ClawShortcodeWatcher />
+				<ClawInsertCharShortcut />
+			</Tldraw>
 		</div>
 	)
 }
@@ -1910,7 +2069,11 @@ function SyncApp() {
 				themes={CLAW_THEMES}
 				shapeUtils={CLAW_SHAPE_UTILS}
 				overlayUtils={CLAW_OVERLAY_UTILS}
-			/>
+				overrides={CLAW_OVERRIDES}
+			>
+				<ClawShortcodeWatcher />
+				<ClawInsertCharShortcut />
+			</Tldraw>
 		</div>
 	)
 }

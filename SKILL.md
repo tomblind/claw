@@ -177,6 +177,14 @@ rework:
   like any other shape; and a theme colour slot can hold a linear or radial
   **gradient**, which paints fills, outlines and text alike. `claw ops` has
   the exact syntax for each.
+- **Emoji and Unicode symbols are ordinary text.** Put them straight into any
+  `text` (they render in colour on the canvas, survive `render`, and come
+  through `export` as real SVG text). The user has a picker for finding them:
+  **Insert character…** in the style panel searches Unicode's own names and
+  the emoji `:shortcodes:`, takes a code point such as `U+2316` for anything
+  it does not carry, and drops the character at the caret. Typing `:tada:` in
+  a text shape expands as they go. Names and shortcodes come from
+  `cli/page/data/chars.json`, rebuilt by `node scripts/build-chars.mjs`.
 - **Overlap is z-order, not luck.** Shapes stack in creation order, so a
   badge added before its card hides behind it. Fix it with `order`
   (`to: front | back | forward | backward`, or `to: above|below` with a

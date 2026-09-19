@@ -24,6 +24,10 @@ const here = dirname(fileURLToPath(import.meta.url))
 const LOCKFILE = join(homedir(), '.claw-daemon.json')
 const LOGFILE = join(here, '..', 'daemon.log')
 const PAGE_HTML = join(here, '..', 'page', 'dist', 'index.html')
+// Character names for the insert-character picker. Served rather than built
+// into the page: it is 226KB the editor only needs if someone opens the
+// picker, and the page is one self-contained file that everything else loads.
+const CHARS_JSON = join(here, '..', 'page', 'data', 'chars.json')
 const SHELL_HTML = join(here, 'shell.html')
 const FOREGROUND = process.argv.includes('--foreground')
 const BODY_LIMIT = 128 * 1024 * 1024
@@ -556,6 +560,22 @@ const server = createServer(async (req, res) => {
 				'cache-control': 'no-store',
 			})
 			res.end(readFileSync(PAGE_HTML, 'utf8'))
+			return
+		}
+		if (key === 'GET /chars.json') {
+			try {
+				const body = readFileSync(CHARS_JSON)
+				res.writeHead(200, {
+					'content-type': 'application/json; charset=utf-8',
+					// the file changes only when Unicode does, so let the webview
+					// keep it rather than re-reading 226KB on every page load
+					'cache-control': 'public, max-age=86400',
+				})
+				res.end(body)
+			} catch {
+				res.writeHead(404, { 'content-type': 'application/json' })
+				res.end('{"chars":[]}')
+			}
 			return
 		}
 		if (key === 'GET /manifest.webmanifest') {

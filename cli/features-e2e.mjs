@@ -1854,6 +1854,188 @@ const browser = await chromium.launch({ executablePath: findBrowser(), headless:
 		JSON.stringify(otherTypes.Nt)
 	)
 
+	// Insert character. The page loads off disk here, where a fetch cannot reach
+	// the core that serves the table, so the table is handed over directly - the
+	// same door an embedder serving the page itself would use.
+	const charTable = JSON.parse(readFileSync(join(here, 'page', 'data', 'chars.json'), 'utf8'))
+	const tableRows = await page.evaluate((d) => window.host.setChars(d), charTable)
+	check('chars: the character table loads', tableRows > 4000, `${tableRows} rows`)
+	await page.evaluate(async () => {
+		const ed = window.__editor
+		await window.host.applyOps([
+			{ add_screen: { name: 'Chars', at: { x: 1800, y: 1400 }, size: { w: 360, h: 260 } } },
+			{ add: { screen: 'Chars', kind: 'label', at: { x: 20, y: 20 }, text: 'Hello', name: 'Cl' } },
+			{ add: { screen: 'Chars', kind: 'button', text: 'Go', at: { x: 20, y: 90 }, size: { w: 120, h: 40 }, name: 'Cb' } },
+			{ add: { screen: 'Chars', kind: 'label', at: { x: 20, y: 160 }, text: 'x', name: 'Ct' } },
+		])
+		ed.setCamera({ x: -1600, y: -1200, z: 1 }, { immediate: true })
+		ed.select(ed.getCurrentPageShapes().find((s) => s.meta?.clawName === 'Cl').id)
+		return null
+	})
+	await page.waitForTimeout(400)
+	// the shortcut, not the button: the moment you want a character is
+	// mid-sentence, where reaching for the style panel means leaving the text
+	await page.keyboard.press('Control+Shift+E')
+	await page.waitForTimeout(400)
+	check(
+		'chars: the keyboard shortcut opens the picker',
+		(await page.$('[data-testid="claw-char-search"]')) !== null
+	)
+	const searchChars = async (q) => {
+		await page.fill('[data-testid="claw-char-search"]', q)
+		await page.waitForTimeout(200)
+		return page.evaluate(() =>
+			Array.from(document.querySelectorAll('.claw-char')).map((b) => b.dataset.char)
+		)
+	}
+	const byName = await searchChars('party popper')
+	const byCode = await searchChars('tada')
+	check(
+		'chars: a character is found by its name and by its shortcode',
+		byName[0] === '\u{1F389}' && byCode[0] === '\u{1F389}',
+		JSON.stringify({ byName: byName.slice(0, 3), byCode: byCode.slice(0, 3) })
+	)
+	// The ranking is the whole feature. A generic word has to bring back the
+	// plain glyph, not whichever emoji happens to have the shortest name: before
+	// whole-word matching, "arrow" led with a bow and arrow and three keycaps.
+	const arrows = await searchChars('arrow')
+	check(
+		'chars: a generic word brings back the plain glyphs first',
+		['\u2190', '\u2191', '\u2192', '\u2193'].every((c) => arrows.slice(0, 8).includes(c)),
+		arrows.slice(0, 8).join(' ')
+	)
+	// U+2E2E is outside the blocks the table carries, so this is the escape
+	// hatch for every character the picker has never heard of, not a lookup
+	const byPoint = await searchChars('U+2E2E')
+	const nothing = await searchChars('zzzznotathing')
+	check(
+		'chars: a code point outside the table still resolves',
+		byPoint[0] === '\u2E2E',
+		JSON.stringify(byPoint.slice(0, 2))
+	)
+	check('chars: a query that matches nothing returns nothing', nothing.length === 0, `${nothing.length}`)
+
+	// where a clicked character lands, in each of the cases it distinguishes
+	await page.evaluate(() => {
+		const ed = window.__editor
+		const s = ed.getCurrentPageShapes().find((x) => x.meta?.clawName === 'Cl')
+		ed.select(s.id)
+		ed.setEditingShape(s.id)
+		return null
+	})
+	await page.waitForTimeout(600)
+	await searchChars('tada')
+	await page.click('[data-char="\u{1F389}"]')
+	await page.waitForTimeout(400)
+	const atCaret = await page.evaluate(() => {
+		const ed = window.__editor
+		const rt = ed.getRichTextEditor()
+		const text = rt ? rt.getText() : null
+		ed.setEditingShape(null)
+		return text
+	})
+	check(
+		'chars: clicking inserts into the text being edited',
+		atCaret === 'Hello\u{1F389}',
+		JSON.stringify(atCaret)
+	)
+	// a chip's text lives on a separate label shape, the same redirect set_text
+	// makes, so a selected button has to take the character on its label
+	await page.evaluate(() => {
+		const ed = window.__editor
+		ed.select(ed.getCurrentPageShapes().find((x) => x.meta?.clawName === 'Cb').id)
+		return null
+	})
+	await page.waitForTimeout(300)
+	await searchChars('rocket')
+	await page.click('[data-char="\u{1F680}"]')
+	await page.waitForTimeout(400)
+	const onChip = await page.evaluate(() => {
+		const ed = window.__editor
+		const b = ed.getCurrentPageShapes().find((x) => x.meta?.clawName === 'Cb')
+		const label = ed
+			.getSortedChildIdsForParent(b.id)
+			.map((i) => ed.getShape(i))
+			.find((k) => k?.type === 'text')
+		if (!label) return null
+		return label.props.richText.content[0].content.map((n) => n.text).join('')
+	})
+	check(
+		'chars: with a button selected the character goes on its label',
+		onChip === 'Go\u{1F680}',
+		JSON.stringify(onChip)
+	)
+	// reopening shows what was just used, so those two are the first rows
+	await page.keyboard.press('Escape')
+	await page.waitForTimeout(300)
+	await page.click('[data-testid="claw-insert-char"]')
+	await page.waitForTimeout(400)
+	const recent = await page.evaluate(() =>
+		Array.from(document.querySelectorAll('.claw-char')).map((b) => b.dataset.char)
+	)
+	check(
+		'chars: the picker reopens showing what was last used',
+		recent[0] === '\u{1F680}' && recent[1] === '\u{1F389}',
+		recent.slice(0, 4).join(' ')
+	)
+	await page.keyboard.press('Escape')
+	await page.waitForTimeout(300)
+
+	// :shortcode: while typing, and the ordinary text it must leave alone
+	await page.evaluate(() => {
+		const ed = window.__editor
+		const s = ed.getCurrentPageShapes().find((x) => x.meta?.clawName === 'Ct')
+		ed.select(s.id)
+		ed.setEditingShape(s.id)
+		return null
+	})
+	await page.waitForTimeout(700)
+	const typeInto = async (text) => {
+		await page.evaluate(() => {
+			const rt = window.__editor.getRichTextEditor()
+			rt.commands.clearContent()
+			rt.commands.focus()
+			return null
+		})
+		await page.keyboard.type(text, { delay: 12 })
+		await page.waitForTimeout(300)
+		return page.evaluate(() => window.__editor.getRichTextEditor().getText())
+	}
+	const expanded = await typeInto('Party :tada: time')
+	const plusOne = await typeInto(':+1:')
+	const clockTime = await typeInto('meet at 10:30: sharp')
+	const unknownCode = await typeInto('a :notarealcode: b')
+	// tldraw switches every shortcut off while a shape is being edited, which is
+	// the one moment this one is most wanted, so claw watches the key itself
+	// then. Opening the picker mid-word is the whole reason it has a shortcut.
+	await page.keyboard.press('Control+Shift+E')
+	await page.waitForTimeout(500)
+	const openedWhileEditing = {
+		dialog: (await page.$('[data-testid="claw-char-search"]')) !== null,
+		stillEditing: await page.evaluate(() => window.__editor.getEditingShapeId() !== null),
+	}
+	await page.keyboard.press('Escape')
+	await page.waitForTimeout(300)
+	await page.evaluate(() => {
+		window.__editor.setEditingShape(null)
+		return null
+	})
+	check(
+		'chars: the shortcut opens the picker mid-word, without leaving the text',
+		openedWhileEditing.dialog && openedWhileEditing.stillEditing,
+		JSON.stringify(openedWhileEditing)
+	)
+	check(
+		'chars: a completed :shortcode: becomes its character as it is typed',
+		expanded === 'Party \u{1F389} time' && plusOne === '\u{1F44D}',
+		JSON.stringify({ expanded, plusOne })
+	)
+	check(
+		'chars: text that merely contains colons is left alone',
+		clockTime === 'meet at 10:30: sharp' && unknownCode === 'a :notarealcode: b',
+		JSON.stringify({ clockTime, unknownCode })
+	)
+
 	check('live editing raised no page errors', pageErrors.length === 0, pageErrors[0] ?? '')
 	await page.close()
 }

@@ -60,6 +60,20 @@ const h0 = await health(port)
 check('core is up', !!h0?.ok, `port ${port}, v${h0?.version}`)
 const base = `http://127.0.0.1:${port}`
 
+// The insert-character table is served rather than built into the page, so the
+// core is the only thing that can prove the picker will find it. A core left
+// running from before this route existed fails here, which is the right answer:
+// it has to be restarted for the picker to work at all.
+{
+	const res = await fetch(`${base}/chars.json`, { signal: AbortSignal.timeout(5000) }).catch(() => null)
+	const body = res?.ok ? await res.json().catch(() => null) : null
+	check(
+		'core serves the insert-character table',
+		(body?.emoji?.length ?? 0) > 1000 && (body?.symbols?.length ?? 0) > 1000,
+		res ? `http ${res.status}, ${body?.emoji?.length ?? 0} emoji, ${body?.symbols?.length ?? 0} symbols` : 'no response'
+	)
+}
+
 const { chromium } = await import('playwright-core')
 const browser = await chromium.launch({ executablePath: findBrowser(), headless: true })
 try {

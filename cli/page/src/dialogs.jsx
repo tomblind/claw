@@ -9,6 +9,15 @@ import { CUSTOM_COLOR_SLOTS, CUSTOM_FONT_SLOTS } from '../../lib/custom-slots.mj
 import { mixHex, reportError } from './common.js'
 import { clawThemePatch, colorHexOf, fontFamilyOf, fontLabelOf, useClawTheme } from './theme.js'
 import { gradientCss, gradientMidpoint, isGradientSlot } from './gradients.js'
+import {
+	codePointLabel,
+	insertChar,
+	loadChars,
+	recentChars,
+	rememberChar,
+	rowsFor,
+	searchChars,
+} from './chars.js'
 
 const FONT_CANDIDATES = [
 	'Arial', 'Arial Black', 'Bahnschrift', 'Calibri', 'Cambria', 'Candara',
@@ -715,6 +724,123 @@ export function ClawFontControls() {
 			onClick={() => dialogs.addDialog({ component: FontCustomizeDialog })}
 		>
 			<TL.TldrawUiButtonLabel>Customize fonts…</TL.TldrawUiButtonLabel>
+		</TL.TldrawUiButton>
+	)
+}
+
+/**
+ * Insert character: a search box and the characters that match it.
+ *
+ * Search, not browsing. Two things make that enough. The names are Unicode's
+ * own, so "leftwards arrow" and "party popper" are findable by what they are
+ * called; and the emoji also carry the `:shortcode:` spellings people already
+ * know, so "tada" finds the party popper. Anything the table does not carry is
+ * still reachable by typing its code point, such as `U+2316`.
+ *
+ * Clicking a character inserts it and leaves the dialog open, since wanting
+ * two arrows in a row is more common than wanting exactly one. tldraw keeps a
+ * shape in edit mode while a dialog is open, so the caret survives the trip.
+ */
+const CHAR_STARTERS = ['←', '→', '↑', '↓', '✓', '✕', '•', '–', '—', '…', '⌘', '⏎', '★', '▲', '●', '🎉']
+
+function InsertCharDialog() {
+	const editor = TL.useEditor()
+	const [table, setTable] = React.useState(null)
+	const [query, setQuery] = React.useState('')
+	const [recent, setRecent] = React.useState(() => recentChars())
+	const [said, setSaid] = React.useState('')
+	React.useEffect(() => {
+		let live = true
+		loadChars().then((t) => live && setTable(t))
+		return () => {
+			live = false
+		}
+	}, [])
+
+	const results = React.useMemo(() => {
+		if (!table) return []
+		if (query.trim()) return searchChars(table, query)
+		return rowsFor(table, recent.length ? recent : CHAR_STARTERS)
+	}, [table, query, recent])
+
+	const pick = (row) => {
+		const result = insertChar(editor, row.char)
+		setRecent(rememberChar(row.char))
+		setSaid(
+			result.where === 'caret'
+				? `${row.char} inserted`
+				: result.where === 'shape'
+					? `${row.char} added to the selected shape`
+					: result.where === 'clipboard'
+						? `${row.char} copied — nothing was selected to put it in`
+						: `could not place ${row.char}`
+		)
+	}
+
+	const heading = query.trim() ? `${results.length} found` : recent.length ? 'Recent' : 'Common'
+	return (
+		<>
+			<TL.TldrawUiDialogHeader>
+				<TL.TldrawUiDialogTitle>Insert character</TL.TldrawUiDialogTitle>
+				<TL.TldrawUiDialogCloseButton />
+			</TL.TldrawUiDialogHeader>
+			<TL.TldrawUiDialogBody style={{ minWidth: 380, maxWidth: 380 }}>
+				<input
+					className="claw-char-search"
+					type="text"
+					autoFocus
+					value={query}
+					placeholder="arrow, tada, box drawings, U+2316…"
+					data-testid="claw-char-search"
+					onChange={(e) => setQuery(e.target.value)}
+				/>
+				<div className="claw-char-heading">{table ? heading : 'Loading characters…'}</div>
+				<div className="claw-char-grid" data-testid="claw-char-grid">
+					{results.map((row) => (
+						<button
+							key={row.char}
+							className="claw-char"
+							type="button"
+							title={`${row.name}${row.codes.length ? `  :${row.codes.join(': :')}:` : ''}\n${codePointLabel(row.char)}`}
+							data-char={row.char}
+							onClick={() => pick(row)}
+						>
+							{row.char}
+						</button>
+					))}
+					{table && query.trim() && !results.length && (
+						<div className="claw-char-heading">
+							Nothing matched. Try a shorter word, or a code point like U+2316.
+						</div>
+					)}
+				</div>
+			</TL.TldrawUiDialogBody>
+			<TL.TldrawUiDialogFooter className="tlui-dialog__footer__actions">
+				<div className="claw-char-said" data-testid="claw-char-said">
+					{said}
+				</div>
+			</TL.TldrawUiDialogFooter>
+		</>
+	)
+}
+
+/**
+ * The dialog itself, for anything that opens it without the style-panel button.
+ * Exported rather than the button, because a keyboard shortcut reaches the
+ * dialog through tldraw's own action list and never renders a button at all.
+ */
+export const CLAW_INSERT_CHAR_DIALOG = InsertCharDialog
+
+export function ClawInsertCharControl() {
+	const dialogs = typeof TL.useDialogs === 'function' ? TL.useDialogs() : null
+	if (!dialogs) return null
+	return (
+		<TL.TldrawUiButton
+			type="menu"
+			data-testid="claw-insert-char"
+			onClick={() => dialogs.addDialog({ component: InsertCharDialog })}
+		>
+			<TL.TldrawUiButtonLabel>Insert character…</TL.TldrawUiButtonLabel>
 		</TL.TldrawUiButton>
 	)
 }
