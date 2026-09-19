@@ -743,12 +743,14 @@ export function ClawFontControls() {
  */
 const CHAR_STARTERS = ['←', '→', '↑', '↓', '✓', '✕', '•', '–', '—', '…', '⌘', '⏎', '★', '▲', '●', '🎉']
 
-function InsertCharDialog() {
+function InsertCharDialog({ onClose }) {
 	const editor = TL.useEditor()
 	const [table, setTable] = React.useState(null)
 	const [query, setQuery] = React.useState('')
 	const [recent, setRecent] = React.useState(() => recentChars())
 	const [said, setSaid] = React.useState('')
+	const inputRef = React.useRef(null)
+	const gridRef = React.useRef(null)
 	React.useEffect(() => {
 		let live = true
 		loadChars().then((t) => live && setTable(t))
@@ -756,6 +758,24 @@ function InsertCharDialog() {
 			live = false
 		}
 	}, [])
+
+	/**
+	 * Hand the caret back on the way out.
+	 *
+	 * Opening the picker leaves the shape in edit mode, so closing it should
+	 * leave the person exactly where they were, mid-word, able to keep typing.
+	 * This runs on every way out - Escape, the close button, a click outside -
+	 * because they all end in this component unmounting.
+	 */
+	React.useEffect(() => {
+		return () => {
+			try {
+				editor.getRichTextEditor?.()?.commands.focus()
+			} catch {
+				// no text being edited: nothing to hand back to
+			}
+		}
+	}, [editor])
 
 	const results = React.useMemo(() => {
 		if (!table) return []
@@ -777,15 +797,95 @@ function InsertCharDialog() {
 		)
 	}
 
+	/** How many characters the grid is currently fitting across. */
+	const columns = () => {
+		const grid = gridRef.current
+		if (!grid) return 1
+		const cols = getComputedStyle(grid).gridTemplateColumns.split(' ').filter(Boolean).length
+		return Math.max(1, cols)
+	}
+
+	/**
+	 * Move focus through the grid by `delta` places.
+	 *
+	 * Stepping back off the first character lands in the search box, which is
+	 * what makes the whole dialog reachable from the keyboard: type, arrow down
+	 * into the characters, arrow around, Enter, and arrow back up to retype.
+	 */
+	const moveFocus = (delta) => {
+		const grid = gridRef.current
+		if (!grid) return
+		const items = Array.from(grid.querySelectorAll('.claw-char'))
+		if (!items.length) return
+		const at = items.indexOf(document.activeElement)
+		if (at === -1) {
+			items[0].focus()
+			return
+		}
+		const next = at + delta
+		if (next < 0) {
+			inputRef.current?.focus()
+			return
+		}
+		const target = items[Math.min(next, items.length - 1)]
+		target.focus()
+		target.scrollIntoView({ block: 'nearest' })
+	}
+
+	/**
+	 * Escape closes the picker and nothing else.
+	 *
+	 * Left alone the key also reaches tldraw, which reads it as "stop editing
+	 * this shape" and throws away the caret the picker was opened to serve.
+	 * Stopping it from inside the dialog's own React tree is not enough: the
+	 * dialog is portalled out of the container React listens on, so by the time
+	 * a handler there runs the key has already reached the document. Catching
+	 * it on the window in the capture phase is the one place that is reliably
+	 * before everything else.
+	 */
+	const closeRef = React.useRef(onClose)
+	closeRef.current = onClose
+	React.useEffect(() => {
+		const onEscape = (e) => {
+			if (e.key !== 'Escape' || e.defaultPrevented) return
+			e.preventDefault()
+			e.stopPropagation()
+			e.stopImmediatePropagation?.()
+			closeRef.current()
+		}
+		window.addEventListener('keydown', onEscape, true)
+		return () => window.removeEventListener('keydown', onEscape, true)
+	}, [])
+
+	/**
+	 * Arrow keys walk the grid, which Tab alone only walks one at a time.
+	 */
+	const onKeyDown = (e) => {
+		const inGrid = gridRef.current?.contains(document.activeElement)
+		const step =
+			e.key === 'ArrowRight' ? 1
+			: e.key === 'ArrowLeft' ? -1
+			: e.key === 'ArrowDown' ? columns()
+			: e.key === 'ArrowUp' ? -columns()
+			: 0
+		// from the search box only Down reaches in; Left and Right still move
+		// the text caret, which is what they are for while typing
+		if (!step || (!inGrid && e.key !== 'ArrowDown')) return
+		e.preventDefault()
+		e.stopPropagation()
+		moveFocus(inGrid ? step : 0)
+	}
+
 	const heading = query.trim() ? `${results.length} found` : recent.length ? 'Recent' : 'Common'
 	return (
-		<>
+		<div onKeyDown={onKeyDown}>
 			<TL.TldrawUiDialogHeader>
 				<TL.TldrawUiDialogTitle>Insert character</TL.TldrawUiDialogTitle>
 				<TL.TldrawUiDialogCloseButton />
 			</TL.TldrawUiDialogHeader>
 			<TL.TldrawUiDialogBody style={{ minWidth: 380, maxWidth: 380 }}>
 				<input
+					ref={inputRef}
 					className="claw-char-search"
 					type="text"
 					autoFocus
@@ -795,7 +895,9 @@ function InsertCharDialog() {
 					onChange={(e) => setQuery(e.target.value)}
 				/>
 				<div className="claw-char-heading">{table ? heading : 'Loading characters…'}</div>
-				<div className="claw-char-grid" data-testid="claw-char-grid">
+				{/* fixed height, not max-height: the dialog must not jump about as
+				    results come and go while someone is still typing the query */}
+				<div className="claw-char-grid" ref={gridRef} data-testid="claw-char-grid">
 					{results.map((row) => (
 						<button
 							key={row.char}
@@ -809,7 +911,7 @@ function InsertCharDialog() {
 						</button>
 					))}
 					{table && query.trim() && !results.length && (
-						<div className="claw-char-heading">
+						<div className="claw-char-empty">
 							Nothing matched. Try a shorter word, or a code point like U+2316.
 						</div>
 					)}
@@ -820,7 +922,7 @@ function InsertCharDialog() {
 					{said}
 				</div>
 			</TL.TldrawUiDialogFooter>
-		</>
+		</div>
 	)
 }
 

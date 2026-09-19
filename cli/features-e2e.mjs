@@ -1904,6 +1904,62 @@ const browser = await chromium.launch({ executablePath: findBrowser(), headless:
 		['\u2190', '\u2191', '\u2192', '\u2193'].every((c) => arrows.slice(0, 8).includes(c)),
 		arrows.slice(0, 8).join(' ')
 	)
+	// Half-remembered names have to work: nobody calls U+2190 "leftwards".
+	// "left" is only a prefix of it and "smile" is not even that of "smiling",
+	// so this needs the loose and the stem tiers, not just whole words.
+	const fuzzy = {}
+	for (const q of ['left arrow', 'smile face', 'magnify glass', 'thumb up']) {
+		fuzzy[q] = (await searchChars(q)).slice(0, 6)
+	}
+	check(
+		'chars: a half-remembered name still finds the character',
+		fuzzy['left arrow'].includes('\u2190') &&
+			fuzzy['smile face'].includes('\u263A') &&
+			fuzzy['magnify glass'].includes('\u{1F50D}') &&
+			fuzzy['thumb up'].includes('\u{1F44D}'),
+		JSON.stringify(fuzzy)
+	)
+	// The dialog must not resize as results come and go: it jumps under the
+	// pointer while the query is still being typed, which is horrible to use.
+	const dialogSize = async (q) => {
+		await page.fill('[data-testid="claw-char-search"]', q)
+		await page.waitForTimeout(200)
+		return page.evaluate(() => {
+			const b = document.querySelector('.tlui-dialog__body').parentElement.getBoundingClientRect()
+			return `${Math.round(b.width)}x${Math.round(b.height)}`
+		})
+	}
+	const sizes = []
+	for (const q of ['', 'a', 'arrow', 'zzzznotathing', 'left arrow']) sizes.push(await dialogSize(q))
+	check(
+		'chars: the dialog is the same size whatever the search returns',
+		new Set(sizes).size === 1,
+		sizes.join(' ')
+	)
+	// Tab reaches the grid; from there the arrows have to walk it, since Tab
+	// alone steps one character at a time through hundreds of them.
+	await page.fill('[data-testid="claw-char-search"]', 'left arrow')
+	await page.waitForTimeout(250)
+	await page.focus('[data-testid="claw-char-search"]')
+	const walk = []
+	for (const key of ['ArrowDown', 'ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp', 'ArrowUp']) {
+		await page.keyboard.press(key)
+		await page.waitForTimeout(120)
+		walk.push(
+			await page.evaluate(
+				() => document.activeElement?.dataset?.char ?? document.activeElement?.dataset?.testid ?? '?'
+			)
+		)
+	}
+	check(
+		'chars: the arrow keys walk the grid and step back out to the search box',
+		walk.slice(0, 5).every((c) => c && c !== '?') &&
+			new Set(walk.slice(0, 4)).size === 4 &&
+			walk[4] === walk[0] &&
+			walk[5] === 'claw-char-search',
+		walk.join(' ')
+	)
+
 	// U+2E2E is outside the blocks the table carries, so this is the escape
 	// hatch for every character the picker has never heard of, not a lookup
 	const byPoint = await searchChars('U+2E2E')
@@ -2014,8 +2070,20 @@ const browser = await chromium.launch({ executablePath: findBrowser(), headless:
 		dialog: (await page.$('[data-testid="claw-char-search"]')) !== null,
 		stillEditing: await page.evaluate(() => window.__editor.getEditingShapeId() !== null),
 	}
+	// Escape has to mean "close the picker", not "stop editing this shape".
+	// tldraw reads it as the second, and the dialog is portalled out of the
+	// container React listens on, so the key is caught on the window instead.
 	await page.keyboard.press('Escape')
+	await page.waitForTimeout(400)
+	const afterEscape = await page.evaluate(() => ({
+		dialog: !!document.querySelector('[data-testid="claw-char-search"]'),
+		editing: window.__editor.getEditingShapeId() !== null,
+	}))
+	await page.keyboard.type(' on', { delay: 20 })
 	await page.waitForTimeout(300)
+	const resumed = await page.evaluate(
+		() => window.__editor.getRichTextEditor()?.getText() ?? '(no editor)'
+	)
 	await page.evaluate(() => {
 		window.__editor.setEditingShape(null)
 		return null
@@ -2024,6 +2092,16 @@ const browser = await chromium.launch({ executablePath: findBrowser(), headless:
 		'chars: the shortcut opens the picker mid-word, without leaving the text',
 		openedWhileEditing.dialog && openedWhileEditing.stillEditing,
 		JSON.stringify(openedWhileEditing)
+	)
+	check(
+		'chars: escape closes the picker and leaves the text being edited',
+		afterEscape.dialog === false && afterEscape.editing === true,
+		JSON.stringify(afterEscape)
+	)
+	check(
+		'chars: typing carries on where it left off once the picker is closed',
+		resumed === 'a :notarealcode: b on',
+		JSON.stringify(resumed)
 	)
 	check(
 		'chars: a completed :shortcode: becomes its character as it is typed',

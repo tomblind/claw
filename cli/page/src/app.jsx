@@ -1220,13 +1220,22 @@ function ensureStaticCss() {
 	padding: 8px 2px 4px;
 }
 .claw-char-grid {
-	display: flex;
-	flex-wrap: wrap;
+	display: grid;
+	/* auto-fill, so the column count is whatever fits and can be read back for
+	   arrow-key navigation rather than guessed at */
+	grid-template-columns: repeat(auto-fill, minmax(38px, 1fr));
+	align-content: start;
 	gap: 2px;
-	/* about eight rows before it scrolls, so the dialog never grows past the
-	   window on a search that matches hundreds of things */
-	max-height: 320px;
+	/* a FIXED height, not a maximum: the dialog must not resize under the
+	   pointer as results come and go while the query is still being typed */
+	height: 320px;
 	overflow-y: auto;
+}
+.claw-char-empty {
+	grid-column: 1 / -1;
+	font-size: 11px;
+	color: var(--tl-color-text-3);
+	padding: 8px 2px;
 }
 .claw-char {
 	width: 38px;

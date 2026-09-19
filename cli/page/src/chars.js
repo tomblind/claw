@@ -97,62 +97,114 @@ export function literalChar(query) {
 }
 
 /**
- * Does `q` appear in `text` as a whole word, with `sep` between words?
+ * Query matching, in tiers.
  *
- * This is the distinction that decides whether the picker is any use. Someone
- * typing "arrow" means the word, so "leftwards arrow" has to beat "arrow
- * pointing rightwards then curving upwards", which merely starts with those
- * letters. Ranking by where the match falls, rather than by whether the name
- * begins with it, is what puts the plain arrows first.
+ * Two things have to be true at once. A generic word has to bring back the
+ * plain glyph, so "arrow" finds "leftwards arrow" ahead of "arrowhead". And a
+ * half-remembered name has to work, so "left arrow" finds "leftwards arrow"
+ * even though those two words never appear in it in that form.
+ *
+ * Both fall out of asking, in order: are the query's words there exactly, in
+ * this order, side by side; then the same but allowing each to be the start of
+ * a longer word; then are they all there in any order; then anywhere at all.
+ * "left arrow" reaches "leftwards arrow" on the second question and "left
+ * right arrow" only on the third, which is the right way round.
+ *
+ * Unicode names hyphenate ("left-pointing magnifying glass") and shortcodes
+ * use underscores, so what counts as a gap between words is passed in.
  */
-function hasWord(text, q, sep) {
-	if (text === q) return true
-	if (text.startsWith(q + sep)) return true
-	if (text.endsWith(sep + q)) return true
-	return text.includes(sep + q + sep)
+const RX_ESCAPE = /[.*+?^${}()|[\]\\]/g
+const esc = (s) => s.replace(RX_ESCAPE, '\\$&')
+
+/** Compiled once per query, then run against every row. */
+function queryMatcher(q, words, sep) {
+	const gap = `[${sep}]`
+	const notGap = `[^${sep}]`
+	const phrase = words.map(esc).join(`${gap}+`)
+	const loose = words.map((w) => `${esc(w)}${notGap}*`).join(`${gap}+`)
+	return {
+		exact: new RegExp(`(^|${gap})${phrase}($|${gap})`),
+		prefix: new RegExp(`(^|${gap})${loose}`),
+		// every word somewhere, in any order: "arrow left" as well as "left arrow"
+		anyOrder: words.map((w) => new RegExp(`(^|${gap})${esc(w)}`)),
+		// every word's stem somewhere, which is how "smile face" reaches
+		// "smiling face": the two share "smil" and diverge after it, so no
+		// amount of prefix matching connects them. Two characters is all that
+		// is given up, and never below three, so short words stay exact.
+		stems: words.map((w) => new RegExp(`(^|${gap})${esc(w.slice(0, Math.max(3, w.length - 2)))}`)),
+		words,
+		q,
+	}
+}
+
+function tierScore(text, m) {
+	if (!text) return 0
+	if (text === m.q) return 100
+	if (m.exact.test(text)) return 80
+	if (m.prefix.test(text)) return 70
+	if (m.anyOrder.every((rx) => rx.test(text))) return 60
+	if (m.stems.every((rx) => rx.test(text))) return 50
+	if (m.words.every((w) => text.includes(w))) return 40
+	return text.includes(m.q) ? 30 : 0
 }
 
 /** How well one row answers a query; higher is better, 0 means it does not. */
-function score(row, q) {
-	const name = row.name
-	if (name === q) return 100
-	let best = 0
+function score(row, nameMatch, codeMatch) {
+	const byName = tierScore(row.name, nameMatch)
+	let byCode = 0
 	for (const code of row.codes) {
-		if (code === q) return 95
-		// shortcodes join their words with underscores, not spaces
-		if (hasWord(code, q, '_')) best = Math.max(best, 75)
-		else if (code.startsWith(q)) best = Math.max(best, 55)
-		else if (code.includes(q)) best = Math.max(best, 25)
+		if (code === codeMatch.q) return 95
+		// a shortcode is a weaker signal than the real name, since it is a
+		// nickname: "heavy_check_mark" should not outrank the character named
+		// "check mark"
+		byCode = Math.max(byCode, Math.round(tierScore(code, codeMatch) * 0.9))
 	}
-	if (hasWord(name, q, ' ')) best = Math.max(best, 80)
-	else if (name.startsWith(q) || name.includes(` ${q}`)) best = Math.max(best, 60)
-	else if (name.includes(q)) best = Math.max(best, 30)
-	return best
+	return Math.max(byName, byCode)
 }
 
 /**
  * Characters matching a query, best first.
  *
- * Two tie-breaks under the score, in order. A symbol beats an emoji, because a
- * generic word in a diagramming tool usually means the typographic glyph:
- * someone typing "arrow" wants an arrow before they want 🔚 "end arrow", whose
- * only advantage is a shorter name. Then the shorter name wins, which is
- * reliably the more ordinary character within a family: "leftwards arrow"
- * ahead of "leftwards arrow with double vertical stroke".
+ * Four questions, in order, because no single number gets all of these right.
+ *
+ * Is it named exactly that? "left arrow" is the name of ⬅️, so nothing should
+ * come before it.
+ *
+ * Is it a symbol? A generic word in a diagramming tool usually means the
+ * typographic glyph, so "arrow" answers ← before 🏹 "bow and arrow", whose
+ * only advantage is a shorter name.
+ *
+ * Then match quality against name length together, as one number. Separately
+ * they each get a case wrong: on quality alone "left arrow with small circle"
+ * beats "leftwards arrow", because it contains the words exactly rather than
+ * as a prefix, and on length alone a loose match on a short name beats a good
+ * one. Subtracting the length from the tier settles both, and is why ← comes
+ * back for "left arrow" at all.
+ *
+ * Then the shorter name, for two characters that are otherwise equal.
  */
 export function searchChars(table, query, { limit = 300 } = {}) {
-	const q = String(query ?? '').trim().toLowerCase()
+	const q = String(query ?? '').trim().toLowerCase().replace(/\s+/g, ' ')
 	const rows = table?.chars ?? []
 	if (!q) return []
+	const words = q.split(' ').filter(Boolean)
+	if (!words.length) return []
+	// names break on spaces and hyphens ("left-pointing magnifying glass"),
+	// shortcodes on underscores ("arrow_upper_left")
+	const nameMatch = queryMatcher(q, words, '\\s\\-')
+	const codeMatch = queryMatcher(q.replace(/ /g, '_'), words, '_\\-')
 	const hits = []
 	for (const row of rows) {
-		const s = score(row, q)
+		const s = score(row, nameMatch, codeMatch)
 		if (s > 0) hits.push({ row, s })
 	}
+	const named = (h) => (h.s >= 95 ? 1 : 0)
+	const worth = (h) => h.s - h.row.name.length
 	hits.sort(
 		(a, b) =>
-			b.s - a.s ||
+			named(b) - named(a) ||
 			(a.row.isEmoji ? 1 : 0) - (b.row.isEmoji ? 1 : 0) ||
+			worth(b) - worth(a) ||
 			a.row.name.length - b.row.name.length
 	)
 	const out = hits.slice(0, limit).map((h) => h.row)
