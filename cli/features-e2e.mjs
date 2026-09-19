@@ -2061,6 +2061,16 @@ const browser = await chromium.launch({ executablePath: findBrowser(), headless:
 	const plusOne = await typeInto(':+1:')
 	const clockTime = await typeInto('meet at 10:30: sharp')
 	const unknownCode = await typeInto('a :notarealcode: b')
+	// put the shape dead centre, where a centred dialog would land right on top
+	// of it, so the avoidance below is actually being asked to do something
+	await page.evaluate(() => {
+		const ed = window.__editor
+		const s = ed.getCurrentPageShapes().find((x) => x.meta?.clawName === 'Ct')
+		const b = ed.getShapePageBounds(s.id)
+		ed.centerOnPoint({ x: b.midX, y: b.midY }, { immediate: true })
+		return null
+	})
+	await page.waitForTimeout(400)
 	// tldraw switches every shortcut off while a shape is being edited, which is
 	// the one moment this one is most wanted, so claw watches the key itself
 	// then. Opening the picker mid-word is the whole reason it has a shortcut.
@@ -2070,6 +2080,28 @@ const browser = await chromium.launch({ executablePath: findBrowser(), headless:
 		dialog: (await page.$('[data-testid="claw-char-search"]')) !== null,
 		stillEditing: await page.evaluate(() => window.__editor.getEditingShapeId() !== null),
 	}
+	// tldraw centres a dialog, which puts it straight over a shape being edited
+	// in the middle of the screen - the one place the person is looking
+	const placement = await page.evaluate(() => {
+		const ed = window.__editor
+		const s = ed.getCurrentPageShapes().find((x) => x.meta?.clawName === 'Ct')
+		const bb = ed.getShapePageBounds(s.id)
+		const a = ed.pageToScreen({ x: bb.minX, y: bb.minY })
+		const b = ed.pageToScreen({ x: bb.maxX, y: bb.maxY })
+		const d = document.querySelector('.tlui-dialog__content')?.getBoundingClientRect()
+		if (!d) return null
+		return {
+			overlaps: !(b.x < d.left || a.x > d.right || b.y < d.top || a.y > d.bottom),
+			onScreen: d.left >= 0 && d.top >= 0 && d.right <= innerWidth && d.bottom <= innerHeight,
+			shape: [Math.round(a.x), Math.round(a.y), Math.round(b.x), Math.round(b.y)],
+			dialog: [Math.round(d.left), Math.round(d.top), Math.round(d.right), Math.round(d.bottom)],
+		}
+	})
+	check(
+		'chars: the picker moves clear of the text it is going to write into',
+		placement && !placement.overlaps && placement.onScreen,
+		JSON.stringify(placement)
+	)
 	// Escape has to mean "close the picker", not "stop editing this shape".
 	// tldraw reads it as the second, and the dialog is portalled out of the
 	// container React listens on, so the key is caught on the window instead.

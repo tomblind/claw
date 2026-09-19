@@ -743,6 +743,46 @@ export function ClawFontControls() {
  */
 const CHAR_STARTERS = ['←', '→', '↑', '↓', '✓', '✕', '•', '–', '—', '…', '⌘', '⏎', '★', '▲', '●', '🎉']
 
+/**
+ * Where to shift the picker so it is not sitting on top of the thing it is
+ * about to write into.
+ *
+ * tldraw centres a dialog, which lands it squarely over a shape being edited
+ * in the middle of the screen. Rather than pick a fixed corner, this tries the
+ * four places just clear of the shape and takes the first that still fits on
+ * screen: below it, above it, then to either side. A shape big enough that
+ * none of them fit leaves the dialog centred, because half off-screen is worse
+ * than overlapping.
+ *
+ * `box` and `avoid` are both in viewport coordinates. Returns pixels to move
+ * the dialog by, `{ x: 0, y: 0 }` when it is already clear.
+ */
+const DIALOG_GAP = 12
+export function dialogOffsetAvoiding(box, avoid, view) {
+	if (!box || !avoid) return { x: 0, y: 0 }
+	const clear =
+		avoid.right < box.left ||
+		avoid.left > box.right ||
+		avoid.bottom < box.top ||
+		avoid.top > box.bottom
+	if (clear) return { x: 0, y: 0 }
+	const fits = (x, y) =>
+		x >= DIALOG_GAP &&
+		y >= DIALOG_GAP &&
+		x + box.width <= view.width - DIALOG_GAP &&
+		y + box.height <= view.height - DIALOG_GAP
+	const candidates = [
+		{ x: 0, y: avoid.bottom + DIALOG_GAP - box.top },
+		{ x: 0, y: avoid.top - DIALOG_GAP - box.height - box.top },
+		{ x: avoid.right + DIALOG_GAP - box.left, y: 0 },
+		{ x: avoid.left - DIALOG_GAP - box.width - box.left, y: 0 },
+	]
+	for (const c of candidates) {
+		if (fits(box.left + c.x, box.top + c.y)) return c
+	}
+	return { x: 0, y: 0 }
+}
+
 function InsertCharDialog({ onClose }) {
 	const editor = TL.useEditor()
 	const [table, setTable] = React.useState(null)
@@ -751,6 +791,7 @@ function InsertCharDialog({ onClose }) {
 	const [said, setSaid] = React.useState('')
 	const inputRef = React.useRef(null)
 	const gridRef = React.useRef(null)
+	const rootRef = React.useRef(null)
 	React.useEffect(() => {
 		let live = true
 		loadChars().then((t) => live && setTable(t))
@@ -758,6 +799,34 @@ function InsertCharDialog({ onClose }) {
 			live = false
 		}
 	}, [])
+
+	/**
+	 * Move clear of whatever the character is going into.
+	 *
+	 * Done once, when the dialog opens. Following the shape afterwards would
+	 * mean the dialog jumping about as inserted characters grow it, and a panel
+	 * that moves while being used is worse than one slightly in the way.
+	 */
+	React.useLayoutEffect(() => {
+		const content = rootRef.current?.closest('.tlui-dialog__content')
+		if (!content) return
+		const target = editor.getEditingShapeId() ?? editor.getOnlySelectedShape()?.id ?? null
+		const bounds = target ? editor.getShapePageBounds(target) : null
+		if (!bounds) return
+		const a = editor.pageToScreen({ x: bounds.minX, y: bounds.minY })
+		const b = editor.pageToScreen({ x: bounds.maxX, y: bounds.maxY })
+		const box = content.getBoundingClientRect()
+		const move = dialogOffsetAvoiding(
+			box,
+			{ left: a.x, top: a.y, right: b.x, bottom: b.y },
+			{ width: window.innerWidth, height: window.innerHeight }
+		)
+		if (!move.x && !move.y) return
+		content.style.transform = `translate(${Math.round(move.x)}px, ${Math.round(move.y)}px)`
+		return () => {
+			content.style.transform = ''
+		}
+	}, [editor])
 
 	/**
 	 * Hand the caret back on the way out.
@@ -878,7 +947,7 @@ function InsertCharDialog({ onClose }) {
 
 	const heading = query.trim() ? `${results.length} found` : recent.length ? 'Recent' : 'Common'
 	return (
-		<div onKeyDown={onKeyDown}>
+		<div ref={rootRef} onKeyDown={onKeyDown}>
 			<TL.TldrawUiDialogHeader>
 				<TL.TldrawUiDialogTitle>Insert character</TL.TldrawUiDialogTitle>
 				<TL.TldrawUiDialogCloseButton />
