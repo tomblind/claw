@@ -1534,6 +1534,86 @@ const browser = await chromium.launch({ executablePath: findBrowser(), headless:
 		`${aspResolved.w}x${aspResolved.h}`
 	)
 
+	// The corner radius has a slider for finding a value by eye and a field for
+	// saying exactly which one. The field has to reach past the slider's own
+	// end, flip the shape onto its rounded geo type, and take the track's end
+	// with it so the thumb never sits at 60 under a number reading 120.
+	await page.evaluate(async () => {
+		const ed = window.__editor
+		await window.host.applyOps([
+			{ add_screen: { name: 'Round', at: { x: 600, y: 1400 }, size: { w: 300, h: 300 } } },
+			{ add: { screen: 'Round', kind: 'box', at: { x: 20, y: 20 }, size: { w: 200, h: 120 }, name: 'Rb' } },
+		])
+		ed.select(ed.getCurrentPageShapes().find((s) => s.meta?.clawName === 'Rb').id)
+		return null
+	})
+	await page.waitForTimeout(400)
+	await page.fill('[data-testid="claw-corner-radius-value"]', '120')
+	await page.waitForTimeout(400)
+	const typedRadius = await page.evaluate(() => {
+		const s = window.__editor.getCurrentPageShapes().find((x) => x.meta?.clawName === 'Rb')
+		const slider = document.querySelector('[data-testid="claw-corner-radius"]')
+		return { radius: s.meta?.clawRadius ?? null, geo: s.props.geo, sliderMax: slider?.max, sliderValue: slider?.value }
+	})
+	check(
+		'panel: typing a corner radius rounds the shape',
+		typedRadius.radius === 120 && String(typedRadius.geo).startsWith('rounded-'),
+		JSON.stringify(typedRadius)
+	)
+	check(
+		'panel: the slider follows a value typed past its own end',
+		typedRadius.sliderMax === '120' && typedRadius.sliderValue === '120',
+		JSON.stringify(typedRadius)
+	)
+	// out of range clamps rather than being written through, and zero puts the
+	// shape back on its square-cornered geo type
+	await page.fill('[data-testid="claw-corner-radius-value"]', '900')
+	await page.waitForTimeout(400)
+	const clamped = await page.evaluate(() => {
+		const s = window.__editor.getCurrentPageShapes().find((x) => x.meta?.clawName === 'Rb')
+		return s.meta?.clawRadius ?? null
+	})
+	await page.fill('[data-testid="claw-corner-radius-value"]', '0')
+	await page.waitForTimeout(400)
+	const zeroed = await page.evaluate(() => {
+		const s = window.__editor.getCurrentPageShapes().find((x) => x.meta?.clawName === 'Rb')
+		return { radius: s.meta?.clawRadius ?? null, geo: s.props.geo }
+	})
+	check('panel: a corner radius past the maximum is clamped', clamped === 200, String(clamped))
+	check(
+		'panel: a corner radius of zero restores the square-cornered shape',
+		zeroed.radius === 0 && !String(zeroed.geo).startsWith('rounded-'),
+		JSON.stringify(zeroed)
+	)
+	// The field is only worth having if it did not cost the slider the width
+	// that made it hard to drag in the first place, so the track gets its own
+	// row and neither row may spill out of the ~150px panel.
+	const cornerLayout = await page.evaluate(() => {
+		const row = document.querySelector('.claw-corners')
+		const track = document.querySelector('[data-testid="claw-corner-radius"]')
+		const field = document.querySelector('[data-testid="claw-corner-radius-value"]')
+		if (!row || !track || !field) return null
+		const r = row.getBoundingClientRect()
+		const t = track.getBoundingClientRect()
+		const f = field.getBoundingClientRect()
+		const pad = getComputedStyle(row)
+		const content = r.width - parseFloat(pad.paddingLeft) - parseFloat(pad.paddingRight)
+		return {
+			content: Math.round(content),
+			track: Math.round(t.width),
+			field: Math.round(f.width),
+			overflowing: Math.round(Math.max(t.right, f.right) - (r.right - parseFloat(pad.paddingRight))),
+		}
+	})
+	check(
+		'panel: the corner slider keeps a full row and nothing spills out of the panel',
+		cornerLayout &&
+			cornerLayout.track >= cornerLayout.content - 1 &&
+			cornerLayout.field >= 28 &&
+			cornerLayout.overflowing <= 1,
+		JSON.stringify(cornerLayout)
+	)
+
 	check('live editing raised no page errors', pageErrors.length === 0, pageErrors[0] ?? '')
 	await page.close()
 }

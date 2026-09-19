@@ -955,7 +955,8 @@ function ensureStaticCss() {
 /* The anchor controls live in the ~150px style panel, so the number fields
    have to give up their spinner arrows: the arrows alone are wider than the
    space a three-character value needs. */
-.claw-anchor input {
+.claw-anchor input,
+.claw-num {
 	appearance: textfield;
 	-moz-appearance: textfield;
 	min-width: 0;
@@ -972,7 +973,9 @@ function ensureStaticCss() {
 	border-radius: 4px;
 }
 .claw-anchor input::-webkit-outer-spin-button,
-.claw-anchor input::-webkit-inner-spin-button {
+.claw-anchor input::-webkit-inner-spin-button,
+.claw-num::-webkit-outer-spin-button,
+.claw-num::-webkit-inner-spin-button {
 	appearance: none;
 	margin: 0;
 }
@@ -1038,7 +1041,22 @@ function ensureStaticCss() {
 	document.head.appendChild(el)
 }
 
-/** Corner rounding for the selected boxes (px), beside the style pickers. */
+/**
+ * Corner rounding for the selected boxes (px), beside the style pickers.
+ *
+ * The slider is for finding a radius by eye and the field is for saying
+ * exactly which one. Sharing one row left the track 42px wide in a 148px
+ * panel, which is what made landing on a particular number by dragging so
+ * fiddly, and a field beside it would have taken that down to 28px. So the
+ * label and the field take the first row and the track gets the whole of the
+ * second, three times the travel it had.
+ *
+ * The field reaches the whole range the control allows, which is wider than
+ * the track's, so the track's own end follows the value: a typed 120 would
+ * otherwise leave the thumb parked at 60 under a number reading 120.
+ */
+const CORNER_SLIDER_MAX = 60
+const CORNER_RADIUS_MAX = 200
 function ClawCornerRadiusControl() {
 	const editor = TL.useEditor()
 	const useVal = typeof TL.useValue === 'function' ? TL.useValue : (_n, fn) => fn()
@@ -1055,7 +1073,7 @@ function ClawCornerRadiusControl() {
 	)
 	if (!state) return null
 	const setRadius = (value) => {
-		const radius = Math.max(0, Math.min(200, Math.round(value)))
+		const radius = Math.max(0, Math.min(CORNER_RADIUS_MAX, Math.round(value)))
 		const boxes = editor
 			.getSelectedShapes()
 			.filter((s) => s.type === 'geo' && (ROUNDED_GEO_BY_BASE[s.props.geo] || BASE_GEO_BY_ROUNDED[s.props.geo]))
@@ -1072,25 +1090,41 @@ function ClawCornerRadiusControl() {
 		)
 	}
 	return (
-		<div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 8px' }}>
-			<span style={{ fontSize: 11, color: 'var(--tl-color-text-3)', minWidth: 52 }}>Corners</span>
+		<div
+			className="claw-corners"
+			style={{ display: 'flex', flexDirection: 'column', gap: 2, padding: '2px 8px' }}
+		>
+			<div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+				<span style={{ fontSize: 11, color: 'var(--tl-color-text-3)', flex: 1, minWidth: 0 }}>
+					Corners
+				</span>
+				<ClawNumberField
+					value={state.radius}
+					step={1}
+					title="Corner Radius"
+					testId="claw-corner-radius-value"
+					placeholder="0"
+					onCommit={setRadius}
+				/>
+			</div>
 			<input
 				type="range"
 				min="0"
-				max="60"
+				max={Math.max(CORNER_SLIDER_MAX, state.radius)}
 				step="1"
 				value={state.radius}
 				data-testid="claw-corner-radius"
 				onChange={(e) => setRadius(Number(e.target.value))}
-				style={{ flex: 1, minWidth: 0 }}
+				// the browser's default 2px margin on a range input pushes a
+				// full-width track past the row it is meant to fill
+				style={{ width: '100%', minWidth: 0, margin: 0 }}
 			/>
-			<span style={{ fontSize: 11, minWidth: 22, textAlign: 'right' }}>{state.radius}</span>
 		</div>
 	)
 }
 
 /**
- * One number field in the anchor rows.
+ * One small number field: the anchor rows, and the corner radius.
  *
  * It keeps what you typed while you type it. A plain controlled number input
  * cannot: an intermediate value like "-" or "." is reported as an empty
@@ -1103,11 +1137,12 @@ function ClawCornerRadiusControl() {
  * missing number is filled in by axisSpec, and `percent` is filled in with 1.
  * The caller passes the value the resolver would actually use.
  */
-function AnchorNumber({ value, step, title, testId, placeholder, onCommit }) {
+function ClawNumberField({ value, step, title, testId, placeholder, onCommit }) {
 	const [draft, setDraft] = React.useState(null)
 	const shown = draft ?? (value ?? '')
 	return (
 		<input
+			className="claw-num"
 			type="text"
 			inputMode="decimal"
 			step={step}
@@ -1291,7 +1326,7 @@ function ClawAnchorControls() {
 	const num = (axis, field, step, title) => {
 		const a = rule?.[axis] ?? {}
 		return (
-			<AnchorNumber
+			<ClawNumberField
 				key={`${axis}-${field}`}
 				value={a[field]}
 				step={step}
