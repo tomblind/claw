@@ -1205,6 +1205,26 @@ const browser = await chromium.launch({ executablePath: findBrowser(), headless:
 	await page.waitForTimeout(250)
 	await page.selectOption('[data-testid="claw-anchor-x-mode"]', 'stretch')
 	await page.waitForTimeout(400)
+	// Switching to stretch does not write a `percent`, and a missing one means
+	// 1, not 0. The faded number in an empty field has to be the number the
+	// shape is really using, or the panel reports a size that is not happening.
+	const emptyFields = await page.evaluate(() => {
+		const read = (id) => {
+			const el = document.querySelector(`[data-testid="${id}"]`)
+			return el ? { value: el.value, placeholder: el.placeholder } : null
+		}
+		return { percent: read('claw-anchor-x-percent'), sizeOffset: read('claw-anchor-x-sizeOffset') }
+	})
+	check(
+		'panel: an empty percent shows the 1 it is treated as, not a 0',
+		emptyFields.percent?.value === '' && emptyFields.percent?.placeholder === '1',
+		JSON.stringify(emptyFields.percent)
+	)
+	check(
+		'panel: a field that really does default to zero still shows zero',
+		emptyFields.sizeOffset?.value === '' && emptyFields.sizeOffset?.placeholder === '0',
+		JSON.stringify(emptyFields.sizeOffset)
+	)
 	// keep the box inside the screen so its corner handle is somewhere the
 	// pointer can actually reach
 	await page.fill('[data-testid="claw-anchor-x-sizeOffset"]', '-80')

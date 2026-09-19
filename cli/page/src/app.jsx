@@ -21,6 +21,7 @@ import {
 } from '../../lib/custom-slots.mjs'
 import {
 	anchorParent,
+	axisSpec,
 	handSizableAxes,
 	installLiveAnchors,
 	relativeBox,
@@ -1097,8 +1098,12 @@ function ClawCornerRadiusControl() {
  * out from under you, which made a negative offset impossible to enter. The
  * draft holds the raw text, only parseable values reach the rule, and blur
  * discards anything that never became a number.
+ *
+ * `placeholder` is what an empty field means, which is not always zero: a
+ * missing number is filled in by axisSpec, and `percent` is filled in with 1.
+ * The caller passes the value the resolver would actually use.
  */
-function AnchorNumber({ value, step, title, testId, onCommit }) {
+function AnchorNumber({ value, step, title, testId, placeholder, onCommit }) {
 	const [draft, setDraft] = React.useState(null)
 	const shown = draft ?? (value ?? '')
 	return (
@@ -1108,7 +1113,7 @@ function AnchorNumber({ value, step, title, testId, onCommit }) {
 			step={step}
 			title={title}
 			value={shown}
-			placeholder="0"
+			placeholder={placeholder ?? ''}
 			data-testid={testId}
 			onChange={(e) => {
 				const raw = e.target.value
@@ -1185,6 +1190,15 @@ function ClawAnchorControls() {
 				count: shapes.length,
 				allDynamic: shapes.every((s) => ruleOf(s)),
 				rule: shapes.length === 1 ? ruleOf(shapes[0]) : null,
+				// the same normalized view the resolver reads, so an empty field
+				// can show the number the shape is really using
+				specs:
+					shapes.length === 1 && ruleOf(shapes[0])
+						? {
+								x: axisSpec(ruleOf(shapes[0]), 'x', shapes[0]),
+								y: axisSpec(ruleOf(shapes[0]), 'y', shapes[0]),
+							}
+						: null,
 				sizeIsDriven: shapes.every(sizeIsDriven),
 				// the text switch only means something for a shape that HAS text:
 				// its own, or the separate overlay label a fixed-size box carries
@@ -1265,6 +1279,15 @@ function ClawAnchorControls() {
 	const Icon = TL.TldrawUiIcon
 	const rule = state.rule
 	const rowStyle = { display: 'flex', alignItems: 'center', gap: 3, padding: '1px 0' }
+	// An empty field is not a zero. The resolver fills a missing number in with
+	// that field's default - `percent` with 1, a scaled text block's pivot with
+	// 0.5 - so the faded number has to be that default, or the panel reports a
+	// size the shape is not using. `ratio` has no default, since aspect mode
+	// with no ratio is an error rather than a shape, so it shows nothing.
+	const placeholderFor = (axis, field) => {
+		const v = state.specs?.[axis]?.[field]
+		return typeof v === 'number' ? String(Math.round(v * 100) / 100) : ''
+	}
 	const num = (axis, field, step, title) => {
 		const a = rule?.[axis] ?? {}
 		return (
@@ -1274,6 +1297,7 @@ function ClawAnchorControls() {
 				step={step}
 				title={title}
 				testId={`claw-anchor-${axis}-${field}`}
+				placeholder={placeholderFor(axis, field)}
 				onCommit={(v) => patchAxis(axis, field, v)}
 			/>
 		)
