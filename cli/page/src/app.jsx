@@ -21,6 +21,7 @@ import {
 } from '../../lib/custom-slots.mjs'
 import {
 	anchorParent,
+	handSizableAxes,
 	installLiveAnchors,
 	relativeBox,
 	presetRule,
@@ -765,13 +766,20 @@ function withClawTextOutline(Util) {
 	}
 }
 /**
- * A shape whose size is decided by an anchor rule cannot be resized by hand.
+ * Withdraw the resize handles from a shape no axis of which can be resized by
+ * hand.
  *
- * There is no single right answer to what a drag should change: on a stretch
- * axis it has to land in the size offset, which then grows oddly with the
- * parent, and on a fitted axis the cap can undo it the moment it is applied.
- * Rather than pick one and be wrong half the time, the handles are withdrawn
- * and the numbers in the panel are the way to change a size.
+ * An axis pinned to a plain pixel size (`fixed` mode) is fine to drag: the
+ * size it lands on becomes the rule. An axis whose size the rule derives from
+ * the parent is not, because there is no single right answer to what the drag
+ * should change - on a stretch axis it has to land in the size offset, which
+ * then grows oddly with the parent, and on a fitted axis the cap can undo it
+ * the moment it is applied. handSizableAxes decides which is which.
+ *
+ * Handles are all-or-nothing in tldraw, so a shape with one free axis keeps
+ * all of them; dragging the locked edge simply does not move it, which the
+ * store guard in installLiveAnchors enforces. Handles go away only when both
+ * axes are locked, and then the numbers in the panel are the way to size it.
  *
  * Moving is untouched, because a drag there has exactly one meaning: it moves
  * the position offset, and nothing else in the rule has to change.
@@ -782,7 +790,8 @@ function withClawTextOutline(Util) {
 function withAnchorLock(Util) {
 	return class extends Util {
 		canResize(shape) {
-			return shape?.meta?.clawAnchor ? false : super.canResize(shape)
+			const axes = handSizableAxes(shape)
+			return axes.x || axes.y ? super.canResize(shape) : false
 		}
 	}
 }
@@ -871,8 +880,9 @@ const CLAW_SHAPE_UTILS = [
 	withAnchorLock(withNestedFrameClipFix(TL.FrameShapeUtil.configure({ showColors: true }))),
 	// no group util here: tldraw treats "group" as a core type and refuses a
 	// replacement. A group keeps its handles, which is harmless, because
-	// resizing one scales its CHILDREN rather than the group, and any child
-	// carrying a rule has that size change refused by the store guard.
+	// resizing one scales its CHILDREN rather than the group, and a child
+	// carrying a rule has the size change on any derived axis refused by the
+	// store guard.
 ]
 
 /**

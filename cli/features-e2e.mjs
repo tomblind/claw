@@ -1120,60 +1120,135 @@ const browser = await chromium.launch({ executablePath: findBrowser(), headless:
 		JSON.stringify(on.rule?.x)
 	)
 	void before
-	// A shape whose size comes from a rule has no resize handles: a drag has no
-	// single right meaning there. Everything else must still work - the screen
-	// is still resizable (that is how rules are tested), the resolver still
-	// sizes the shape, and a hand MOVE still rebases its offset.
-	const locks = await page.evaluate(() => {
-		const ed = window.__editor
-		const can = (n) => {
-			const s = ed.getCurrentPageShapes().find((x) => x.meta?.clawName === n)
-			return ed.getShapeUtil(s).canResize(s)
-		}
-		const frame = ed.getCurrentPageShapes().find((s) => s.type === 'frame')
-		return {
-			anchored: can('Bar'),
-			screen: ed.getShapeUtil(frame).canResize(frame),
-		}
-	})
+	// Resizing an anchored shape is allowed exactly on an axis pinned to a plain
+	// pixel size, because there the size the drag lands on simply becomes the
+	// rule. An axis whose size is derived from the parent stays locked. The Pin
+	// preset above left Bar fixed on both axes, so it is fully resizable here.
+	const canResizeBar = () =>
+		page.evaluate(() => {
+			const ed = window.__editor
+			const bar = ed.getCurrentPageShapes().find((x) => x.meta?.clawName === 'Bar')
+			const frame = ed.getCurrentPageShapes().find((s) => s.type === 'frame')
+			return { anchored: ed.getShapeUtil(bar).canResize(bar), screen: ed.getShapeUtil(frame).canResize(frame) }
+		})
+	const locks = await canResizeBar()
 	check(
-		'live: an anchored shape cannot be resized by hand, its screen still can',
-		locks.anchored === false && locks.screen === true,
+		'live: a shape pinned to a fixed size on both axes keeps its resize handles',
+		locks.anchored === true && locks.screen === true,
 		JSON.stringify(locks)
 	)
-	// The gate above only withdraws the handles. Prove the size actually holds
-	// through a real corner drag, and through a multi-shape selection resize,
-	// which takes a different path and would otherwise slip past it.
-	const sizeOfBar = () =>
+	const readBar = () =>
 		page.evaluate(() => {
 			const s = window.__editor.getCurrentPageShapes().find((x) => x.meta?.clawName === 'Bar')
 			const b = window.__editor.getShapeGeometry(s.id).bounds
-			return { w: Math.round(b.w), h: Math.round(b.h) }
+			return { w: Math.round(b.w), h: Math.round(b.h), rule: s.meta?.clawAnchor ?? null }
 		})
-	const barBefore = await sizeOfBar()
-	const corner = await page.evaluate(() => {
+	/** Drag Bar's bottom-right corner handle by (dx, dy) screen pixels. */
+	const dragBarCorner = async (dx, dy) => {
+		const corner = await page.evaluate(() => {
+			const ed = window.__editor
+			const s = ed.getCurrentPageShapes().find((x) => x.meta?.clawName === 'Bar')
+			ed.select(s.id)
+			const b = ed.getShapePageBounds(s.id)
+			const p = ed.pageToScreen({ x: b.x + b.w, y: b.y + b.h })
+			return { x: p.x, y: p.y }
+		})
+		await page.waitForTimeout(250)
+		await page.mouse.move(corner.x - 2, corner.y - 2)
+		await page.waitForTimeout(120)
+		await page.mouse.move(corner.x, corner.y)
+		await page.waitForTimeout(120)
+		await page.mouse.down()
+		await page.mouse.move(corner.x + dx / 2, corner.y + dy / 2, { steps: 8 })
+		await page.mouse.move(corner.x + dx, corner.y + dy, { steps: 8 })
+		await page.mouse.up()
+		await page.waitForTimeout(400)
+	}
+	const pinnedBefore = await readBar()
+	await dragBarCorner(90, 70)
+	const pinnedAfter = await readBar()
+	check(
+		'live: dragging the corner of a fixed-size anchored shape resizes it',
+		pinnedAfter.w > pinnedBefore.w + 10 && pinnedAfter.h > pinnedBefore.h + 10,
+		`${pinnedBefore.w}x${pinnedBefore.h} -> ${pinnedAfter.w}x${pinnedAfter.h}`
+	)
+	// The drag has to land in the rule, not just in the geometry, or the next
+	// resolve would put the old size straight back.
+	check(
+		'live: the drag writes the new size into the rule, so it survives a resolve',
+		Math.abs((pinnedAfter.rule?.x?.size ?? 0) - pinnedAfter.w) <= 1 &&
+			Math.abs((pinnedAfter.rule?.y?.size ?? 0) - pinnedAfter.h) <= 1,
+		JSON.stringify({ w: pinnedAfter.w, h: pinnedAfter.h, rule: pinnedAfter.rule })
+	)
+	const stillThere = await page.evaluate(async () => {
 		const ed = window.__editor
-		const s = ed.getCurrentPageShapes().find((x) => x.meta?.clawName === 'Bar')
-		ed.select(s.id)
-		const b = ed.getShapePageBounds(s.id)
-		const p = ed.pageToScreen({ x: b.x + b.w, y: b.y + b.h })
-		return { x: p.x, y: p.y }
+		const frame = ed.getCurrentPageShapes().find((s) => s.type === 'frame')
+		ed.updateShape({ id: frame.id, type: 'frame', props: { w: frame.props.w + 40 } })
+		return null
+	})
+	void stillThere
+	await page.waitForTimeout(400)
+	const afterResolve = await readBar()
+	check(
+		'live: the hand-dragged size survives the next screen resize',
+		afterResolve.w === pinnedAfter.w && afterResolve.h === pinnedAfter.h,
+		`${pinnedAfter.w}x${pinnedAfter.h} -> ${afterResolve.w}x${afterResolve.h}`
+	)
+
+	// One axis derived from the parent, the other pinned: the drag has to move
+	// the pinned axis and leave the derived one exactly where the rule put it.
+	await page.evaluate(() => {
+		const ed = window.__editor
+		ed.select(ed.getCurrentPageShapes().find((s) => s.meta?.clawName === 'Bar').id)
+		return null
 	})
 	await page.waitForTimeout(250)
-	await page.mouse.move(corner.x - 2, corner.y - 2)
-	await page.waitForTimeout(120)
-	await page.mouse.move(corner.x, corner.y)
-	await page.waitForTimeout(120)
-	await page.mouse.down()
-	await page.mouse.move(corner.x + 40, corner.y + 40, { steps: 8 })
-	await page.mouse.move(corner.x + 90, corner.y + 70, { steps: 8 })
-	await page.mouse.up()
+	await page.selectOption('[data-testid="claw-anchor-x-mode"]', 'stretch')
 	await page.waitForTimeout(400)
-	const barAfter = await sizeOfBar()
+	// keep the box inside the screen so its corner handle is somewhere the
+	// pointer can actually reach
+	await page.fill('[data-testid="claw-anchor-x-sizeOffset"]', '-80')
+	await page.waitForTimeout(400)
+	const mixedLocks = await canResizeBar()
+	const mixedBefore = await readBar()
+	await dragBarCorner(80, 60)
+	const mixedAfter = await readBar()
 	check(
-		'live: dragging the corner of an anchored shape does not resize it',
-		barAfter.w === barBefore.w && barAfter.h === barBefore.h,
-		`${barBefore.w}x${barBefore.h} -> ${barAfter.w}x${barAfter.h}`
+		'live: a shape with one fixed axis keeps its handles',
+		mixedLocks.anchored === true,
+		JSON.stringify(mixedLocks)
+	)
+	check(
+		'live: the drag sizes the fixed axis and the stretch axis holds',
+		mixedAfter.h > mixedBefore.h + 10 && mixedAfter.w === mixedBefore.w,
+		`${mixedBefore.w}x${mixedBefore.h} -> ${mixedAfter.w}x${mixedAfter.h}`
+	)
+	check(
+		'live: the held axis keeps the number the author typed',
+		mixedAfter.rule?.x?.sizeOffset === mixedBefore.rule?.x?.sizeOffset &&
+			Math.abs((mixedAfter.rule?.y?.size ?? 0) - mixedAfter.h) <= 1,
+		JSON.stringify({ x: mixedAfter.rule?.x, y: mixedAfter.rule?.y })
+	)
+
+	// Neither axis pinned: nothing a drag could mean, so the handles go away and
+	// the store guard holds the size even if some other path tries.
+	await page.selectOption('[data-testid="claw-anchor-y-mode"]', 'stretch')
+	await page.waitForTimeout(400)
+	await page.fill('[data-testid="claw-anchor-y-sizeOffset"]', '-40')
+	await page.waitForTimeout(400)
+	const derivedLocks = await canResizeBar()
+	const derivedBefore = await readBar()
+	await dragBarCorner(90, 70)
+	const derivedAfter = await readBar()
+	check(
+		'live: a shape with no fixed axis has no resize handles',
+		derivedLocks.anchored === false && derivedLocks.screen === true,
+		JSON.stringify(derivedLocks)
+	)
+	check(
+		'live: dragging the corner of a fully derived shape does not resize it',
+		derivedAfter.w === derivedBefore.w && derivedAfter.h === derivedBefore.h,
+		`${derivedBefore.w}x${derivedBefore.h} -> ${derivedAfter.w}x${derivedAfter.h}`
 	)
 
 	// Editing a rule in the panel must not feed the RESULT back into the rule.
@@ -1340,6 +1415,105 @@ const browser = await chromium.launch({ executablePath: findBrowser(), headless:
 		jigsaw.fitEngaged && jigsaw.same && jigsaw.restored,
 		JSON.stringify(jigsaw)
 	)
+	// Two shapes whose size does NOT live in props.w / props.h on the axis being
+	// dragged. A text shape is sized by one scale factor, so its rule has to
+	// follow a drag that changes nothing but `scale`. A fixed axis paired with
+	// an aspect axis must take the drag into its own pixel size and leave the
+	// ratio alone, rather than recomputing the ratio from a box whose other
+	// axis just moved.
+	await page.evaluate(async () => {
+		const ed = window.__editor
+		await window.host.applyOps([
+			{ add_screen: { name: 'Hand', at: { x: 0, y: 1400 }, size: { w: 400, h: 400 } } },
+			{ add: { screen: 'Hand', kind: 'label', at: { x: 20, y: 20 }, text: 'Hello', name: 'Tx' } },
+			{ add: { screen: 'Hand', kind: 'box', at: { x: 20, y: 200 }, size: { w: 160, h: 80 }, name: 'Asp' } },
+			{ anchor: { id: 'Tx', preset: 'fixed' } },
+			{
+				anchor: {
+					id: 'Asp',
+					x: { mode: 'fixed', size: 160, anchor: 0, pivot: 0, offset: 20 },
+					y: { mode: 'aspect', ratio: 0.5, anchor: 0, pivot: 0, offset: 200 },
+				},
+			},
+		])
+		ed.setCamera({ x: 200, y: -1200, z: 1 }, { immediate: true })
+		ed.selectNone()
+		return null
+	})
+	await page.waitForTimeout(500)
+	const readNamed = (name) =>
+		page.evaluate((nm) => {
+			const ed = window.__editor
+			const s = ed.getCurrentPageShapes().find((x) => x.meta?.clawName === nm)
+			const b = ed.getShapeGeometry(s.id).bounds
+			return { w: Math.round(b.w), h: Math.round(b.h), rule: s.meta.clawAnchor }
+		}, name)
+	const dragNamedCorner = async (name, dx, dy) => {
+		const c = await page.evaluate((nm) => {
+			const ed = window.__editor
+			const s = ed.getCurrentPageShapes().find((x) => x.meta?.clawName === nm)
+			ed.select(s.id)
+			const b = ed.getShapePageBounds(s.id)
+			const p = ed.pageToScreen({ x: b.x + b.w, y: b.y + b.h })
+			return { x: p.x, y: p.y }
+		}, name)
+		await page.waitForTimeout(250)
+		await page.mouse.move(c.x - 2, c.y - 2)
+		await page.waitForTimeout(120)
+		await page.mouse.move(c.x, c.y)
+		await page.waitForTimeout(120)
+		await page.mouse.down()
+		await page.mouse.move(c.x + dx / 2, c.y + dy / 2, { steps: 8 })
+		await page.mouse.move(c.x + dx, c.y + dy, { steps: 8 })
+		await page.mouse.up()
+		await page.waitForTimeout(500)
+	}
+	// nudging the screen forces a resolve, which is what would undo a drag the
+	// rule did not record
+	const nudgeHandScreen = async () => {
+		await page.evaluate(() => {
+			const ed = window.__editor
+			const f = ed.getCurrentPageShapes().find((s) => s.meta?.clawName === 'Hand')
+			ed.updateShape({ id: f.id, type: 'frame', props: { w: f.props.w + 20 } })
+			return null
+		})
+		await page.waitForTimeout(500)
+	}
+	const txBefore = await readNamed('Tx')
+	await dragNamedCorner('Tx', 70, 50)
+	const txAfter = await readNamed('Tx')
+	await nudgeHandScreen()
+	const txResolved = await readNamed('Tx')
+	check(
+		'live: dragging pinned text scales it and the rule records the new box',
+		txAfter.w > txBefore.w + 10 &&
+			Math.abs((txAfter.rule?.x?.size ?? 0) - txAfter.w) <= 1 &&
+			txAfter.rule?.base?.scale > 1,
+		JSON.stringify({ before: txBefore.w, after: txAfter.w, rule: txAfter.rule })
+	)
+	check(
+		'live: the scaled text keeps its new size through the next resolve',
+		txResolved.w === txAfter.w && txResolved.h === txAfter.h,
+		`${txAfter.w}x${txAfter.h} -> ${txResolved.w}x${txResolved.h}`
+	)
+	const aspBefore = await readNamed('Asp')
+	await dragNamedCorner('Asp', 70, 50)
+	const aspAfter = await readNamed('Asp')
+	await nudgeHandScreen()
+	const aspResolved = await readNamed('Asp')
+	check(
+		'live: dragging the fixed axis of an aspect pair leaves the ratio alone',
+		aspAfter.w > aspBefore.w + 10 &&
+			Math.abs((aspAfter.rule?.x?.size ?? 0) - aspAfter.w) <= 1 &&
+			aspAfter.rule?.y?.ratio === aspBefore.rule?.y?.ratio,
+		JSON.stringify({ before: aspBefore.w, after: aspAfter.w, rule: aspAfter.rule })
+	)
+	check(
+		'live: the aspect axis then follows the new fixed size',
+		Math.abs(aspResolved.h - aspResolved.w * 0.5) <= 1,
+		`${aspResolved.w}x${aspResolved.h}`
+	)
+
 	check('live editing raised no page errors', pageErrors.length === 0, pageErrors[0] ?? '')
 	await page.close()
 }

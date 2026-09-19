@@ -258,6 +258,39 @@ export function collapseExtent(spec) {
 /** A group's size comes from its contents; a rule can only position it. */
 export const sizeIsDriven = (shape) => shape?.type !== 'group'
 
+/**
+ * Which axes of a shape a hand drag is allowed to size, as `{ x, y }`.
+ *
+ * A `fixed` axis is a plain pixel number, so a drag has exactly one meaning
+ * there: the size it lands on becomes the rule, and the next resolve agrees
+ * with it. Every other mode derives its size from the parent, and a drag has
+ * no single right answer - on a stretch axis it would have to land in
+ * `sizeOffset` and then grow oddly with the parent, on a fitted axis the cap
+ * can undo it the moment it is applied, and an aspect axis is a multiple of
+ * the other one rather than a number of its own. Those stay locked and are
+ * changed through the numbers in the panel.
+ *
+ * An axis the rule says nothing about is free, because the resolver leaves
+ * such an axis exactly as it finds it.
+ *
+ * Holding one axis still while the other follows the pointer only works for a
+ * shape sized through props.w / props.h. Text, lines and freehand drawings are
+ * sized by one scale factor that moves both axes together, so for those a lock
+ * on either axis locks the whole shape.
+ */
+export function handSizableAxes(shape) {
+	const rule = ruleOf(shape)
+	if (!rule) return { x: true, y: true }
+	const free = (axis) => {
+		const spec = axisSpec(rule, axis, shape)
+		return !spec || spec.mode === 'fixed'
+	}
+	const axes = { x: free('x'), y: free('y') }
+	if (axes.x && axes.y) return axes
+	if (!SIZED_TYPES.has(shape?.type)) return { x: false, y: false }
+	return axes
+}
+
 /** Does this shape hold anything the resolver should walk into? */
 export function hasAnyChildren(editor, shape) {
 	try {
@@ -583,8 +616,15 @@ export function anchorParent(editor, shape) {
  * Because position and size are separate statements, a hand resize updates the
  * number its mode actually reads (the pixel size, the stretch adjustment, or
  * the ratio) instead of being undone by the next resolve.
+ *
+ * `sizeAxes` limits which axes may have their size number rewritten, as
+ * `{ x: boolean, y: boolean }`; leave it out and both are rewritten. The live
+ * editing handler passes the axes it actually let a drag change, so an axis it
+ * held still keeps the number the author typed. That matters most for aspect
+ * mode: recomputing `ratio` from a box whose other axis just grew would change
+ * the ratio, which is not what dragging the free axis asked for.
  */
-export function rebaseOffsets(editor, shape, parent) {
+export function rebaseOffsets(editor, shape, parent, { sizeAxes = null } = {}) {
 	const rule = ruleOf(shape)
 	if (!rule || !parent) return null
 	const box = relativeBox(editor, shape, parent)
@@ -600,10 +640,12 @@ export function rebaseOffsets(editor, shape, parent) {
 		const patch = { ...rule[axis] }
 		// position: the offset absorbs the move, the anchor and pivot stay put
 		patch.offset = round100(pos - spec.anchor * extent + spec.pivot * size)
-		// size: whichever number this mode reads
-		if (spec.mode === 'fixed' || spec.mode === 'shrink') patch.size = round100(size)
-		else if (spec.mode === 'stretch') patch.sizeOffset = round100(size - spec.percent * extent)
-		else if (spec.mode === 'aspect' && other > 0) patch.ratio = round100(size / other)
+		// size: whichever number this mode reads, unless this axis was held
+		if (!sizeAxes || sizeAxes[axis]) {
+			if (spec.mode === 'fixed' || spec.mode === 'shrink') patch.size = round100(size)
+			else if (spec.mode === 'stretch') patch.sizeOffset = round100(size - spec.percent * extent)
+			else if (spec.mode === 'aspect' && other > 0) patch.ratio = round100(size / other)
+		}
 		next[axis] = patch
 	}
 	next.base = baseOf(editor, shape, box)
@@ -910,35 +952,59 @@ export function installLiveAnchors(editor) {
 	let scheduled = false
 	let flushing = false
 
+	/**
+	 * Is a resize drag still running?
+	 *
+	 * tldraw's resize state keeps the shape records it snapshotted when the
+	 * drag started and rebuilds each shape from that snapshot on every frame,
+	 * carrying the snapshot's `meta` with it. A rule written mid-drag is
+	 * therefore put straight back by the next frame, so rebasing has to wait
+	 * until the drag is over and the box is final. Resolving a container is
+	 * not affected, because that writes the CHILDREN, which are not in the
+	 * snapshot of the shape being dragged.
+	 */
+	const resizeInProgress = () => {
+		try {
+			return typeof editor.isIn === 'function' && editor.isIn('select.resizing')
+		} catch {
+			return false
+		}
+	}
+
 	const flush = () => {
 		scheduled = false
 		if (flushing) return
 		const containers = [...pendingContainers]
-		const rebases = [...pendingRebases]
 		pendingContainers.clear()
-		pendingRebases.clear()
-		if (!containers.length && !rebases.length) return
-		flushing = true
-		try {
-			for (const id of rebases) {
-				const shape = editor.getShape(id)
-				if (!shape || !ruleOf(shape)) continue
-				const parent = anchorParent(editor, shape)
-				// only a shape that has actually drifted off its rule was moved
-				// by a person; everything else is the resolver's own work
-				if (parent && isOffRule(editor, shape, parent)) {
-					rebaseOffsets(editor, shape, parent)
+		const holdRebases = resizeInProgress()
+		const rebases = holdRebases ? [] : [...pendingRebases]
+		if (!holdRebases) pendingRebases.clear()
+		if (containers.length || rebases.length) {
+			flushing = true
+			try {
+				for (const id of rebases) {
+					const shape = editor.getShape(id)
+					if (!shape || !ruleOf(shape)) continue
+					const parent = anchorParent(editor, shape)
+					// only a shape that has actually drifted off its rule was moved
+					// by a person; everything else is the resolver's own work
+					if (parent && isOffRule(editor, shape, parent)) {
+						rebaseOffsets(editor, shape, parent, { sizeAxes: handSizableAxes(shape) })
+					}
 				}
+				for (const id of containers) {
+					const container = editor.getShape(id)
+					if (container) resolveContainer(editor, container, { apply: true })
+				}
+			} catch {
+				// a malformed rule must never break canvas interaction
+			} finally {
+				flushing = false
 			}
-			for (const id of containers) {
-				const container = editor.getShape(id)
-				if (container) resolveContainer(editor, container, { apply: true })
-			}
-		} catch {
-			// a malformed rule must never break canvas interaction
-		} finally {
-			flushing = false
 		}
+		// a rebase held back for a running drag needs a later frame to land in,
+		// and the drag itself stops producing changes once the pointer is up
+		if (pendingRebases.size) schedule()
 	}
 	const schedule = () => {
 		if (scheduled) return
@@ -947,18 +1013,37 @@ export function installLiveAnchors(editor) {
 		raf(flush)
 	}
 
-	// Belt and braces on the resize lock. Withdrawing the handles (canResize on
-	// the shape utils) stops the normal drag, but this refuses the size change
-	// at the store instead of trusting every interaction path to consult that.
+	// Belt and braces on the resize lock, which is per axis: an axis whose size
+	// a rule derives from the parent is held, an axis the rule pins to a plain
+	// pixel number is free (see handSizableAxes). Withdrawing the handles
+	// (canResize on the shape utils) stops the normal drag on a shape with no
+	// free axis at all, but this refuses the size change at the store instead
+	// of trusting every interaction path to consult that, and it is the only
+	// thing holding the locked axis of a shape that does have a free one.
 	// The resolver is exempt, since it is the thing that owns these sizes.
 	const stopHandResize = editor.sideEffects.registerBeforeChangeHandler
 		? editor.sideEffects.registerBeforeChangeHandler('shape', (prev, next, source) => {
 				if (flushing || isResolving()) return next
 				if (source && source !== 'user') return next
 				if (!ruleOf(next)) return next
-				const sizeChanged = prev.props?.w !== next.props?.w || prev.props?.h !== next.props?.h
-				if (!sizeChanged) return next
-				return { ...next, props: { ...next.props, w: prev.props?.w, h: prev.props?.h } }
+				const axes = handSizableAxes(next)
+				if (axes.x && axes.y) return next
+				const holdW = !axes.x && prev.props?.w !== next.props?.w
+				const holdH = !axes.y && prev.props?.h !== next.props?.h
+				// a scaled shape (text) has no width and height to hold: its one
+				// scale factor is its size on both axes, so a lock on either axis
+				// holds the factor
+				const holdScale = prev.props?.scale !== next.props?.scale
+				if (!holdW && !holdH && !holdScale) return next
+				return {
+					...next,
+					props: {
+						...next.props,
+						...(holdW ? { w: prev.props?.w } : {}),
+						...(holdH ? { h: prev.props?.h } : {}),
+						...(holdScale ? { scale: prev.props?.scale } : {}),
+					},
+				}
 			})
 		: () => {}
 
@@ -966,7 +1051,12 @@ export function installLiveAnchors(editor) {
 		// a write the resolver made is the rule being applied, not a hand edit
 		if (flushing || isResolving()) return
 		if (source && source !== 'user') return
-		const sizeChanged = prev.props?.w !== next.props?.w || prev.props?.h !== next.props?.h
+		// `scale` counts as a size: it is how a text shape is resized, and its
+		// props.w is only the wrap width, which a drag on it need not touch
+		const sizeChanged =
+			prev.props?.w !== next.props?.w ||
+			prev.props?.h !== next.props?.h ||
+			prev.props?.scale !== next.props?.scale
 		const movedOrSized = prev.x !== next.x || prev.y !== next.y || sizeChanged
 		if (!movedOrSized) return
 		if (sizeChanged && hasAnyChildren(editor, next)) pendingContainers.add(next.id)

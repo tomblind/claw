@@ -298,12 +298,18 @@ stay inside the height when there is not, keeping a 20px margin.
   contents, which is a zoom rather than a layout. The panel shows only the
   position rows for a group, and `lint` reports a size mode other than `fixed`
   on one.
-- **An anchored shape cannot be resized by hand.** Its resize handles are
-  withdrawn, because a drag has no single right meaning once a rule owns the
-  size: on a stretch axis it would land in `sizeOffset` and then grow oddly
-  with the parent, and on a fitted axis the cap can undo it immediately. Sizes
-  are changed through the numbers. Moving is unaffected, and a hand move
-  rewrites the position `offset` and keeps the anchor and pivot.
+- **An anchored shape can be resized by hand on any axis in `fixed` mode**,
+  and the size the drag lands on is written into that axis's `size`, so the
+  next resolve agrees with it. An axis in `stretch`, `shrink` or `aspect` mode
+  is held still, because a drag has no single right meaning once the size is
+  derived from the parent: on a stretch axis it would land in `sizeOffset` and
+  then grow oddly with the parent, and on a fitted axis the cap can undo it
+  immediately. Those axes are changed through the numbers. A shape with no
+  `fixed` axis loses its resize handles entirely; a shape with one keeps all of
+  them, and the held edge simply does not move. Text, lines and freehand
+  drawings are sized by a single scale factor that moves both axes at once, so
+  they are resizable only when **both** axes are `fixed`. Moving is unaffected,
+  and a hand move rewrites the position `offset` and keeps the anchor and pivot.
 - **The `resize` op still works on an anchored shape** and rewrites the number
   its mode reads, so `claw layout` and agent edits are unaffected.
 - **A resize is an ordinary edit.** There is no preview mode: the new size is
