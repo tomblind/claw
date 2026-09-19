@@ -20,9 +20,11 @@ import {
 	ROUNDED_GEO_BY_BASE,
 } from '../../lib/custom-slots.mjs'
 import {
+	anchorHandlePoints,
 	anchorParent,
 	axisSpec,
 	handSizableAxes,
+	moveAnchorHandle,
 	installLiveAnchors,
 	relativeBox,
 	presetRule,
@@ -797,6 +799,68 @@ function withAnchorLock(Util) {
 	}
 }
 
+export const CLAW_ANCHOR_HANDLE = 'claw-anchor'
+export const CLAW_PIVOT_HANDLE = 'claw-pivot'
+
+/**
+ * Anchor and pivot as draggable handles on the canvas.
+ *
+ * The two numbers are fractions - of the screen, and of the box - and a
+ * fraction is hard to picture. As handles they are just two points: one on the
+ * screen saying where this box measures from, one on the box saying which of
+ * its own points goes there, and the gap between them is the offset.
+ *
+ * Dragging either one leaves the box exactly where it is; see moveAnchorHandle
+ * for why, and for what does change.
+ *
+ * tldraw hands handle positions in the shape's own local space, while a rule
+ * speaks in its parent's, so both directions go through the page transform.
+ * The util's own handles (a line's vertices) are kept and passed through,
+ * since a rule does not replace whatever the shape already had.
+ */
+function withAnchorHandles(Util) {
+	return class extends Util {
+		getHandles(shape) {
+			const own = super.getHandles?.(shape) ?? []
+			const editor = this.editor
+			const parent = anchorParent(editor, shape)
+			const points = parent ? anchorHandlePoints(editor, shape, parent) : null
+			if (!points) return own.length ? own : undefined
+			const toLocal = (p) => {
+				const page = TL.Mat.applyToPoint(editor.getShapePageTransform(parent.id), p)
+				return editor.getPointInShapeSpace(shape, page)
+			}
+			const a = toLocal(points.anchor)
+			const v = toLocal(points.pivot)
+			return [
+				...own,
+				{ id: CLAW_ANCHOR_HANDLE, type: 'vertex', index: 'a0', x: a.x, y: a.y },
+				{ id: CLAW_PIVOT_HANDLE, type: 'vertex', index: 'a1', x: v.x, y: v.y },
+			]
+		}
+		onHandleDrag(shape, info) {
+			const which =
+				info.handle?.id === CLAW_ANCHOR_HANDLE
+					? 'anchor'
+					: info.handle?.id === CLAW_PIVOT_HANDLE
+						? 'pivot'
+						: null
+			if (!which) return super.onHandleDrag?.(shape, info)
+			const editor = this.editor
+			const parent = anchorParent(editor, shape)
+			if (!parent) return undefined
+			const page = TL.Mat.applyToPoint(editor.getShapePageTransform(shape.id), info.handle)
+			const inParent = TL.Mat.applyToPoint(
+				TL.Mat.Inverse(editor.getShapePageTransform(parent.id)),
+				page
+			)
+			const next = moveAnchorHandle(editor, shape, which, inParent, { precise: !!info.isPrecise })
+			if (!next) return undefined
+			return { meta: { ...(shape.meta ?? {}), clawAnchor: next } }
+		}
+	}
+}
+
 /**
  * Work around a tldraw 5.3.0 defect: a shape inside NESTED frames can be
  * clipped to a triangle instead of a rectangle, cutting it on a diagonal.
@@ -842,9 +906,110 @@ function withNestedFrameClipFix(Util) {
 	}
 }
 
+/**
+ * Draw the anchor and pivot handles as the symbols the panel already uses for
+ * them, with the offset drawn as the line between the two.
+ *
+ * ⌖ for the anchor and ⊙ for the pivot are the panel's glyphs (POSITION_ROWS),
+ * redrawn here as paths rather than text so they stay crisp at any zoom and do
+ * not depend on the viewer having a font that carries them.
+ *
+ * Everything else about a handle - the hit area, the cursor, the drag - is
+ * tldraw's, and every handle that is not one of claw's is left to tldraw to
+ * draw. Passing this in REPLACES the default overlay of the same type, so the
+ * pass-through matters: arrow endpoints and line vertices go through here too.
+ */
+function ClawHandleOverlayUtil(Base) {
+	return class extends Base {
+		/**
+		 * tldraw switches its handles off for the length of a handle drag. For
+		 * an arrow that is fine, because the tip being dragged is part of the
+		 * arrow and you can see it move. Claw's two markers are the only thing
+		 * that moves at all - the box deliberately stays put - so hiding them
+		 * leaves the drag with nothing to look at. They stay on instead.
+		 */
+		isActive() {
+			if (super.isActive()) return true
+			const editor = this.editor
+			if (!editor.isIn('select.dragging_handle')) return false
+			const shape = editor.getOnlySelectedShape()
+			if (!shape || editor.isShapeHidden(shape)) return false
+			return !!editor
+				.getShapeHandles(shape)
+				?.some((h) => h.id === CLAW_ANCHOR_HANDLE || h.id === CLAW_PIVOT_HANDLE)
+		}
+		render(ctx, overlays) {
+			const claw = []
+			const rest = []
+			for (const o of overlays) {
+				const id = o.props?.handle?.id
+				;(id === CLAW_ANCHOR_HANDLE || id === CLAW_PIVOT_HANDLE ? claw : rest).push(o)
+			}
+			const editor = this.editor
+			// the shape's own handles keep tldraw's behaviour of standing down
+			// for the drag; only claw's two are held open by isActive above
+			if (rest.length && !editor.isIn('select.dragging_handle')) super.render(ctx, rest)
+			if (!claw.length) return
+			const transform = editor.getShapePageTransform(claw[0].props.shapeId)
+			if (!transform) return
+			const zoom = Math.max(editor.getZoomLevel(), 0.25)
+			const theme = editor.getCurrentTheme().colors[editor.getColorMode()]
+			const at = (id) => claw.find((o) => o.props.handle.id === id)?.props.handle
+			const a = at(CLAW_ANCHOR_HANDLE)
+			const v = at(CLAW_PIVOT_HANDLE)
+			const r = 5 / zoom
+			ctx.save()
+			ctx.transform(transform.a, transform.b, transform.c, transform.d, transform.e, transform.f)
+			ctx.lineWidth = 1.5 / zoom
+			ctx.strokeStyle = theme.selectionStroke
+			ctx.fillStyle = theme.selectedContrast
+			// the offset, as the gap between the two points it is defined as
+			if (a && v && (Math.abs(a.x - v.x) > 0.01 || Math.abs(a.y - v.y) > 0.01)) {
+				ctx.save()
+				ctx.setLineDash([4 / zoom, 3 / zoom])
+				ctx.beginPath()
+				ctx.moveTo(a.x, a.y)
+				ctx.lineTo(v.x, v.y)
+				ctx.stroke()
+				ctx.restore()
+			}
+			// ⌖ the anchor: a ring with four ticks crossing it
+			if (a) {
+				ctx.beginPath()
+				ctx.arc(a.x, a.y, r, 0, Math.PI * 2)
+				ctx.fill()
+				ctx.stroke()
+				ctx.beginPath()
+				for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+					ctx.moveTo(a.x + dx * r * 0.45, a.y + dy * r * 0.45)
+					ctx.lineTo(a.x + dx * r * 1.75, a.y + dy * r * 1.75)
+				}
+				ctx.stroke()
+			}
+			// ⊙ the pivot: a ring with a solid centre
+			if (v) {
+				ctx.beginPath()
+				ctx.arc(v.x, v.y, r, 0, Math.PI * 2)
+				ctx.fill()
+				ctx.stroke()
+				ctx.beginPath()
+				ctx.arc(v.x, v.y, r * 0.4, 0, Math.PI * 2)
+				ctx.fillStyle = theme.selectionStroke
+				ctx.fill()
+			}
+			ctx.restore()
+		}
+	}
+}
+
+const CLAW_OVERLAY_UTILS = TL.ShapeHandleOverlayUtil
+	? [ClawHandleOverlayUtil(TL.ShapeHandleOverlayUtil)]
+	: []
+
 const CLAW_SHAPE_UTILS = [
-	withAnchorLock(withClawGradientExport(withClawTextOutline(TL.TextShapeUtil))),
-	withAnchorLock(
+	withAnchorHandles(withAnchorLock(withClawGradientExport(withClawTextOutline(TL.TextShapeUtil)))),
+	withAnchorHandles(
+		withAnchorLock(
 		withClawGradientExport(
 		withClawTextOutline(
 			TL.GeoShapeUtil.configure({
@@ -867,6 +1032,7 @@ const CLAW_SHAPE_UTILS = [
 			})
 		)
 	)
+	)
 	),
 	withClawGradientExport(
 		withClawTextOutline(
@@ -878,7 +1044,13 @@ const CLAW_SHAPE_UTILS = [
 	// frames carry a real color prop, but tldraw keeps it off the style system
 	// until this option turns it on (it then registers the colour style, so the
 	// style panel, the `style` op and claw's custom colour slots all reach it)
-	withAnchorLock(withNestedFrameClipFix(TL.FrameShapeUtil.configure({ showColors: true }))),
+	withAnchorHandles(
+		withAnchorLock(withNestedFrameClipFix(TL.FrameShapeUtil.configure({ showColors: true })))
+	),
+	// image and note take a rule like anything else; they had no claw wrapper
+	// before, and get one now only so their anchor and pivot are draggable
+	withAnchorHandles(TL.ImageShapeUtil),
+	withAnchorHandles(TL.NoteShapeUtil),
 	// no group util here: tldraw treats "group" as a core type and refuses a
 	// replacement. A group keeps its handles, which is harmless, because
 	// resizing one scales its CHILDREN rather than the group, and a child
@@ -1675,7 +1847,13 @@ const APP_COMPONENTS = { StylePanel: CustomStylePanel, MainMenu: ClawMainMenu }
 function StandaloneApp() {
 	return (
 		<div style={{ position: 'fixed', inset: 0 }}>
-			<Tldraw onMount={onMount} components={APP_COMPONENTS} themes={CLAW_THEMES} shapeUtils={CLAW_SHAPE_UTILS} />
+			<Tldraw
+				onMount={onMount}
+				components={APP_COMPONENTS}
+				themes={CLAW_THEMES}
+				shapeUtils={CLAW_SHAPE_UTILS}
+				overlayUtils={CLAW_OVERLAY_UTILS}
+			/>
 		</div>
 	)
 }
@@ -1725,7 +1903,14 @@ function SyncApp() {
 	if (!restored && store.status !== 'error') return null
 	return (
 		<div style={{ position: 'fixed', inset: 0 }}>
-			<Tldraw store={store} onMount={onMount} components={APP_COMPONENTS} themes={CLAW_THEMES} shapeUtils={CLAW_SHAPE_UTILS} />
+			<Tldraw
+				store={store}
+				onMount={onMount}
+				components={APP_COMPONENTS}
+				themes={CLAW_THEMES}
+				shapeUtils={CLAW_SHAPE_UTILS}
+				overlayUtils={CLAW_OVERLAY_UTILS}
+			/>
 		</div>
 	)
 }

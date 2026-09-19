@@ -86,6 +86,13 @@ export const isResolving = () => resolving > 0
 
 const finite = (v, fallback = null) => (typeof v === 'number' && Number.isFinite(v) ? v : fallback)
 const round100 = (n) => Math.round(n * 100) / 100
+/**
+ * Fractions need finer rounding than pixels do. Two decimals on an `anchor` is
+ * 4px of granularity across a 400px screen, which a dragged handle would feel
+ * as a stutter, and reading a rounded fraction back while computing `offset`
+ * from the unrounded one made every drag frame add its own error.
+ */
+const round1000 = (n) => Math.round(n * 1000) / 1000
 const clamp01 = (v) => Math.min(1, Math.max(0, v))
 
 /** The anchor rule on a shape, or null. */
@@ -427,18 +434,26 @@ export function resolveShapeRule(editor, shape, rule, parent, { apply = true, pa
 	}
 }
 
-function resolveShapeRuleInner(editor, shape, rule, parent, { apply, parentSize }) {
+/**
+ * Run both axes of a rule against a parent box, without touching the document.
+ *
+ * This is the whole of the rule arithmetic: what the resolver writes, and what
+ * the anchor and pivot handles measure themselves against. They have to agree,
+ * or a handle would sit somewhere the shape never goes.
+ *
+ * Returns the normalized specs, the solved `{ pos, size }` per axis (null for
+ * an axis the rule says nothing about), the parent box used, and any notes
+ * about a floor or a fit cap having bitten.
+ */
+export function solveAxes(editor, shape, rule, parent, { parentSize = null } = {}) {
 	const specs = { x: axisSpec(rule, 'x', shape), y: axisSpec(rule, 'y', shape) }
 	if (!specs.x && !specs.y) return null
 	if (specs.x?.mode === 'aspect' && specs.y?.mode === 'aspect') {
 		throw new Error('both axes are aspect mode - one axis needs a size to derive from')
 	}
-	const box = relativeBox(editor, shape, parent)
 	// `parentSize` answers "where would this land if the screen were N wide"
 	// without touching the document - what `claw resolve --sizes` reports
 	const parentBox = parentSize ?? innerBox(parent, editor)
-	const scaledText = shape.type === 'text' && (rule.text ?? 'scale') === 'scale'
-
 	// the aspect axis needs the other one settled first
 	const order = specs.x?.mode === 'aspect' ? ['y', 'x'] : ['x', 'y']
 	const solved = { x: null, y: null }
@@ -460,6 +475,15 @@ function resolveShapeRuleInner(editor, shape, rule, parent, { apply, parentSize 
 		}
 		if (solved[axis].fitted) notes.push(`${axis} shrank to fit its aspect partner`)
 	}
+	return { specs, solved, parentBox, notes }
+}
+
+function resolveShapeRuleInner(editor, shape, rule, parent, { apply, parentSize }) {
+	const run = solveAxes(editor, shape, rule, parent, { parentSize })
+	if (!run) return null
+	const { specs, solved, parentBox, notes } = run
+	const box = relativeBox(editor, shape, parent)
+	const scaledText = shape.type === 'text' && (rule.text ?? 'scale') === 'scale'
 
 	const target = {
 		x: solved.x ? solved.x.pos : box.x,
@@ -694,6 +718,115 @@ export function baseOf(editor, shape, box = null) {
 		h: round100(b.h),
 		scale: shape.type === 'text' ? round100(finite(shape.props?.scale, 1) ?? 1) : 1,
 	}
+}
+
+/**
+ * Where the anchor and pivot handles sit, in the PARENT's coordinate space.
+ *
+ * Both points fall straight out of the rule:
+ *
+ *   anchor point = anchor x parentSize
+ *   pivot  point = anchor x parentSize + offset
+ *
+ * because the pivot is by definition the spot on the box that lands on the
+ * anchor, and `offset` is the slack between them. So the line from one handle
+ * to the other IS the offset vector, which is why the panel's three position
+ * numbers can be read straight off the canvas.
+ *
+ * Returns null when the shape has no rule, no parent, or a malformed rule.
+ */
+export function anchorHandlePoints(editor, shape, parent = null) {
+	const rule = ruleOf(shape)
+	const container = parent ?? anchorParent(editor, shape)
+	if (!rule || !container) return null
+	let run
+	try {
+		run = solveAxes(editor, shape, rule, container)
+	} catch {
+		return null
+	}
+	if (!run || !run.specs.x || !run.specs.y) return null
+	const { specs, parentBox } = run
+	const anchorAt = { x: specs.x.anchor * parentBox.w, y: specs.y.anchor * parentBox.h }
+	return {
+		anchor: anchorAt,
+		pivot: { x: anchorAt.x + specs.x.offset, y: anchorAt.y + specs.y.offset },
+	}
+}
+
+/** Fractions a handle settles onto when it is dropped near one, unless precise. */
+const HANDLE_STOPS = [0, 0.5, 1]
+const HANDLE_SNAP_PX = 6
+
+/**
+ * Move one handle to a point in the PARENT's space, and say what the rule
+ * becomes.
+ *
+ * The shape does not move. Dragging a handle says the same position in
+ * different terms - measure from the middle of the screen instead of its left
+ * edge, hang the box by its right edge instead of its left - and `offset`
+ * takes up the difference. That is the same promise the presets and the
+ * Dynamic Layout switch make, and it is what makes the handles safe to explore
+ * with: nothing you drag can throw the box across the screen.
+ *
+ * What DOES change is how the box behaves when the screen resizes, which is
+ * the thing the handles are for.
+ *
+ * A handle settles onto 0, a half or 1 when dropped within a few pixels of
+ * one, since those three are most of what anyone wants; holding alt (which
+ * tldraw reports as a precise drag) drops it exactly where the pointer is.
+ *
+ * Returns the new rule, or null when the drag cannot be expressed.
+ */
+export function moveAnchorHandle(editor, shape, which, pointInParent, { precise = false } = {}) {
+	const rule = ruleOf(shape)
+	const parent = anchorParent(editor, shape)
+	if (!rule || !parent) return null
+	let run
+	try {
+		run = solveAxes(editor, shape, rule, parent)
+	} catch {
+		return null
+	}
+	if (!run || !run.specs.x || !run.specs.y) return null
+	const { specs, solved, parentBox } = run
+	const snap = (value, span) => {
+		if (precise || !(span > 0)) return value
+		for (const stop of HANDLE_STOPS) {
+			if (Math.abs(value - stop) * span <= HANDLE_SNAP_PX) return stop
+		}
+		return value
+	}
+	const next = { ...rule }
+	for (const axis of AXES) {
+		const spec = specs[axis]
+		const extent = axis === 'x' ? parentBox.w : parentBox.h
+		const at = axis === 'x' ? pointInParent.x : pointInParent.y
+		// where the box sits now, straight from the rule rather than from the
+		// rendered bounds: scaled text draws inside its solved box rather than
+		// filling it, and it is the solved box the rule speaks about
+		const pos = solved[axis] ? solved[axis].pos : 0
+		const size = solved[axis] ? solved[axis].size : 0
+		const patch = { ...rule[axis] }
+		// both branches compute the offset from the ROUNDED fraction they are
+		// about to store, so the pair stays self-consistent and the box does not
+		// creep a pixel at a time across a drag
+		if (which === 'anchor') {
+			// the anchor moves to the pointer; the offset keeps the pivot point,
+			// and therefore the box, exactly where it was
+			const fraction = round1000(extent > 0 ? snap(at / extent, extent) : 0)
+			patch.anchor = fraction
+			patch.offset = round100(spec.anchor * extent + spec.offset - fraction * extent)
+		} else {
+			// the pivot moves to a point ON the box; the offset follows it so the
+			// box stays, which means the anchor point does not move either
+			const fraction = round1000(size > 0 ? clamp01(snap((at - pos) / size, size)) : 0)
+			patch.pivot = fraction
+			patch.offset = round100(pos + fraction * size - spec.anchor * extent)
+		}
+		next[axis] = patch
+	}
+	return next
 }
 
 /**

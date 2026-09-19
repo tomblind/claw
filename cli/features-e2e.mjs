@@ -1614,6 +1614,246 @@ const browser = await chromium.launch({ executablePath: findBrowser(), headless:
 		JSON.stringify(cornerLayout)
 	)
 
+	// Anchor and pivot as draggable handles. Both numbers are fractions, which
+	// is the hard part of the model to picture, so they are also two points:
+	// one on the screen, one on the box, with the offset as the gap between.
+	// Dragging either leaves the box where it is and changes only how it moves
+	// when the screen does.
+	await page.evaluate(async () => {
+		const ed = window.__editor
+		await window.host.applyOps([
+			{ add_screen: { name: 'Handles', at: { x: 1200, y: 1400 }, size: { w: 400, h: 400 } } },
+			{ add: { screen: 'Handles', kind: 'card', text: 'H', at: { x: 40, y: 40 }, size: { w: 160, h: 100 }, name: 'Hb' } },
+			{ add: { screen: 'Handles', kind: 'box', at: { x: 40, y: 260 }, size: { w: 80, h: 60 }, name: 'Plain' } },
+			{
+				anchor: {
+					id: 'Hb',
+					x: { mode: 'fixed', size: 160, anchor: 0, pivot: 0, offset: 40 },
+					y: { mode: 'fixed', size: 100, anchor: 0, pivot: 0, offset: 40 },
+				},
+			},
+		])
+		ed.setCamera({ x: -1000, y: -1200, z: 1 }, { immediate: true })
+		ed.select(ed.getCurrentPageShapes().find((s) => s.meta?.clawName === 'Hb').id)
+		return null
+	})
+	await page.waitForTimeout(500)
+	const handleIds = (name) =>
+		page.evaluate((nm) => {
+			const ed = window.__editor
+			const s = ed.getCurrentPageShapes().find((x) => x.meta?.clawName === nm)
+			return (ed.getShapeHandles(s) ?? []).map((h) => h.id)
+		}, name)
+	const readHb = () =>
+		page.evaluate(() => {
+			const ed = window.__editor
+			const s = ed.getCurrentPageShapes().find((x) => x.meta?.clawName === 'Hb')
+			const b = ed.getShapePageBounds(s.id)
+			const f = ed.getCurrentPageShapes().find((x) => x.meta?.clawName === 'Handles')
+			return {
+				box: { x: Math.round(b.x - f.x), y: Math.round(b.y - f.y), w: Math.round(b.w), h: Math.round(b.h) },
+				rule: s.meta.clawAnchor,
+			}
+		})
+	// drag one handle to a point given in the SCREEN frame's own coordinates
+	const dragHandle = async (handleId, inFrameX, inFrameY) => {
+		const pts = await page.evaluate(
+			([id, fx, fy]) => {
+				const ed = window.__editor
+				const s = ed.getCurrentPageShapes().find((x) => x.meta?.clawName === 'Hb')
+				const f = ed.getCurrentPageShapes().find((x) => x.meta?.clawName === 'Handles')
+				const h = ed.getShapeHandles(s).find((x) => x.id === id)
+				const from = ed.pageToScreen(ed.getShapePageTransform(s.id).applyToPoint(h))
+				const to = ed.pageToScreen({ x: f.x + fx, y: f.y + fy })
+				return { from: { x: from.x, y: from.y }, to: { x: to.x, y: to.y } }
+			},
+			[handleId, inFrameX, inFrameY]
+		)
+		await page.mouse.move(pts.from.x, pts.from.y)
+		await page.waitForTimeout(150)
+		await page.mouse.down()
+		await page.mouse.move((pts.from.x + pts.to.x) / 2, (pts.from.y + pts.to.y) / 2, { steps: 8 })
+		await page.mouse.move(pts.to.x, pts.to.y, { steps: 8 })
+		await page.mouse.up()
+		await page.waitForTimeout(400)
+	}
+	const anchoredHandles = await handleIds('Hb')
+	check(
+		'handles: an anchored shape offers an anchor and a pivot handle',
+		anchoredHandles.includes('claw-anchor') && anchoredHandles.includes('claw-pivot'),
+		JSON.stringify(anchoredHandles)
+	)
+	// tldraw switches its handle overlay off for the length of a handle drag,
+	// which for these two means the drag has nothing to look at: the box
+	// deliberately does not move, so the markers are the whole picture. Check
+	// they are still being drawn with the pointer still down.
+	const drawnDuringDrag = await page.evaluate(async () => {
+		const ed = window.__editor
+		const s = ed.getCurrentPageShapes().find((x) => x.meta?.clawName === 'Hb')
+		const h = ed.getShapeHandles(s).find((x) => x.id === 'claw-anchor')
+		const from = ed.pageToScreen(ed.getShapePageTransform(s.id).applyToPoint(h))
+		return { x: from.x, y: from.y }
+	})
+	await page.mouse.move(drawnDuringDrag.x, drawnDuringDrag.y)
+	await page.waitForTimeout(150)
+	await page.mouse.down()
+	await page.mouse.move(drawnDuringDrag.x + 40, drawnDuringDrag.y + 40, { steps: 6 })
+	await page.mouse.move(drawnDuringDrag.x + 70, drawnDuringDrag.y + 60, { steps: 6 })
+	await page.waitForTimeout(200)
+	const midDrag = await page.evaluate(() => {
+		const ed = window.__editor
+		const ids = ed.overlays.getCurrentOverlays().map((o) => o.props?.handle?.id ?? o.type)
+		return { path: ed.getPath(), ids }
+	})
+	await page.mouse.up()
+	await page.waitForTimeout(300)
+	check(
+		'handles: the markers stay on screen while one of them is being dragged',
+		midDrag.path === 'select.dragging_handle' &&
+			midDrag.ids.includes('claw-anchor') &&
+			midDrag.ids.includes('claw-pivot'),
+		JSON.stringify(midDrag)
+	)
+	// the drag above left the rule wherever it landed; put it back so the
+	// checks below start from the shape as it was authored
+	await page.evaluate(() => {
+		const ed = window.__editor
+		const s = ed.getCurrentPageShapes().find((x) => x.meta?.clawName === 'Hb')
+		ed.updateShape({
+			id: s.id,
+			type: s.type,
+			meta: {
+				...s.meta,
+				clawAnchor: {
+					...s.meta.clawAnchor,
+					x: { mode: 'fixed', size: 160, anchor: 0, pivot: 0, offset: 40 },
+					y: { mode: 'fixed', size: 100, anchor: 0, pivot: 0, offset: 40 },
+				},
+			},
+		})
+		return null
+	})
+	await page.waitForTimeout(400)
+	await page.evaluate(() => {
+		const ed = window.__editor
+		ed.select(ed.getCurrentPageShapes().find((s) => s.meta?.clawName === 'Plain').id)
+		return null
+	})
+	await page.waitForTimeout(300)
+	const plainHandles = await handleIds('Plain')
+	check(
+		'handles: a shape with no rule offers none',
+		plainHandles.length === 0,
+		JSON.stringify(plainHandles)
+	)
+	await page.evaluate(() => {
+		const ed = window.__editor
+		ed.select(ed.getCurrentPageShapes().find((s) => s.meta?.clawName === 'Hb').id)
+		return null
+	})
+	await page.waitForTimeout(300)
+	const hbStart = await readHb()
+	// the middle of the screen: a handle within a few pixels of a half settles
+	// onto it, so the drag lands on exactly 0.5 rather than 0.497
+	await dragHandle('claw-anchor', 200, 200)
+	const hbAnchored = await readHb()
+	check(
+		'handles: dragging the anchor to the middle of the screen sets it to a half',
+		hbAnchored.rule?.x?.anchor === 0.5 && hbAnchored.rule?.y?.anchor === 0.5,
+		JSON.stringify({ x: hbAnchored.rule?.x, y: hbAnchored.rule?.y })
+	)
+	check(
+		'handles: dragging the anchor does not move the shape',
+		hbAnchored.box.x === hbStart.box.x && hbAnchored.box.y === hbStart.box.y,
+		`${JSON.stringify(hbStart.box)} -> ${JSON.stringify(hbAnchored.box)}`
+	)
+	// the box's own bottom-right corner, which is pivot 1,1 on both axes
+	await dragHandle('claw-pivot', 200, 140)
+	const hbPivoted = await readHb()
+	check(
+		'handles: dragging the pivot to the corner of the box sets it to 1',
+		hbPivoted.rule?.x?.pivot === 1 && hbPivoted.rule?.y?.pivot === 1,
+		JSON.stringify({ x: hbPivoted.rule?.x, y: hbPivoted.rule?.y })
+	)
+	check(
+		'handles: dragging the pivot does not move the shape either',
+		hbPivoted.box.x === hbStart.box.x && hbPivoted.box.y === hbStart.box.y,
+		`${JSON.stringify(hbStart.box)} -> ${JSON.stringify(hbPivoted.box)}`
+	)
+	// What the two drags DID change is how the box moves when the screen does:
+	// its bottom-right corner now tracks the middle of the screen.
+	await page.evaluate(() => {
+		const ed = window.__editor
+		const f = ed.getCurrentPageShapes().find((s) => s.meta?.clawName === 'Handles')
+		ed.updateShape({ id: f.id, type: 'frame', props: { w: 600, h: 600 } })
+		return null
+	})
+	await page.waitForTimeout(500)
+	const hbWidened = await readHb()
+	// the pivot is the bottom-right corner and the anchor is the middle of the
+	// screen, so that corner lands on the middle plus the offset the drags left
+	// behind: dead on it across, and the 60px above it the box already sat
+	check(
+		'handles: the dragged rule is what the shape follows on the next resize',
+		hbWidened.box.x + hbWidened.box.w === 300 && hbWidened.box.y + hbWidened.box.h === 240,
+		JSON.stringify(hbWidened.box)
+	)
+	// Claw's handle drawing REPLACES tldraw's overlay, so tldraw's own handles
+	// have to come through it untouched.
+	const arrowHandles = await page.evaluate(async () => {
+		const ed = window.__editor
+		await window.host.applyOps([{ connect: { from: 'Hb', to: 'Plain', label: 'x' } }])
+		const arrow = ed.getCurrentPageShapes().find((s) => s.type === 'arrow')
+		ed.select(arrow.id)
+		return (ed.getShapeHandles(arrow) ?? []).map((h) => h.id)
+	})
+	check(
+		'handles: an arrow keeps its own endpoint handles',
+		arrowHandles.includes('start') && arrowHandles.includes('end'),
+		JSON.stringify(arrowHandles)
+	)
+	// Notes and images carry a rule like anything else, and are the two types
+	// that got a claw shape util for the first time to make their handles
+	// draggable. A note's own side handles have to survive that.
+	const otherTypes = await page.evaluate(async () => {
+		const ed = window.__editor
+		await window.host.applyOps([
+			{ add: { screen: 'Handles', kind: 'note', text: 'N', at: { x: 300, y: 380 }, name: 'Nt' } },
+			{
+				add: {
+					screen: 'Handles',
+					kind: 'image',
+					at: { x: 40, y: 400 },
+					size: { w: 60, h: 60 },
+					svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10" fill="#38f"/></svg>',
+					name: 'Im',
+				},
+			},
+			{ anchor: { id: 'Nt', preset: 'fixed' } },
+			{ anchor: { id: 'Im', preset: 'fixed' } },
+		])
+		const out = {}
+		for (const nm of ['Nt', 'Im']) {
+			const sh = ed.getCurrentPageShapes().find((x) => x.meta?.clawName === nm)
+			ed.select(sh.id)
+			out[nm] = { type: sh.type, handles: (ed.getShapeHandles(sh) ?? []).map((h) => h.id) }
+		}
+		return out
+	})
+	check(
+		'handles: a note and an image with a rule get them too',
+		otherTypes.Nt?.handles.includes('claw-anchor') &&
+			otherTypes.Nt?.handles.includes('claw-pivot') &&
+			otherTypes.Im?.handles.includes('claw-anchor') &&
+			otherTypes.Im?.handles.includes('claw-pivot'),
+		JSON.stringify(otherTypes)
+	)
+	check(
+		'handles: a note keeps its own side handles alongside them',
+		otherTypes.Nt?.handles.includes('top') && otherTypes.Nt?.handles.includes('bottom'),
+		JSON.stringify(otherTypes.Nt)
+	)
+
 	check('live editing raised no page errors', pageErrors.length === 0, pageErrors[0] ?? '')
 	await page.close()
 }

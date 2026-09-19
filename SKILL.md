@@ -285,6 +285,14 @@ stay inside the height when there is not, keeping a 20px margin.
   keeps the font size and lets the text re-wrap instead. Text only grows when
   **both** axes grow (the factor is the smaller ratio), so a full-width bar
   that keeps its height keeps its text size, which is what you want.
+- **Anchor and pivot are draggable handles on the canvas.** Select a shape
+  with a rule and two markers appear: `⌖` on the screen, where this box
+  measures from, and `⊙` on the box, which of its own points goes there.
+  The dashed line between them is the `offset`. Dragging either one leaves the
+  box exactly where it is and lets `offset` take up the difference, the same
+  promise the presets make, so what changes is how the box moves when the
+  screen does. A handle settles onto 0, a half or 1 when dropped within a few
+  pixels of one; hold alt to drop it exactly where the pointer is.
 - **Presets write every number from what is already drawn**, so place a shape
   by eye and then say how it behaves: `fill` (+`inset`), `fixed` (keep the
   size, pin to the nearest edge), `center`, `stretch-x`, `stretch-y`,
