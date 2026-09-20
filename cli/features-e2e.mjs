@@ -2222,6 +2222,68 @@ const browser = await chromium.launch({ executablePath: findBrowser(), headless:
 		JSON.stringify({ clockTime, unknownCode })
 	)
 
+	// Redo on ctrl+Y, which is what it is in every other Windows application.
+	// Both the key and what the menu advertises matter: only the first
+	// alternative in a kbd string is the one drawn, so the order is the label.
+	await page.evaluate(async () => {
+		const ed = window.__editor
+		await window.host.applyOps([
+			{ add_screen: { name: 'Redo', at: { x: 2400, y: 1400 }, size: { w: 300, h: 200 } } },
+			{ add: { screen: 'Redo', kind: 'box', at: { x: 20, y: 20 }, size: { w: 80, h: 50 }, name: 'Rx' } },
+		])
+		ed.setCamera({ x: -2200, y: -1200, z: 1 }, { immediate: true })
+		ed.selectNone()
+		return null
+	})
+	await page.waitForTimeout(400)
+	const rxCount = () =>
+		page.evaluate(
+			() => window.__editor.getCurrentPageShapes().filter((s) => s.meta?.clawName === 'Rx').length
+		)
+	await page.evaluate(() => {
+		const ed = window.__editor
+		ed.markHistoryStoppingPoint()
+		ed.deleteShapes([ed.getCurrentPageShapes().find((s) => s.meta?.clawName === 'Rx').id])
+		return null
+	})
+	await page.waitForTimeout(300)
+	await page.keyboard.press('Control+z')
+	await page.waitForTimeout(400)
+	const afterUndo = await rxCount()
+	await page.keyboard.press('Control+y')
+	await page.waitForTimeout(400)
+	const afterCtrlY = await rxCount()
+	await page.keyboard.press('Control+z')
+	await page.waitForTimeout(400)
+	await page.keyboard.press('Control+Shift+z')
+	await page.waitForTimeout(400)
+	const afterShiftZ = await rxCount()
+	check(
+		'redo: ctrl+Y redoes, and shift+ctrl+Z still does too',
+		afterUndo === 1 && afterCtrlY === 0 && afterShiftZ === 0,
+		JSON.stringify({ afterUndo, afterCtrlY, afterShiftZ })
+	)
+	// undo once more so the menu item below is enabled
+	await page.keyboard.press('Control+z')
+	await page.waitForTimeout(300)
+	await page.click('[data-testid="main-menu.button"]')
+	await page.waitForTimeout(400)
+	await page.getByRole('menuitem', { name: 'Edit' }).click()
+	await page.waitForTimeout(500)
+	const redoRow = await page.evaluate(() => {
+		const el = Array.from(document.querySelectorAll('[role=menuitem]')).find((e) =>
+			/^Redo/.test((e.textContent || '').trim())
+		)
+		return el ? (el.textContent || '').trim().replace(/\s+/g, '') : null
+	})
+	await page.keyboard.press('Escape')
+	await page.waitForTimeout(300)
+	check(
+		'redo: the Edit menu advertises ctrl+Y rather than shift+ctrl+Z',
+		redoRow === 'RedoCtrl+Y',
+		JSON.stringify(redoRow)
+	)
+
 	check('live editing raised no page errors', pageErrors.length === 0, pageErrors[0] ?? '')
 	await page.close()
 }

@@ -1938,6 +1938,20 @@ const APP_COMPONENTS = { StylePanel: CustomStylePanel, MainMenu: ClawMainMenu }
  * ctrl+shift+E is free in tldraw's own bindings.
  */
 const INSERT_CHAR_KBD = 'cmd+shift+e,ctrl+shift+e'
+/**
+ * Redo on ctrl+Y as well as tldraw's shift+ctrl+Z, and shown as ctrl+Y.
+ *
+ * Every alternative in a kbd string works, but only the first is the one drawn
+ * in menus and the shortcuts dialog, so the order is what the key is
+ * advertised as. On Windows that is ctrl+Y, which is what redo has been in
+ * every other application for thirty years; shift+ctrl+Z keeps working for
+ * anyone whose hands already know it.
+ *
+ * Left alone on a Mac, where ctrl+Y is not redo and cmd+shift+Z is.
+ */
+const REDO_KBD = TL.tlenv?.isDarwin
+	? 'cmd+shift+z,ctrl+shift+z'
+	: 'ctrl+y,cmd+shift+z,ctrl+shift+z'
 const CLAW_OVERRIDES = {
 	actions(editor, actions, helpers) {
 		actions['claw-insert-char'] = {
@@ -1948,6 +1962,7 @@ const CLAW_OVERRIDES = {
 				helpers.addDialog({ component: CLAW_INSERT_CHAR_DIALOG })
 			},
 		}
+		if (actions['redo']) actions['redo'] = { ...actions['redo'], kbd: REDO_KBD }
 		return actions
 	},
 }
