@@ -1867,12 +1867,88 @@ const browser = await chromium.launch({ executablePath: findBrowser(), headless:
 			{ add: { screen: 'Chars', kind: 'label', at: { x: 20, y: 20 }, text: 'Hello', name: 'Cl' } },
 			{ add: { screen: 'Chars', kind: 'button', text: 'Go', at: { x: 20, y: 90 }, size: { w: 120, h: 40 }, name: 'Cb' } },
 			{ add: { screen: 'Chars', kind: 'label', at: { x: 20, y: 160 }, text: 'x', name: 'Ct' } },
+			{
+				add: {
+					screen: 'Chars',
+					kind: 'image',
+					at: { x: 220, y: 20 },
+					size: { w: 60, h: 60 },
+					svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10" fill="#38f"/></svg>',
+					name: 'Ci',
+				},
+			},
 		])
 		ed.setCamera({ x: -1600, y: -1200, z: 1 }, { immediate: true })
 		ed.select(ed.getCurrentPageShapes().find((s) => s.meta?.clawName === 'Cl').id)
 		return null
 	})
 	await page.waitForTimeout(400)
+	// The style panel shows even with nothing selected, so the option has to
+	// gate itself: offering to insert a character with nowhere to put it is
+	// offering to do nothing to the drawing.
+	const offered = {}
+	// names go through as an ARGUMENT: the function is stringified into the
+	// page, so nothing it closes over comes with it. select() also hands back
+	// the editor, which cannot cross back, hence the explicit nulls.
+	const optionFor = async (label, names, edit = false) => {
+		await page.evaluate(
+			([wanted, alsoEdit]) => {
+				const ed = window.__editor
+				if (!wanted.length) {
+					ed.selectNone()
+					return null
+				}
+				const ids = wanted.map(
+					(n) => ed.getCurrentPageShapes().find((s) => s.meta?.clawName === n).id
+				)
+				ed.select(...ids)
+				ed.setEditingShape(alsoEdit ? ids[0] : null)
+				return null
+			},
+			[names, edit]
+		)
+		await page.waitForTimeout(300)
+		offered[label] = (await page.$('[data-testid="claw-insert-char"]')) !== null
+	}
+	await optionFor('nothing', [])
+	await optionFor('label', ['Cl'])
+	await optionFor('button', ['Cb'])
+	await optionFor('image', ['Ci'])
+	await optionFor('two shapes', ['Cl', 'Cb'])
+	await optionFor('editing', ['Cl'], true)
+	await page.evaluate(() => {
+		window.__editor.setEditingShape(null)
+		return null
+	})
+	check(
+		'chars: the insert option is offered only where a character can land',
+		offered.label && offered.button && offered.editing &&
+			!offered.nothing && !offered.image && !offered['two shapes'],
+		JSON.stringify(offered)
+	)
+	// the shortcut is not gated: a deliberate key press with nothing selected
+	// gets the clipboard, which is a fair answer where a dead button is not
+	await page.evaluate(() => {
+		window.__editor.selectNone()
+		return null
+	})
+	await page.waitForTimeout(300)
+	await page.keyboard.press('Control+Shift+E')
+	await page.waitForTimeout(500)
+	const shortcutUngated = (await page.$('[data-testid="claw-char-search"]')) !== null
+	await page.keyboard.press('Escape')
+	await page.waitForTimeout(300)
+	check(
+		'chars: the shortcut still opens it with nothing selected',
+		shortcutUngated,
+		String(shortcutUngated)
+	)
+	await page.evaluate(() => {
+		const ed = window.__editor
+		ed.select(ed.getCurrentPageShapes().find((s) => s.meta?.clawName === 'Cl').id)
+		return null
+	})
+	await page.waitForTimeout(300)
 	// the shortcut, not the button: the moment you want a character is
 	// mid-sentence, where reaching for the style panel means leaving the text
 	await page.keyboard.press('Control+Shift+E')

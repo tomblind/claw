@@ -272,16 +272,32 @@ export function rowsFor(table, chars) {
  * same redirect `set_text` makes, so clicking a character with a button
  * selected writes to the button's label and not to nothing.
  */
+/** The shape types that carry text of their own. */
+const TEXT_TYPES = new Set(['text', 'geo', 'note', 'arrow'])
+
 export function appendTargetOf(editor) {
 	const selected = editor.getSelectedShapes()
+	// two shapes give a character nowhere unambiguous to go
 	if (selected.length !== 1) return null
 	const shape = selected[0]
 	if (shape.type === 'geo' && !plainText(editor, shape)) {
 		const overlay = overlayLabelOf(editor, shape)
 		if (overlay) return overlay
 	}
-	if (shape.type === 'text' || shape.type === 'geo' || shape.type === 'note') return shape
-	return null
+	return TEXT_TYPES.has(shape.type) ? shape : null
+}
+
+/**
+ * Is there anywhere for a character to go right now?
+ *
+ * Either text is being edited, in which case it goes at the caret, or exactly
+ * one shape that holds text is selected, in which case it goes on the end of
+ * that. With neither, offering the picker is offering to do nothing to the
+ * drawing, so the style panel leaves the option out.
+ */
+export function canInsertChar(editor) {
+	if (editor.getEditingShapeId()) return true
+	return appendTargetOf(editor) !== null
 }
 
 /**

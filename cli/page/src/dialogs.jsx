@@ -10,6 +10,7 @@ import { mixHex, reportError } from './common.js'
 import { clawThemePatch, colorHexOf, fontFamilyOf, fontLabelOf, useClawTheme } from './theme.js'
 import { gradientCss, gradientMidpoint, isGradientSlot } from './gradients.js'
 import {
+	canInsertChar,
 	codePointLabel,
 	insertChar,
 	loadChars,
@@ -1003,8 +1004,15 @@ function InsertCharDialog({ onClose }) {
 export const CLAW_INSERT_CHAR_DIALOG = InsertCharDialog
 
 export function ClawInsertCharControl() {
+	const editor = TL.useEditor()
 	const dialogs = typeof TL.useDialogs === 'function' ? TL.useDialogs() : null
-	if (!dialogs) return null
+	const useVal = typeof TL.useValue === 'function' ? TL.useValue : (_n, fn) => fn()
+	// the option is only worth offering when a character has somewhere to land;
+	// the keyboard shortcut still works regardless, and falls back to the
+	// clipboard, which is a reasonable answer to a deliberate key press but a
+	// poor one to a button that looked like it would edit the drawing
+	const canInsert = useVal('claw can insert char', () => canInsertChar(editor), [editor])
+	if (!dialogs || !canInsert) return null
 	return (
 		<TL.TldrawUiButton
 			type="menu"
