@@ -2284,6 +2284,106 @@ const browser = await chromium.launch({ executablePath: findBrowser(), headless:
 		JSON.stringify(redoRow)
 	)
 
+	// The outline drawn round a selected shape should be the box its RULE gives
+	// it. For a box the two are the same thing; for text they are not, because
+	// scaled text is drawn as a scaled picture of its design layout and sits
+	// inside its box rather than filling it. A full-width label used to draw an
+	// outline round the glyphs, which is a box the rule never mentions.
+	await page.evaluate(async () => {
+		const ed = window.__editor
+		await window.host.applyOps([
+			{ add_screen: { name: 'Bounds', at: { x: 3000, y: 1400 }, size: { w: 400, h: 340 } } },
+			{ add: { screen: 'Bounds', kind: 'box', at: { x: 20, y: 20 }, size: { w: 200, h: 60 }, radius: 18, name: 'Brnd' } },
+			{ add: { screen: 'Bounds', kind: 'label', at: { x: 20, y: 120 }, text: 'Hello', name: 'Btx' } },
+			{ add: { screen: 'Bounds', kind: 'label', at: { x: 20, y: 250 }, text: 'Free', name: 'Bfree' } },
+			{ anchor: { id: 'Brnd', preset: 'fixed' } },
+			{
+				anchor: {
+					id: 'Btx',
+					x: { mode: 'stretch', percent: 1, sizeOffset: -40, anchor: 0, pivot: 0, offset: 20 },
+					y: { mode: 'fixed', size: 40, anchor: 0, pivot: 0, offset: 120 },
+				},
+			},
+		])
+		ed.setCamera({ x: -2800, y: -1200, z: 1 }, { immediate: true })
+		ed.selectNone()
+		return null
+	})
+	await page.waitForTimeout(500)
+	// paint the indicator path offscreen and measure what it actually covers:
+	// the only way to see the outline the user sees rather than the geometry
+	const outlineOf = (name) =>
+		page.evaluate((nm) => {
+			const ed = window.__editor
+			const s = ed.getCurrentPageShapes().find((x) => x.meta?.clawName === nm)
+			const path = ed.getShapeUtil(s).getIndicatorPath(s)
+			if (!(path instanceof Path2D)) return null
+			const W = 1400
+			const H = 500
+			const c = document.createElement('canvas')
+			c.width = W
+			c.height = H
+			const g = c.getContext('2d')
+			g.translate(30, 30)
+			g.strokeStyle = '#000'
+			g.lineWidth = 2
+			g.stroke(path)
+			const d = g.getImageData(0, 0, W, H).data
+			const hit = (x, y) => d[(y * W + x) * 4 + 3] > 0
+			let minX = 1e9, maxX = -1, minY = 1e9, maxY = -1
+			for (let y = 0; y < H; y++)
+				for (let x = 0; x < W; x++)
+					if (hit(x, y)) {
+						if (x < minX) minX = x
+						if (x > maxX) maxX = x
+						if (y < minY) minY = y
+						if (y > maxY) maxY = y
+					}
+			if (maxX < 0) return null
+			const geo = ed.getShapeGeometry(s.id).bounds
+			return {
+				outline: [Math.round(maxX - minX), Math.round(maxY - minY)],
+				shape: [Math.round(geo.w), Math.round(geo.h)],
+				// a rectangle paints its bounding box's own corner; a rounded one
+				// curves away from it
+				cornerPainted: hit(minX, minY),
+			}
+		}, name)
+	const textOutline = await outlineOf('Btx')
+	check(
+		'bounds: an anchored text outlines the box its rule gives it, not its glyphs',
+		textOutline && textOutline.outline[0] > textOutline.shape[0] + 200 &&
+			Math.abs(textOutline.outline[0] - 362) <= 3,
+		JSON.stringify(textOutline)
+	)
+	await page.evaluate(() => {
+		const ed = window.__editor
+		const f = ed.getCurrentPageShapes().find((s) => s.meta?.clawName === 'Bounds')
+		ed.updateShape({ id: f.id, type: 'frame', props: { w: 700 } })
+		return null
+	})
+	await page.waitForTimeout(500)
+	const widened = await outlineOf('Btx')
+	check(
+		'bounds: that outline grows with the screen, like every other shape',
+		widened && Math.abs(widened.outline[0] - 662) <= 3,
+		JSON.stringify(widened)
+	)
+	// the two shapes that must be left exactly as they were
+	const roundOutline = await outlineOf('Brnd')
+	const freeOutline = await outlineOf('Bfree')
+	check(
+		'bounds: a rounded box keeps its rounded outline, corners and all',
+		roundOutline && roundOutline.cornerPainted === false &&
+			Math.abs(roundOutline.outline[0] - roundOutline.shape[0]) <= 3,
+		JSON.stringify(roundOutline)
+	)
+	check(
+		'bounds: text with no rule keeps its own tight outline',
+		freeOutline && Math.abs(freeOutline.outline[0] - freeOutline.shape[0]) <= 3,
+		JSON.stringify(freeOutline)
+	)
+
 	check('live editing raised no page errors', pageErrors.length === 0, pageErrors[0] ?? '')
 	await page.close()
 }

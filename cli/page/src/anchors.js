@@ -754,6 +754,52 @@ export function anchorHandlePoints(editor, shape, parent = null) {
 	}
 }
 
+/**
+ * The box a rule gives a shape, when that is not the box the shape draws in.
+ *
+ * Most shapes are simply set to the size their rule works out, so the two are
+ * the same thing and this returns null. Some cannot be:
+ *
+ *  - scaled text is drawn as a uniformly scaled picture of its design layout,
+ *    so it keeps its proportions and sits inside its box by pivot rather than
+ *    filling it
+ *  - a note is a fixed square, and a group is whatever its contents span, so a
+ *    rule can place either but not size it
+ *  - an axis with no extent, such as the height of a straight line, cannot be
+ *    scaled into one
+ *
+ * For those, the rule is doing something real that the drawn shape does not
+ * show, and the canvas has nothing to point at. Returned in the PARENT's
+ * coordinates, like the handle points; null when the shape has no rule, no
+ * parent, a malformed rule, or a box that already matches what it draws.
+ */
+export function anchorLayoutBox(editor, shape, parent = null) {
+	const rule = ruleOf(shape)
+	const container = parent ?? anchorParent(editor, shape)
+	if (!rule || !container) return null
+	let run
+	try {
+		run = solveAxes(editor, shape, rule, container)
+	} catch {
+		return null
+	}
+	if (!run || (!run.solved.x && !run.solved.y)) return null
+	const { solved } = run
+	const drawn = relativeBox(editor, shape, container)
+	const box = {
+		x: solved.x ? solved.x.pos : drawn.x,
+		y: solved.y ? solved.y.pos : drawn.y,
+		w: solved.x ? solved.x.size : drawn.w,
+		h: solved.y ? solved.y.size : drawn.h,
+	}
+	const same =
+		Math.abs(box.x - drawn.x) < 0.5 &&
+		Math.abs(box.y - drawn.y) < 0.5 &&
+		Math.abs(box.w - drawn.w) < 0.5 &&
+		Math.abs(box.h - drawn.h) < 0.5
+	return same ? null : box
+}
+
 /** Fractions a handle settles onto when it is dropped near one, unless precise. */
 const HANDLE_STOPS = [0, 0.5, 1]
 const HANDLE_SNAP_PX = 6

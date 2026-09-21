@@ -21,6 +21,7 @@ import {
 } from '../../lib/custom-slots.mjs'
 import {
 	anchorHandlePoints,
+	anchorLayoutBox,
 	anchorParent,
 	axisSpec,
 	handSizableAxes,
@@ -855,6 +856,36 @@ function withAnchorHandles(Util) {
 				{ id: CLAW_ANCHOR_HANDLE, type: 'vertex', index: 'a0', x: a.x, y: a.y },
 				{ id: CLAW_PIVOT_HANDLE, type: 'vertex', index: 'a1', x: v.x, y: v.y },
 			]
+		}
+		/**
+		 * Outline the box the RULE gives the shape, when that is not the box the
+		 * shape draws in.
+		 *
+		 * Selecting a box with a rule shows its rule: the outline is the shape,
+		 * and it grows with the screen. Selecting text showed the glyphs instead,
+		 * which is a box the rule never mentions - a full-width label looked like
+		 * a small one sitting in the wrong place, and its own pivot handle sat
+		 * off in space with nothing to belong to. Drawing the rule's box puts
+		 * text, notes and the rest on the same footing as everything else.
+		 *
+		 * Only the outline changes. What the shape IS - its geometry, what it
+		 * hit-tests as, what the resolver measures - is untouched, which matters
+		 * because the resolver reads those to work the rule out in the first
+		 * place.
+		 */
+		getIndicatorPath(shape) {
+			const editor = this.editor
+			const parent = anchorParent(editor, shape)
+			const box = parent ? anchorLayoutBox(editor, shape, parent) : null
+			if (!box) return super.getIndicatorPath(shape)
+			const transform = editor.getShapePageTransform(parent.id)
+			const toLocal = (x, y) =>
+				editor.getPointInShapeSpace(shape, TL.Mat.applyToPoint(transform, { x, y }))
+			const a = toLocal(box.x, box.y)
+			const b = toLocal(box.x + box.w, box.y + box.h)
+			const path = new Path2D()
+			path.rect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.abs(b.x - a.x), Math.abs(b.y - a.y))
+			return path
 		}
 		onHandleDrag(shape, info) {
 			const which =

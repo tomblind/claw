@@ -301,6 +301,13 @@ stay inside the height when there is not, keeping a 20px margin.
   promise the presets make, so what changes is how the box moves when the
   screen does. A handle settles onto 0, a half or 1 when dropped within a few
   pixels of one; hold alt to drop it exactly where the pointer is.
+- **The outline round a selected shape is the box its RULE gives it**, which
+  for most shapes is simply the shape. Where the two differ - scaled text sits
+  inside its box rather than filling it, a note is a fixed square, a group is
+  whatever its contents span - the outline shows the rule's box, so a
+  full-width label looks full-width and its pivot handle has something to sit
+  on. Only the outline: what the shape is, and what it hit-tests as, are
+  unchanged.
 - **Presets write every number from what is already drawn**, so place a shape
   by eye and then say how it behaves: `fill` (+`inset`), `fixed` (keep the
   size, pin to the nearest edge), `center`, `stretch-x`, `stretch-y`,
