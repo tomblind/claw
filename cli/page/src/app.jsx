@@ -857,36 +857,6 @@ function withAnchorHandles(Util) {
 				{ id: CLAW_PIVOT_HANDLE, type: 'vertex', index: 'a1', x: v.x, y: v.y },
 			]
 		}
-		/**
-		 * Outline the box the RULE gives the shape, when that is not the box the
-		 * shape draws in.
-		 *
-		 * Selecting a box with a rule shows its rule: the outline is the shape,
-		 * and it grows with the screen. Selecting text showed the glyphs instead,
-		 * which is a box the rule never mentions - a full-width label looked like
-		 * a small one sitting in the wrong place, and its own pivot handle sat
-		 * off in space with nothing to belong to. Drawing the rule's box puts
-		 * text, notes and the rest on the same footing as everything else.
-		 *
-		 * Only the outline changes. What the shape IS - its geometry, what it
-		 * hit-tests as, what the resolver measures - is untouched, which matters
-		 * because the resolver reads those to work the rule out in the first
-		 * place.
-		 */
-		getIndicatorPath(shape) {
-			const editor = this.editor
-			const parent = anchorParent(editor, shape)
-			const box = parent ? anchorLayoutBox(editor, shape, parent) : null
-			if (!box) return super.getIndicatorPath(shape)
-			const transform = editor.getShapePageTransform(parent.id)
-			const toLocal = (x, y) =>
-				editor.getPointInShapeSpace(shape, TL.Mat.applyToPoint(transform, { x, y }))
-			const a = toLocal(box.x, box.y)
-			const b = toLocal(box.x + box.w, box.y + box.h)
-			const path = new Path2D()
-			path.rect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.abs(b.x - a.x), Math.abs(b.y - a.y))
-			return path
-		}
 		onHandleDrag(shape, info) {
 			const which =
 				info.handle?.id === CLAW_ANCHOR_HANDLE
@@ -1051,9 +1021,87 @@ function ClawHandleOverlayUtil(Base) {
 	}
 }
 
-const CLAW_OVERLAY_UTILS = TL.ShapeHandleOverlayUtil
-	? [ClawHandleOverlayUtil(TL.ShapeHandleOverlayUtil)]
-	: []
+/**
+ * Outline the box the RULE gives a shape, when that is not the box the shape
+ * draws in.
+ *
+ * Selecting a box with a rule shows its rule: the outline is the shape, and it
+ * grows with the screen. Selecting text showed the glyphs instead, which is a
+ * box the rule never mentions - a full-width label looked like a small one in
+ * the wrong place, and its own pivot handle sat off in space with nothing to
+ * belong to. See anchorLayoutBox for which shapes this covers and why.
+ *
+ * Drawn here rather than through the shape util's getIndicatorPath, which is
+ * the obvious place and does not work: tldraw caches that path per shape and
+ * only recomputes it when the shape's `props` change. A rule lives in `meta`,
+ * and a hand move rewrites the rule there without touching props, so the cache
+ * would keep answering with the rule from before the drag - the outline stayed
+ * where the shape used to be. An overlay is repainted from live state every
+ * frame, so there is nothing to go stale.
+ *
+ * Shapes whose box already matches their rule are handed straight back to
+ * tldraw, which keeps their own outline exactly: a rounded box stays rounded.
+ */
+function ClawIndicatorOverlayUtil(Base) {
+	return class extends Base {
+		/** The rule's box in page space, for a shape that draws a different one. */
+		layoutPath(id) {
+			const editor = this.editor
+			const shape = editor.getShape(id)
+			if (!shape || shape.isLocked) return null
+			const parent = anchorParent(editor, shape)
+			const box = parent ? anchorLayoutBox(editor, shape, parent) : null
+			if (!box) return null
+			const transform = editor.getShapePageTransform(parent.id)
+			if (!transform) return null
+			const at = (x, y) => TL.Mat.applyToPoint(transform, { x, y })
+			const a = at(box.x, box.y)
+			const b = at(box.x + box.w, box.y + box.h)
+			const path = new Path2D()
+			path.rect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.abs(b.x - a.x), Math.abs(b.y - a.y))
+			return path
+		}
+		render(ctx, overlays) {
+			const overlay = overlays[0]
+			if (!overlay) return
+			const editor = this.editor
+			const { idsToDisplay = [], hintingShapeIds = [] } = overlay.props ?? {}
+			const mine = new Map()
+			const split = (ids) => {
+				const rest = []
+				for (const id of ids) {
+					const path = this.layoutPath(id)
+					if (path) mine.set(id, path)
+					else rest.push(id)
+				}
+				return rest
+			}
+			const restDisplay = split(idsToDisplay)
+			const restHinting = split(hintingShapeIds)
+			// everything ordinary stays tldraw's, drawn exactly as before
+			super.render(ctx, [
+				{ ...overlay, props: { ...overlay.props, idsToDisplay: restDisplay, hintingShapeIds: restHinting } },
+			])
+			if (!mine.size) return
+			const zoom = editor.getZoomLevel()
+			ctx.save()
+			ctx.lineCap = 'round'
+			ctx.lineJoin = 'round'
+			ctx.strokeStyle = editor.getCurrentTheme().colors[editor.getColorMode()].selectionStroke
+			for (const [id, path] of mine) {
+				ctx.lineWidth =
+					(hintingShapeIds.includes(id) ? this.options.hintedLineWidth : this.options.lineWidth) / zoom
+				ctx.stroke(path)
+			}
+			ctx.restore()
+		}
+	}
+}
+
+const CLAW_OVERLAY_UTILS = [
+	...(TL.ShapeHandleOverlayUtil ? [ClawHandleOverlayUtil(TL.ShapeHandleOverlayUtil)] : []),
+	...(TL.ShapeIndicatorOverlayUtil ? [ClawIndicatorOverlayUtil(TL.ShapeIndicatorOverlayUtil)] : []),
+]
 
 const CLAW_SHAPE_UTILS = [
 	withAnchorHandles(withAnchorLock(withClawGradientExport(withClawTextOutline(TL.TextShapeUtil)))),
