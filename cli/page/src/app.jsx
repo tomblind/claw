@@ -618,6 +618,7 @@ function onMount(editor) {
 		installInsecureClipboardShim(editor)
 		ensureStaticCss()
 		applyClawStyleDefaults(editor)
+		installGroupAnchorHandles(editor)
 		if (isSmoothText()) editor.getContainer()?.classList.add('claw-smooth-text')
 		applyClawTheme(editor)
 		// live retheme: a `theme` op lands in document meta and every connected
@@ -878,6 +879,27 @@ function withAnchorHandles(Util) {
 			return { meta: { ...(shape.meta ?? {}), clawAnchor: next } }
 		}
 	}
+}
+
+/**
+ * Give groups the anchor and pivot handles too.
+ *
+ * tldraw treats "group" as a core type and refuses a replacement util for it,
+ * so withAnchorHandles cannot be passed in through shapeUtils the way it is
+ * for every other shape. Instead the editor's own group util has the two
+ * methods borrowed onto it once it exists. `super` inside them is bound to
+ * the class they were written against, so calling them with the group util
+ * as `this` reaches GroupShapeUtil's own methods exactly as a subclass would.
+ *
+ * Must run before anything asks for a group's handles, since tldraw caches
+ * them per shape.
+ */
+function installGroupAnchorHandles(editor) {
+	const util = editor.getShapeUtil('group')
+	if (!util) return
+	const proto = withAnchorHandles(util.constructor).prototype
+	util.getHandles = proto.getHandles
+	util.onHandleDrag = proto.onHandleDrag
 }
 
 /**
@@ -1149,7 +1171,9 @@ const CLAW_SHAPE_UTILS = [
 	withAnchorHandles(TL.ImageShapeUtil),
 	withAnchorHandles(TL.NoteShapeUtil),
 	// no group util here: tldraw treats "group" as a core type and refuses a
-	// replacement. A group keeps its handles, which is harmless, because
+	// replacement. Its anchor and pivot handles are added after mount instead
+	// (installGroupAnchorHandles). A group keeps its resize handles, which is
+	// harmless, because
 	// resizing one scales its CHILDREN rather than the group, and a child
 	// carrying a rule has the size change on any derived axis refused by the
 	// store guard.

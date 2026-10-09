@@ -1853,6 +1853,73 @@ const browser = await chromium.launch({ executablePath: findBrowser(), headless:
 		otherTypes.Nt?.handles.includes('top') && otherTypes.Nt?.handles.includes('bottom'),
 		JSON.stringify(otherTypes.Nt)
 	)
+	// A group cannot take a replacement util (tldraw treats it as core), so its
+	// handles are added after mount. Drags the anchor with the real pointer.
+	const groupPts = await page.evaluate(async () => {
+		const ed = window.__editor
+		await window.host.applyOps([
+			{ add_screen: { name: 'GrpHandles', at: { x: 1200, y: 2000 }, size: { w: 400, h: 400 } } },
+			{ add: { screen: 'GrpHandles', kind: 'box', at: { x: 40, y: 40 }, size: { w: 80, h: 60 }, name: 'GhA' } },
+			{ add: { screen: 'GrpHandles', kind: 'box', at: { x: 140, y: 40 }, size: { w: 80, h: 60 }, name: 'GhB' } },
+		])
+		const find = (n) => ed.getCurrentPageShapes().find((s) => s.meta?.clawName === n)
+		const f = ed.getCurrentPageShapes().find((s) => s.props?.name === 'GrpHandles')
+		ed.select(find('GhA').id, find('GhB').id)
+		ed.groupShapes(ed.getSelectedShapeIds())
+		const gid = ed.getShape(find('GhA').id).parentId
+		await window.host.applyOps([{ anchor: { id: gid.slice(6), preset: 'fixed' } }])
+		const g = ed.getShape(gid)
+		if (!g?.meta?.clawAnchor || !f) return null
+		ed.select(g.id)
+		const fb = ed.getShapePageBounds(f.id)
+		// centred at full size, so the frame's corner is clear of the toolbars
+		ed.setCamera({ x: 0, y: 0, z: 1 }, { immediate: true })
+		ed.centerOnPoint(fb.center, { immediate: true })
+		const handles = ed.getShapeHandles(g) ?? []
+		const h = handles.find((x) => x.id === 'claw-anchor')
+		const from = h && ed.pageToScreen(ed.getShapePageTransform(g.id).applyToPoint(h))
+		const to = ed.pageToScreen({ x: fb.x + fb.w / 2, y: fb.y + fb.h / 2 })
+		const b = ed.getShapePageBounds(g.id)
+		return {
+			id: g.id,
+			handles: handles.map((x) => x.id),
+			from: from && { x: from.x, y: from.y },
+			to: { x: to.x, y: to.y },
+			box: { x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.w), h: Math.round(b.h) },
+		}
+	})
+	check(
+		'handles: a group with a rule offers an anchor and a pivot handle',
+		groupPts?.handles.includes('claw-anchor') && groupPts?.handles.includes('claw-pivot'),
+		JSON.stringify(groupPts?.handles)
+	)
+	if (groupPts?.from) {
+		await page.waitForTimeout(300)
+		await page.mouse.move(groupPts.from.x, groupPts.from.y)
+		await page.waitForTimeout(150)
+		await page.mouse.down()
+		await page.mouse.move((groupPts.from.x + groupPts.to.x) / 2, (groupPts.from.y + groupPts.to.y) / 2, { steps: 8 })
+		await page.mouse.move(groupPts.to.x, groupPts.to.y, { steps: 8 })
+		await page.mouse.up()
+		await page.waitForTimeout(400)
+	}
+	const groupAfter = await page.evaluate((id) => {
+		const ed = window.__editor
+		const g = id && ed.getShape(id)
+		if (!g) return null
+		const b = ed.getShapePageBounds(id)
+		return {
+			anchor: { x: g.meta.clawAnchor.x.anchor, y: g.meta.clawAnchor.y.anchor },
+			box: { x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.w), h: Math.round(b.h) },
+		}
+	}, groupPts?.id)
+	check(
+		"handles: dragging a group's anchor moves the anchor and leaves the group where it was",
+		groupAfter?.anchor.x === 0.5 &&
+			groupAfter?.anchor.y === 0.5 &&
+			JSON.stringify(groupAfter?.box) === JSON.stringify(groupPts?.box),
+		JSON.stringify({ before: groupPts?.box, after: groupAfter })
+	)
 
 	// Insert character. The page loads off disk here, where a fetch cannot reach
 	// the core that serves the table, so the table is handed over directly - the
